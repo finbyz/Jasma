@@ -6,16 +6,16 @@
  "engine": "InnoDB",
  "field_order": [
   "item_group",
+  "status",
   "item",
   "remarks",
   "column_break_cu3v",
-  "length",
-  "width",
-  "capping",
-  "purchase_receipt",
-  "purchase_receipt_item",
+  "reference_type",
+  "reference_name",
+  "reference_item",
   "section_break_ov20",
-  "qc_report_parameter"
+  "qc_report_parameter",
+  "amended_from"
  ],
  "fields": [
   {
@@ -54,41 +54,48 @@
    "options": "QC Report Parameter"
   },
   {
-   "fieldname": "length",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "Length"
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "\nAccepted\nRejected"
   },
   {
-   "fieldname": "width",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "Width"
-  },
-  {
-   "fieldname": "capping",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "Capping"
-  },
-  {
-   "fieldname": "purchase_receipt_item",
-   "fieldtype": "Data",
-   "label": "Purchase Receipt Item",
-   "read_only": 1
-  },
-  {
-   "fieldname": "purchase_receipt",
+   "fieldname": "reference_type",
    "fieldtype": "Link",
-   "label": "Purchase Receipt ",
-   "options": "Purchase Receipt",
+   "label": "Reference Type",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "reference_name",
+   "fieldtype": "Dynamic Link",
+   "in_global_search": 1,
+   "in_list_view": 1,
+   "label": "Reference Name",
+   "options": "reference_type"
+  },
+  {
+   "fieldname": "reference_item",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Reference Item",
    "read_only": 1
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "no_copy": 1,
+   "options": "QC Report",
+   "print_hide": 1,
+   "read_only": 1,
+   "search_index": 1
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
+ "is_submittable": 1,
  "links": [],
- "modified": "2026-03-19 16:53:28.199188",
+ "modified": "2026-03-27 15:14:26.871077",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "QC Report",

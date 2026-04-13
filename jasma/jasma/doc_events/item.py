@@ -1,3 +1,4 @@
+
 import frappe
 
 def validate(self,method):

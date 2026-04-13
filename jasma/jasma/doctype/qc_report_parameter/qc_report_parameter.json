@@ -6,48 +6,59 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
-  "qc_report",
-  "length",
-  "width",
-  "capping"
+  "description",
+  "status",
+  "column_break_zyuz",
+  "jasma_report_check",
+  "vendor_report_check",
+  "third_party_report_check"
  ],
  "fields": [
   {
-   "fetch_from": "qc_report.length",
-   "fieldname": "length",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "Length"
-  },
-  {
-   "fetch_from": "qc_report.width",
-   "fieldname": "width",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "in_standard_filter": 1,
-   "label": "Width"
-  },
-  {
-   "fetch_from": "qc_report.capping",
-   "fieldname": "capping",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "in_standard_filter": 1,
-   "label": "Capping"
-  },
-  {
-   "fieldname": "qc_report",
+   "fieldname": "description",
    "fieldtype": "Link",
    "in_list_view": 1,
-   "label": "QC Report",
-   "options": "QC Report"
+   "label": "QC Parameter",
+   "options": "QC Parameter"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "\nYes\nNo"
+  },
+  {
+   "default": "0",
+   "fieldname": "jasma_report_check",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Jasma Report Check"
+  },
+  {
+   "fieldname": "column_break_zyuz",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "fieldname": "vendor_report_check",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Vendor Report Check"
+  },
+  {
+   "default": "0",
+   "fieldname": "third_party_report_check",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Third Party Report Check"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-03-13 12:16:09.890582",
+ "modified": "2026-04-06 10:17:39.626540",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "QC Report Parameter",

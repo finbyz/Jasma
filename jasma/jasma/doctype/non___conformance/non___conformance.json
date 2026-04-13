@@ -1,0 +1,188 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "NC-.YYYY.-.#####",
+ "creation": "2026-03-30 14:45:03.774257",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_break_s4qn",
+  "amended_from",
+  "grn_no",
+  "po_reference_no",
+  "product_name",
+  "product_drawing_no",
+  "column_break_ubtn",
+  "grn_date",
+  "ao_reference_no",
+  "jasma_part_code",
+  "product_marking_if_any",
+  "warehouse",
+  "section_break_vxrj",
+  "nc_detection_location",
+  "upload_attechment",
+  "column_break_zqwx",
+  "nc_detection_inspection_stage",
+  "qc_report",
+  "section_break_lorh",
+  "nc_analysis",
+  "nc_disposal",
+  "corrective_action",
+  "preventive_action"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_break_s4qn",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "no_copy": 1,
+   "options": "Non - Conformance",
+   "print_hide": 1,
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "grn_no",
+   "fieldtype": "Link",
+   "label": "GRN No",
+   "options": "Purchase Receipt"
+  },
+  {
+   "fieldname": "po_reference_no",
+   "fieldtype": "Link",
+   "label": "PO Reference No",
+   "options": "Purchase Order"
+  },
+  {
+   "fieldname": "column_break_ubtn",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "grn_date",
+   "fieldtype": "Date",
+   "label": "GRN Date"
+  },
+  {
+   "fieldname": "ao_reference_no",
+   "fieldtype": "Data",
+   "label": "AO Reference No"
+  },
+  {
+   "fieldname": "product_name",
+   "fieldtype": "Link",
+   "label": "Product Name",
+   "options": "Item"
+  },
+  {
+   "fieldname": "product_drawing_no",
+   "fieldtype": "Data",
+   "label": "Product Drawing No"
+  },
+  {
+   "fieldname": "jasma_part_code",
+   "fieldtype": "Data",
+   "label": "Jasma Part Code"
+  },
+  {
+   "fieldname": "product_marking_if_any",
+   "fieldtype": "Data",
+   "label": "Product Marking if any"
+  },
+  {
+   "fieldname": "warehouse",
+   "fieldtype": "Link",
+   "label": "Warehouse",
+   "options": "Warehouse"
+  },
+  {
+   "fieldname": "section_break_vxrj",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "nc_detection_location",
+   "fieldtype": "Select",
+   "label": "NC detection location",
+   "options": "\nCustomer\nSupplier\nJasma"
+  },
+  {
+   "fieldname": "column_break_zqwx",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "nc_detection_inspection_stage",
+   "fieldtype": "Select",
+   "label": "NC detection Inspection Stage ",
+   "options": "\nFinal\nIn process\nTPIA\nTransport"
+  },
+  {
+   "fieldname": "upload_attechment",
+   "fieldtype": "Attach",
+   "label": "Upload Attechments"
+  },
+  {
+   "fieldname": "section_break_lorh",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "nc_analysis",
+   "fieldtype": "Text",
+   "label": "NC Analysis"
+  },
+  {
+   "fieldname": "nc_disposal",
+   "fieldtype": "Text",
+   "label": "NC disposal"
+  },
+  {
+   "fieldname": "corrective_action",
+   "fieldtype": "Text",
+   "label": "Corrective Action"
+  },
+  {
+   "fieldname": "preventive_action",
+   "fieldtype": "Text",
+   "label": "Preventive Action"
+  },
+  {
+   "fieldname": "qc_report",
+   "fieldtype": "Link",
+   "label": "QC Report",
+   "options": "QC Report",
+   "read_only": 1
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-03-30 15:39:50.204691",
+ "modified_by": "Administrator",
+ "module": "Jasma",
+ "name": "Non - Conformance",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

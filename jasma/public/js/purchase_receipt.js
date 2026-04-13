@@ -110,7 +110,7 @@ function make_qc_report(frm) {
 		args: {
 			doctype: "QC Report",
 			filters: {
-				purchase_receipt: frm.doc.name
+				reference_type: frm.doc.name
 			},
 			fields: ["item"]
 		},
