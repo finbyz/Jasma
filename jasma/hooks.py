@@ -47,6 +47,8 @@ app_license = "mit"
 doctype_js = {
 	"Stock Entry": "public/js/stock_entry.js",
 	"Purchase Receipt": "public/js/purchase_receipt.js",
+	"Material Request": "public/js/material_request.js",
+	"Production Plan": "public/js/production_plan.js",
 }
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
@@ -143,7 +145,10 @@ doc_events = {
 	},
 	"Purchase Receipt": {
 		"before_submit": "jasma.jasma.doc_events.purchase_reciept.validate_qc_report"
-	}
+	},
+	"Production Plan": {
+        "on_submit": "jasma.jasma.doc_events.production_plan.create_mr_on_submit"
+    }
 }
 
 # Scheduled Tasks
