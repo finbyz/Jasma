@@ -9,6 +9,7 @@
   "section_break_s4qn",
   "amended_from",
   "grn_no",
+  "supplier_delivery_note",
   "po_reference_no",
   "product_name",
   "product_drawing_no",
@@ -23,6 +24,7 @@
   "upload_attechment",
   "column_break_zqwx",
   "nc_detection_inspection_stage",
+  "status",
   "qc_report",
   "section_break_lorh",
   "nc_analysis",
@@ -105,8 +107,10 @@
   {
    "fieldname": "nc_detection_location",
    "fieldtype": "Select",
+   "in_list_view": 1,
    "label": "NC detection location",
-   "options": "\nCustomer\nSupplier\nJasma"
+   "options": "\nCustomer\nSupplier\nJasma",
+   "reqd": 1
   },
   {
    "fieldname": "column_break_zqwx",
@@ -115,13 +119,15 @@
   {
    "fieldname": "nc_detection_inspection_stage",
    "fieldtype": "Select",
+   "in_list_view": 1,
    "label": "NC detection Inspection Stage ",
-   "options": "\nFinal\nIn process\nTPIA\nTransport"
+   "options": "\nFinal\nIn process\nTPIA\nTransport",
+   "reqd": 1
   },
   {
    "fieldname": "upload_attechment",
    "fieldtype": "Attach",
-   "label": "Upload Attechments"
+   "label": "Upload Attachments"
   },
   {
    "fieldname": "section_break_lorh",
@@ -130,17 +136,22 @@
   {
    "fieldname": "nc_analysis",
    "fieldtype": "Text",
-   "label": "NC Analysis"
+   "in_list_view": 1,
+   "label": "NC Analysis",
+   "reqd": 1
   },
   {
    "fieldname": "nc_disposal",
    "fieldtype": "Text",
-   "label": "NC disposal"
+   "in_list_view": 1,
+   "label": "NC disposal",
+   "reqd": 1
   },
   {
    "fieldname": "corrective_action",
    "fieldtype": "Text",
-   "label": "Corrective Action"
+   "label": "Corrective Action",
+   "reqd": 1
   },
   {
    "fieldname": "preventive_action",
@@ -153,13 +164,26 @@
    "label": "QC Report",
    "options": "QC Report",
    "read_only": 1
+  },
+  {
+   "fetch_from": "grn_no.supplier_delivery_note",
+   "fieldname": "supplier_delivery_note",
+   "fieldtype": "Data",
+   "label": "Supplier Delivery Note",
+   "read_only": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "\nOpen\nClose"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-03-30 15:39:50.204691",
+ "modified": "2026-04-17 16:47:04.698655",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "Non - Conformance",
