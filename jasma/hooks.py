@@ -151,7 +151,7 @@ doc_events = {
         "on_submit": "jasma.jasma.doc_events.production_plan.create_mr_on_submit"
     },
 	"Subcontracting Receipt": {
-		"before_submit": "jasma.jasma.doc_events.purchase_reciept.validate_qc_report"
+		"before_submit": "jasma.jasma.doc_events.subcontracting_reciept.validate_qc_report"
 	},
 }
 
