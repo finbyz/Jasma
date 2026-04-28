@@ -26,7 +26,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Status",
-   "options": "\nYes\nNo"
+   "options": "\nAccepted\nRejected\nAccepted Deviation"
   },
   {
    "default": "0",
@@ -58,7 +58,7 @@
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-04-06 10:17:39.626540",
+ "modified": "2026-04-28 12:21:10.081010",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "QC Report Parameter",

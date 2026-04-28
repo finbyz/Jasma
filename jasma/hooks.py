@@ -49,6 +49,7 @@ doctype_js = {
 	"Purchase Receipt": "public/js/purchase_receipt.js",
 	"Material Request": "public/js/material_request.js",
 	"Production Plan": "public/js/production_plan.js",
+	"Purchase Order": "public/js/purchase_order.js"
 }
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
@@ -148,7 +149,10 @@ doc_events = {
 	},
 	"Production Plan": {
         "on_submit": "jasma.jasma.doc_events.production_plan.create_mr_on_submit"
-    }
+    },
+	"Subcontracting Receipt": {
+		"before_submit": "jasma.jasma.doc_events.purchase_reciept.validate_qc_report"
+	},
 }
 
 # Scheduled Tasks

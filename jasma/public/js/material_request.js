@@ -24,6 +24,38 @@ frappe.ui.form.on('Material Request', {
                 });
 
             }, 'Create');
+
+           if (frm.doc.docstatus !== 1) return;
+
+        let has_bom_item = (frm.doc.items || []).some(row => row.bom_no);
+        if (!has_bom_item) return;
+
+        frm.add_custom_button('Production Plan', function () {
+
+            frappe.call({
+                method: "jasma.jasma.doc_events.material_request.create_production_plan_from_mr",
+                args: {
+                    material_request: frm.doc.name
+                },
+                callback: function (r) {
+
+                    if (r.message) {
+                        frappe.msgprint({
+                            title: "Success",
+                            message: `Production Plan Created: 
+                                <a href="/app/production-plan/${r.message}" target="_blank">${r.message}</a>`,
+                            indicator: "green"
+                        });
+
+                        // Open document
+                        frappe.set_route('Form', 'Production Plan', r.message);
+                    }
+                }
+            });
+
+        }, 'Create');
+
         }
+        
     }
 });

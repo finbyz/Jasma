@@ -52,5 +52,51 @@ def create_manufacture_mr(source_mr):
     return new_mr.name
 
 
+# your_app/your_module/api.py
+
+import frappe
+
+@frappe.whitelist()
+def create_production_plan_from_mr(material_request):
+    mr = frappe.get_doc("Material Request", material_request)
+
+    #  Check BOM items
+    items = []
+    for row in mr.items:
+        if row.bom_no:
+            items.append({
+                "item_code": row.item_code,
+                "bom_no": row.bom_no,
+                "planned_qty": row.qty,
+                "material_request_item": row.name,
+                "warehouse":row.warehouse
+            })
+
+    if not items:
+        frappe.throw("No items with BOM found")
+
+    #  Check if already exists
+    existing = frappe.get_all(
+        "Production Plan Item",
+        filters={"material_request_item": ["in", [i["material_request_item"] for i in items]]},
+        limit=1
+    )
+
+    if existing:
+        frappe.throw("Production Plan already exists for this Material Request")
+
+    #  Create Production Plan
+    pp = frappe.new_doc("Production Plan")
+    pp.get_items_from = "Material Request"
+    pp.material_request = material_request
+
+    for d in items:
+        pp.append("po_items", d)   # child table
+
+    pp.save()   #  SAVES IN DRAFT
+
+    return pp.name
+
+
 
 
