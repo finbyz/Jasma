@@ -74,6 +74,12 @@ function make_qc_report(frm) {
 						fieldname: "item_group",
 						label: __("Item Group"),
 						in_list_view: true
+					},
+					{
+						fieldtype: "Read Only",
+						fieldname: "received_quantity",
+						label: __("Received Quantity"),
+						in_list_view: true
 					}
 				]
 			}
@@ -123,7 +129,10 @@ function make_qc_report(frm) {
 						docname: item.name,
 						item_code: item.item_code,
 						item_name: item.item_name,
-						item_group: item.item_group
+						item_group: item.item_group,
+						received_quantity : item.received_qty,
+						purchase_order : item.purchase_order,
+						project : frm.doc.project
 					});
 				}
 			});

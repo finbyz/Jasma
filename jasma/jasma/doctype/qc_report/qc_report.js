@@ -27,14 +27,14 @@
 frappe.ui.form.on("QC Report", {
 
      before_submit(frm) {
-        if (!frm.doc.status) {
+        if (!frm.doc.qc_status) {
             frappe.throw("Status is Required");
         }
     },
     
     refresh(frm) {
         
-        if (frm.doc.docstatus === 1 && frm.doc.status !== "Accepted") {
+        if (frm.doc.docstatus === 1 && frm.doc.qc_status !== "Accepted") {
             
             frm.add_custom_button("Non - Conformance", function () {
 

@@ -33,7 +33,6 @@ import json
 def make_qc_report(docname, items):
 	if isinstance(items, str):
 		items = json.loads(items)
-
 	reports = []
 	skipped_items = []
 
@@ -58,7 +57,11 @@ def make_qc_report(docname, items):
 			"reference_name": docname,
 			"reference_item": item.get("docname"),
 			"item_group": item_doc.item_group,
-			"item": item.get("item_code")
+			"item": item.get("item_code"),
+			"received_quantity":item.get("received_quantity"),
+			"po_no":item.get("purchase_order"),
+			"so_no":item.get("subcontracting_order"),
+			"project":item.get("project")
 		})
 
 		if existing:

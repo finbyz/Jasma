@@ -6,16 +6,24 @@
  "engine": "InnoDB",
  "field_order": [
   "item_group",
-  "status",
+  "qc_status",
   "item",
   "remarks",
   "column_break_cu3v",
   "reference_type",
   "reference_name",
   "reference_item",
+  "po_no",
+  "project",
+  "so_no",
   "section_break_ov20",
   "qc_report_parameter",
-  "amended_from"
+  "amended_from",
+  "section_break_ttan",
+  "received_quantity",
+  "rejected_quantity",
+  "column_break_ebzi",
+  "accepted_quantity"
  ],
  "fields": [
   {
@@ -41,7 +49,8 @@
   {
    "fieldname": "remarks",
    "fieldtype": "Small Text",
-   "label": "Remarks"
+   "label": "Remarks",
+   "mandatory_depends_on": "eval:doc.qc_status != \"Accepted\""
   },
   {
    "fieldname": "section_break_ov20",
@@ -52,12 +61,6 @@
    "fieldtype": "Table",
    "label": "QC Report Parameter",
    "options": "QC Report Parameter"
-  },
-  {
-   "fieldname": "status",
-   "fieldtype": "Select",
-   "label": "Status",
-   "options": "\nAccepted\nRejected"
   },
   {
    "fieldname": "reference_type",
@@ -89,13 +92,65 @@
    "print_hide": 1,
    "read_only": 1,
    "search_index": 1
+  },
+  {
+   "fieldname": "qc_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "\nAccepted\nRejected\nAccepted Deviation"
+  },
+  {
+   "fieldname": "po_no",
+   "fieldtype": "Link",
+   "label": "PO No.",
+   "options": "Purchase Order",
+   "read_only": 1
+  },
+  {
+   "fieldname": "project",
+   "fieldtype": "Link",
+   "label": "AO No.",
+   "options": "Project",
+   "read_only": 1
+  },
+  {
+   "fieldname": "so_no",
+   "fieldtype": "Link",
+   "label": "SO No.",
+   "options": "Subcontracting Order",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_ttan",
+   "fieldtype": "Section Break"
+  },
+  {
+   "fieldname": "received_quantity",
+   "fieldtype": "Float",
+   "label": "Received Quantity",
+   "read_only": 1
+  },
+  {
+   "fieldname": "rejected_quantity",
+   "fieldtype": "Float",
+   "label": "Rejected Quantity"
+  },
+  {
+   "fieldname": "column_break_ebzi",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "accepted_quantity",
+   "fieldtype": "Float",
+   "label": "Accepted Quantity"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-03-27 15:14:26.871077",
+ "modified": "2026-05-05 17:00:57.646501",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "QC Report",

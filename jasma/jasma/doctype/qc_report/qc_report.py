@@ -3,7 +3,7 @@
 
 import frappe
 from frappe.model.document import Document
-
+from frappe.utils import flt
 
 # @frappe.whitelist()
 # def create_non_conformance(docname):
@@ -48,55 +48,71 @@ from frappe.model.document import Document
 
 @frappe.whitelist()
 def get_nc_data(docname):
-    qc = frappe.get_doc("QC Report", docname)
+	qc = frappe.get_doc("QC Report", docname)
 
-    #  Only check existence (optional)
-    existing_nc = frappe.db.exists("Non - Conformance", {
-        "qc_report": qc.name,
-        "docstatus": ["!=", 2]
-    })
+	#  Only check existence (optional)
+	existing_nc = frappe.db.exists("Non - Conformance", {
+		"qc_report": qc.name,
+		"docstatus": ["!=", 2]
+	})
 
-    if existing_nc:
-        frappe.throw("Non Conformance already created for this QC Report")
+	if existing_nc:
+		frappe.throw("Non Conformance already created for this QC Report")
 
-    #  Prepare data ONLY (no insert)
-    data = {
-        "qc_report": qc.name,
-        "reference_type": qc.reference_type,
-        "reference_name":qc.reference_name
-    }
+	#  Prepare data ONLY (no insert)
+	data = {
+		"qc_report": qc.name,
+		"reference_type": qc.reference_type,
+		"reference_name":qc.reference_name
+	}
 
-    if qc.item:
-        item = frappe.get_doc("Item", qc.item)
+	if qc.item:
+		item = frappe.get_doc("Item", qc.item)
 
-        data.update({
-            "product_name": item.name,
-            "jasma_part_code": item.item_code,
-            "product_drawing_no": item.drawing_1,
-            "ao_reference_no": item.aopo_reference
-        })
+		data.update({
+			"product_name": item.name,
+			"jasma_part_code": item.item_code,
+			"product_drawing_no": item.drawing_1,
+			"ao_reference_no": item.aopo_reference
+		})
 
-    if qc.reference_type == "Purchase Receipt":
-        pr = frappe.get_doc("Purchase Receipt", qc.reference_name)
+	if qc.reference_type == "Purchase Receipt":
+		pr = frappe.get_doc("Purchase Receipt", qc.reference_name)
 
-        data.update({
-            "grn_date": pr.posting_date,
-            "supplier": pr.supplier
-        })
+		data.update({
+			"grn_date": pr.posting_date,
+			"supplier": pr.supplier
+		})
 
-        for row in pr.items:
-            if row.item_code == qc.item:
-                data.update({
-                    "po_reference_no": row.purchase_order,
-                    "warehouse": row.warehouse
-                })
-                break
+		for row in pr.items:
+			if row.item_code == qc.item:
+				data.update({
+					"po_reference_no": row.purchase_order,
+					"warehouse": row.warehouse
+				})
+				break
 
-    return data
+	return data
 
 
 class QCReport(Document):
+        
 	def on_submit(self):
+		if flt(self.received_quantity) != (flt(self.accepted_quantity) + flt(self.rejected_quantity)):
+			frappe.throw("Received Quantity must be equal to Accepted Quantity + Rejected Quantity.")
+		if self.reference_item:
+			doc = frappe.get_doc(self.reference_type, self.reference_name)
+
+			for row in doc.items:
+				if self.reference_item == row.name:
+					row.rejected_qty = self.rejected_quantity
+					row.qty = self.accepted_quantity
+
+			doc.save(ignore_permissions=True)
+		else:
+			frappe.throw("Item Ref not found")
+   
+   
 		if not self.qc_report_parameter:
 			return
 
@@ -109,6 +125,6 @@ class QCReport(Document):
 				frappe.throw(
 					f"Row #{row.idx}: Please select at least one checkbox (Jasma / Vendor / Third Party Report)."
 				)
-
+		
 
 	
