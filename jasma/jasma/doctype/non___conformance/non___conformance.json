@@ -8,7 +8,8 @@
  "field_order": [
   "section_break_s4qn",
   "amended_from",
-  "grn_no",
+  "reference_type",
+  "reference_name",
   "supplier_delivery_note",
   "po_reference_no",
   "product_name",
@@ -46,12 +47,6 @@
    "print_hide": 1,
    "read_only": 1,
    "search_index": 1
-  },
-  {
-   "fieldname": "grn_no",
-   "fieldtype": "Link",
-   "label": "GRN No",
-   "options": "Purchase Receipt"
   },
   {
    "fieldname": "po_reference_no",
@@ -177,13 +172,27 @@
    "fieldtype": "Select",
    "label": "Status",
    "options": "\nOpen\nClose"
+  },
+  {
+   "fieldname": "reference_type",
+   "fieldtype": "Link",
+   "label": "Reference Type",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "reference_name",
+   "fieldtype": "Dynamic Link",
+   "in_global_search": 1,
+   "in_list_view": 1,
+   "label": "Reference Name",
+   "options": "reference_type"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-04-17 16:47:04.698655",
+ "modified": "2026-04-30 14:14:30.475346",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "Non - Conformance",

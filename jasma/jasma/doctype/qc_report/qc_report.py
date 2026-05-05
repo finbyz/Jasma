@@ -62,7 +62,8 @@ def get_nc_data(docname):
     #  Prepare data ONLY (no insert)
     data = {
         "qc_report": qc.name,
-        "grn_no": qc.reference_name
+        "reference_type": qc.reference_type,
+        "reference_name":qc.reference_name
     }
 
     if qc.item:

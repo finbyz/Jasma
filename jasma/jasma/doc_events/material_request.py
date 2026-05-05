@@ -85,17 +85,11 @@ def create_production_plan_from_mr(material_request):
     if existing:
         frappe.throw("Production Plan already exists for this Material Request")
 
-    #  Create Production Plan
-    pp = frappe.new_doc("Production Plan")
-    pp.get_items_from = "Material Request"
-    pp.material_request = material_request
-
-    for d in items:
-        pp.append("po_items", d)   # child table
-
-    pp.save()   #  SAVES IN DRAFT
-
-    return pp.name
+    return {
+        "get_items_from": "Material Request",
+        "material_request": material_request,
+        "po_items": items   # pass data to JS
+    }
 
 
 

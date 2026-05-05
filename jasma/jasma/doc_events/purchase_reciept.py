@@ -72,7 +72,7 @@ def make_qc_report(docname, items):
 		for row in item_doc.qc_report_parameter:
 			qc_report.append("qc_report_parameter", {
 				"description": row.description,
-				"status": row.status,
+				# "status": row.status,
 				"jasma_report_check":row.jasma_report_check,
 				"vendor_report_check":row.vendor_report_check,
 				"third_party_report_check":row.third_party_report_check
