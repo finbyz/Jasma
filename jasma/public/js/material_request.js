@@ -1,6 +1,6 @@
 frappe.ui.form.on('Material Request', {
 
-    onload: function(frm) {
+    onload: function (frm) {
         // check if MR is created from Sales Order
         if (frm.doc.items && frm.doc.items.length > 0) {
             if (frm.doc.items[0].sales_order) {
@@ -11,37 +11,11 @@ frappe.ui.form.on('Material Request', {
 
     refresh: function (frm) {
 
-        if (frm.doc.docstatus === 1) {
-
-            frm.add_custom_button('Material Request', function () {
-
-                frappe.call({
-                    method: 'jasma.jasma.doc_events.material_request.create_manufacture_mr',
-                    args: {
-                        source_mr: frm.doc.name
-                    },
-                    callback: function (r) {
-
-                        if (r.message) {
-                            frappe.msgprint({
-                                title: __('Success'),
-                                message: __('New Material Request Created: <a href="/app/material-request/' + r.message + '" target="_blank">' + r.message + '</a>'),
-                                indicator: 'green'
-                            });
-                        }
-
-                    }
-                });
-
-            }, 'Create');
-
-        }
-
         // =========================
         // PRODUCTION PLAN BUTTON
         // =========================
 
-        if (frm.doc.docstatus !== 1 ) return;
+        if (frm.doc.docstatus !== 1) return;
 
         let bom_items = (frm.doc.items || []).filter(row => row.bom_no);
         if (!bom_items.length) return;
@@ -51,65 +25,57 @@ frappe.ui.form.on('Material Request', {
             .filter(Boolean);
 
         frappe.call({
-    method: "frappe.client.get_list",
-    args: {
-        doctype: "Production Plan Item",
-        filters: {
-            material_request_item: ["in", mr_items]
-        },
-        fields: ["parent", "docstatus"],
-        limit_page_length: 50
-    },
-    callback: function (r) {
+            method: "jasma.jasma.doc_events.material_request.get_production_plan_items",
+            args: {
+                mr_items: mr_items
+            },
+            callback: function (r) {
 
-        let data = r.message || [];
+                let data = r.message || [];
 
-        let active_exists = false;
-        let cancelled_exists = false;
+                let active_exists = false;
+                let cancelled_exists = false;
 
-        data.forEach(d => {
-            if (d.docstatus === 2) {
-                cancelled_exists = true;
-            } else {
-                active_exists = true;
-            }
-        });
+                data.forEach(d => {
+                    if (d.docstatus === 2) {
+                        cancelled_exists = true;
+                    } else {
+                        active_exists = true;
+                    }
+                });
 
-        // ❌ ACTIVE exists → block button
-        if (active_exists) return;
+                //  ACTIVE exists → block button
+                if (active_exists) return;
 
-        // ❌ ONLY CANCELLED exists → show message but allow button
-        if (cancelled_exists) {
-            frm.dashboard.add_comment(
-                __("Previous Production Plan was Cancelled. You can create a new one."),
-                "blue",
-                true
-            );
-        }
+                //  ONLY CANCELLED exists → show message but allow button
+                if (cancelled_exists) {
+                    frm.dashboard.add_comment(
+                        __("Previous Production Plan was Cancelled. You can create a new one."),
+                        "blue",
+                        true
+                    );
+                }
 
 
                 frm.add_custom_button('Production Plan', function () {
+                    console.log("production plan button clicked")
 
                     frappe.new_doc('Production Plan', {}, (doc) => {
 
                         doc.get_items_from = "Material Request";
 
                         doc.material_requests = [];
+                        doc.project = frm.doc.project
 
-                        bom_items.forEach(row => {
+                        let mr_row = frappe.model.add_child(
+                            doc,
+                            "material_requests"
+                        );
 
-                            let mr_row = frappe.model.add_child(
-                                doc,
-                                "material_requests"
-                            );
+                        mr_row.material_request = frm.doc.name;
+                        mr_row.material_request_date = frappe.datetime.get_today();
 
-                            //  YOUR BLOCK (UNCHANGED)
-                            mr_row.material_request = frm.doc.name;
 
-                            //  SAFE DATE FORMAT (UNCHANGED)
-                            mr_row.material_request_date = frappe.datetime.get_today();
-
-                        });
 
                         doc.po_items = [];
 

@@ -92,5 +92,18 @@ def create_production_plan_from_mr(material_request):
     }
 
 
+@frappe.whitelist()
+def get_production_plan_items(mr_items):
+    if isinstance(mr_items, str):
+        mr_items = frappe.parse_json(mr_items)
 
+    return frappe.get_all(
+        "Production Plan Item",
+        filters={
+            "material_request_item": ["in", mr_items]
+        },
+        fields=["parent", "docstatus"],
+        limit_page_length=50,
+        ignore_permissions=True
+    )
 

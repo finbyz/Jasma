@@ -20,7 +20,20 @@ app_license = "mit"
 # 		"has_permission": "jasma.api.permission.has_app_permission"
 # 	}
 # ]
-
+fixtures = [
+    {
+        "dt": "Custom Field",
+        "filters": {
+            "module": ["in", ["Jasma"]]
+        },
+    },
+    {
+        "dt": "Property Setter",
+        "filters": {
+            "module": ["in", ["Jasma"]]
+        },
+    }
+]
 # Includes in <head>
 # ------------------
 
@@ -152,8 +165,18 @@ doc_events = {
 	"Production Plan": {
         "on_submit": "jasma.jasma.doc_events.production_plan.create_mr_on_submit"
     },
+	"Purchase Order": {
+        "on_submit": "jasma.jasma.doc_events.purchase_order.before_submit"
+    },
 	"Subcontracting Receipt": {
 		"before_submit": "jasma.jasma.doc_events.subcontracting_reciept.validate_qc_report"
+		# "before_save": "jasma.jasma.doc_events.subcontracting_reciept.validate_qc_report"
+	},
+ 	"Subcontracting Order": {
+		"before_submit": "jasma.jasma.doc_events.subcontracting_order.before_submit"
+	},
+  	"Stock Entry": {
+		"before_submit": "jasma.jasma.doc_events.stock_entry.validate_qc_report"
 	},
 }
 
@@ -194,9 +217,9 @@ doc_events = {
 # Overriding Methods
 # ------------------------------
 #
-# override_whitelisted_methods = {
-# 	"frappe.desk.doctype.event.event.get_events": "jasma.event.get_events"
-# }
+override_whitelisted_methods = {
+	"erpnext.selling.doctype.sales_order.sales_order.make_material_request": "jasma.jasma.ovveride.material_request.make_material_request"
+}
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
@@ -247,6 +270,9 @@ doc_events = {
 # 		"doctype": "{doctype_4}"
 # 	}
 # ]
+override_doctype_class = {
+    "Material Request": "jasma.jasma.ovveride.material_request.CustomMaterialRequest"
+}
 
 # Authentication and authorization
 # --------------------------------

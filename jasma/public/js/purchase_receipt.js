@@ -34,6 +34,30 @@ frappe.ui.form.on("Purchase Receipt", {
 				);
 			}
 		}, 500);
+	},
+	supplier(frm) {
+		if (frm.doc.supplier) {
+
+			frappe.db.get_doc("Supplier", frm.doc.supplier)
+				.then((supplier) => {
+
+					// Accepted Warehouse
+					if (supplier.accepted_warehouse) {
+						frm.set_value(
+							"set_warehouse",
+							supplier.accepted_warehouse
+						);
+					}
+
+					// Rejected Warehouse
+					if (supplier.rejected_warehoue) {
+						frm.set_value(
+							"rejected_warehouse",
+							supplier.rejected_warehoue
+						);
+					}
+				});
+		}
 	}
 });
 

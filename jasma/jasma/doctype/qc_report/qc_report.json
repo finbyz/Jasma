@@ -8,6 +8,7 @@
   "item_group",
   "qc_status",
   "item",
+  "item_name",
   "remarks",
   "column_break_cu3v",
   "reference_type",
@@ -144,13 +145,19 @@
    "fieldname": "accepted_quantity",
    "fieldtype": "Float",
    "label": "Accepted Quantity"
+  },
+  {
+   "fetch_from": "item.item_name",
+   "fieldname": "item_name",
+   "fieldtype": "Data",
+   "label": "Item Name"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-05-05 17:00:57.646501",
+ "modified": "2026-05-09 11:35:45.774786",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "QC Report",

@@ -1,12 +1,49 @@
 import frappe
 import json
-from erpnext.subcontracting.doctype.subcontracting_receipt.subcontracting_receipt import SubcontractingReceipt
+
 
 def validate_qc_report(self, method=None):
-    SubcontractingReceipt.validate_available_qty_for_consumption(self)
 
+	# Only for Manufacture Stock Entry
+	if self.stock_entry_type != "Manufacture":
+		return
 
+	missing_items = frappe.db.sql("""
+		SELECT sed.item_code
+		FROM `tabStock Entry Detail` sed
+		INNER JOIN `tabItem` i ON i.name = sed.item_code
 
+		LEFT JOIN `tabQC Report` qr
+			ON qr.reference_item = sed.name
+			AND qr.reference_name = sed.parent
+			AND qr.reference_type = 'Stock Entry'
+			AND qr.docstatus = 1
+
+		WHERE sed.parent = %s
+
+		-- Target Warehouse must be set
+		AND IFNULL(sed.t_warehouse, '') != ''
+
+		-- QC Parameters available in Item master
+		AND EXISTS (
+			SELECT 1
+			FROM `tabQC Report Parameter` qrp
+			WHERE qrp.parent = i.name
+		)
+
+		AND qr.name IS NULL
+
+	""", self.name, as_dict=True)
+
+	if missing_items:
+
+		items = ", ".join([d.item_code for d in missing_items])
+
+		frappe.throw(
+			f"QC Report must be Created for Items: <b>{items}</b>"
+		)
+  
+  
 
 @frappe.whitelist()
 def make_qc_report(docname, items):
@@ -20,7 +57,7 @@ def make_qc_report(docname, items):
 		existing = frappe.db.exists(
 			"QC Report",
 			{
-				"reference_type": "Subcontracting Receipt",
+				"reference_type": "Stock Entry",
 				"reference_name": docname,
 				"reference_item": item.get("docname")
 			}
@@ -32,14 +69,13 @@ def make_qc_report(docname, items):
 
 		qc_report = frappe.get_doc({
 			"doctype": "QC Report",
-			"reference_type": "Subcontracting Receipt",
+			"reference_type": "Stock Entry",
 			"reference_name": docname,
 			"reference_item": item.get("docname"),
 			"item_group": item_doc.item_group,
 			"item": item.get("item_code"),
-			"received_quantity":item.get("received_quantity"),
+			"received_quantity":item.get("qty"),
 			"po_no":item.get("purchase_order"),
-			"so_no":item.get("subcontracting_order"),
 			"project":item.get("project")
 		})
 
@@ -60,30 +96,3 @@ def make_qc_report(docname, items):
 		reports.append(qc_report.name)
 
 	return reports
-
-
-def validate_qc_report(self, method=None):
-	missing_items = frappe.db.sql("""
-		SELECT pri.item_code
-		FROM `tabSubcontracting Receipt Item` pri
-		INNER JOIN `tabItem` i ON i.name = pri.item_code
-		LEFT JOIN `tabQC Report` qr
-			ON qr.reference_item = pri.name
-			AND qr.reference_name = pri.parent
-			AND qr.reference_type = 'Subcontracting Receipt'
-			AND qr.docstatus = 1
-		WHERE pri.parent = %s
-		AND EXISTS (
-			SELECT 1
-			FROM `tabQC Report Parameter` qrp
-			WHERE qrp.parent = i.name
-		)
-		AND qr.name IS NULL
-	""", self.name, as_dict=True)
-
-	if missing_items:
-		items = ", ".join([d.item_code for d in missing_items])
-
-		frappe.throw(
-			f"QC Report must be Created for items: <b>{items}</b>"
-		)
