@@ -53,6 +53,9 @@ frappe.ui.form.on('Sales Invoice Packing Slip', {
     width: calculate_cbm,
     height: calculate_cbm,
 
+    box_from: calculate_total_box,
+    box_to: calculate_total_box,
+
     qty: function(frm, cdt, cdn) {
 
         let row = locals[cdt][cdn];
@@ -115,4 +118,96 @@ function calculate_cbm(frm, cdt, cdn) {
     row.cbm = (l * w * h) / 1000000000;
 
     frm.refresh_field('packing_slip');
+}
+
+
+frappe.ui.form.on('Sales Invoice Packing Slip', {
+    length: calculate_cbm,
+    width: calculate_cbm,
+    height: calculate_cbm,
+
+    box_from: calculate_total_box,
+    box_to: calculate_total_box,
+
+    qty: function(frm, cdt, cdn) {
+
+        let row = locals[cdt][cdn];
+
+        // 1. TOTAL VALIDATION
+        let item_total = 0;
+        let packing_total = 0;
+
+        (frm.doc.items || []).forEach(d => {
+            item_total += flt(d.qty);
+        });
+
+        (frm.doc.packing_slip || []).forEach(d => {
+            packing_total += flt(d.qty);
+        });
+
+        if (packing_total > item_total) {
+            frappe.msgprint("Packing Qty cannot exceed Item Total Qty");
+            frappe.model.set_value(cdt, cdn, 'qty', 0);
+            return;
+        }
+
+        // 2. ITEM-WISE VALIDATION
+        if (row.item_code) {
+
+            let item_qty = 0;
+            let packing_item_qty = 0;
+
+            (frm.doc.items || []).forEach(d => {
+                if (d.item_code === row.item_code) {
+                    item_qty += flt(d.qty);
+                }
+            });
+
+            (frm.doc.packing_slip || []).forEach(d => {
+                if (d.item_code === row.item_code) {
+                    packing_item_qty += flt(d.qty);
+                }
+            });
+
+            if (packing_item_qty > item_qty) {
+                frappe.msgprint(
+                    `Packing Qty for Item ${row.item_code} cannot exceed ${item_qty}`
+                );
+
+                frappe.model.set_value(cdt, cdn, 'qty', 0);
+            }
+        }
+    }
+});
+
+function calculate_cbm(frm, cdt, cdn) {
+
+    let row = locals[cdt][cdn];
+
+    let l = row.length || 0;
+    let w = row.width || 0;
+    let h = row.height || 0;
+
+    row.cbm = (l * w * h) / 1000000000;
+
+    frm.refresh_field('packing_slip');
+}
+
+function calculate_total_box(frm, cdt, cdn) {
+
+    let row = locals[cdt][cdn];
+
+    let box_from = cint(row.box_from || 0);
+    let box_to = cint(row.box_to || 0);
+
+    if (box_from && box_to && box_to >= box_from) {
+
+        let total_box = (box_to - box_from) + 1;
+
+        frappe.model.set_value(cdt, cdn, 'total_box', total_box);
+
+    } else {
+
+        frappe.model.set_value(cdt, cdn, 'total_box', 0);
+    }
 }

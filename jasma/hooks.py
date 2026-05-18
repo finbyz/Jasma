@@ -163,7 +163,10 @@ doc_events = {
 		"before_submit": "jasma.jasma.doc_events.purchase_reciept.validate_qc_report"
 	},
 	"Production Plan": {
-        "on_submit": "jasma.jasma.doc_events.production_plan.create_mr_on_submit"
+         "on_submit": [
+            "jasma.jasma.doc_events.production_plan.create_mr_on_submit",
+        ],
+         "before_cancel":"jasma.jasma.doc_events.production_plan.before_cancel"
     },
 	"Purchase Order": {
         "on_submit": "jasma.jasma.doc_events.purchase_order.before_submit"
@@ -178,6 +181,10 @@ doc_events = {
   	"Stock Entry": {
 		"before_submit": "jasma.jasma.doc_events.stock_entry.validate_qc_report"
 	},
+    "Sales Order": {
+		"validate": "jasma.jasma.doc_events.Sales_order.set_quotation_numbers"
+	},
+   
 }
 
 # Scheduled Tasks

@@ -1,8 +1,10 @@
 frappe.ui.form.on('Material Request', {
 
     onload: function (frm) {
+
         // check if MR is created from Sales Order
         if (frm.doc.items && frm.doc.items.length > 0) {
+
             if (frm.doc.items[0].sales_order) {
                 frm.set_value('from_document', 'Sales Order');
             }
@@ -17,10 +19,22 @@ frappe.ui.form.on('Material Request', {
 
         if (frm.doc.docstatus !== 1) return;
 
-        let bom_items = (frm.doc.items || []).filter(row => row.bom_no);
-        if (!bom_items.length) return;
+        /*
+            CONDITIONS
 
-        let mr_items = bom_items
+            no bom_no + no pp_reference -> no button
+            bom_no + no pp_reference    -> show button
+            bom_no + pp_reference       -> no button
+        */
+
+        let eligible_items = (frm.doc.items || []).filter(row =>
+            row.bom_no && !row.pp_reference
+        );
+
+        // No eligible items
+        if (!eligible_items.length) return;
+
+        let mr_items = eligible_items
             .map(row => row.name)
             .filter(Boolean);
 
@@ -37,6 +51,7 @@ frappe.ui.form.on('Material Request', {
                 let cancelled_exists = false;
 
                 data.forEach(d => {
+
                     if (d.docstatus === 2) {
                         cancelled_exists = true;
                     } else {
@@ -44,11 +59,12 @@ frappe.ui.form.on('Material Request', {
                     }
                 });
 
-                //  ACTIVE exists → block button
+                // ACTIVE exists → block button
                 if (active_exists) return;
 
-                //  ONLY CANCELLED exists → show message but allow button
+                // ONLY CANCELLED exists → show message but allow button
                 if (cancelled_exists) {
+
                     frm.dashboard.add_comment(
                         __("Previous Production Plan was Cancelled. You can create a new one."),
                         "blue",
@@ -56,16 +72,17 @@ frappe.ui.form.on('Material Request', {
                     );
                 }
 
-
                 frm.add_custom_button('Production Plan', function () {
-                    console.log("production plan button clicked")
+
+                    console.log("production plan button clicked");
 
                     frappe.new_doc('Production Plan', {}, (doc) => {
 
                         doc.get_items_from = "Material Request";
+                        doc.material_request = frm.doc.name;
 
                         doc.material_requests = [];
-                        doc.project = frm.doc.project
+                        doc.project = frm.doc.project;
 
                         let mr_row = frappe.model.add_child(
                             doc,
@@ -75,11 +92,10 @@ frappe.ui.form.on('Material Request', {
                         mr_row.material_request = frm.doc.name;
                         mr_row.material_request_date = frappe.datetime.get_today();
 
-
-
                         doc.po_items = [];
 
-                        bom_items.forEach(row => {
+                        // ONLY eligible items
+                        eligible_items.forEach(row => {
 
                             let item = frappe.model.add_child(
                                 doc,

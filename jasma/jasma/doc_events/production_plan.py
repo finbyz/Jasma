@@ -50,4 +50,29 @@ def create_mr_on_submit(doc, method):
     pp.make_material_request()
 
     status = "Submitted" if submit_mr else "Draft"
+    update_pp_reference(doc)
     frappe.msgprint(f"Material Request Created ({status})")
+    
+    
+def update_pp_reference(doc):
+
+    if doc.get_items_from != "Material Request":
+        return
+
+    for row in doc.po_items:
+
+        if row.material_request_item:
+
+            frappe.db.set_value(
+                "Material Request Item",
+                row.material_request_item,
+                "pp_reference",
+                doc.name,
+                update_modified=False
+            )
+            
+            
+def before_cancel(doc, method):
+    for item in doc.po_items:
+        mr_item_doc = frappe.get_doc("Material Request Item", item.material_request_item)
+        mr_item_doc.db_set("pp_reference", "")

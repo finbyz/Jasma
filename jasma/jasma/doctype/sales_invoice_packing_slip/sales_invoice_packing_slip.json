@@ -6,7 +6,10 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
-  "box",
+  "box_from",
+  "box_to",
+  "total_box",
+  "packing_type",
   "item_code",
   "qty",
   "nt_wt",
@@ -20,13 +23,6 @@
  "fields": [
   {
    "columns": 1,
-   "fieldname": "box",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "Box"
-  },
-  {
-   "columns": 2,
    "fieldname": "item_code",
    "fieldtype": "Link",
    "in_list_view": 1,
@@ -81,17 +77,43 @@
   },
   {
    "columns": 1,
+   "fieldname": "box_from",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Box From"
+  },
+  {
+   "columns": 1,
+   "fieldname": "packing_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Packing Type",
+   "options": "Box\nPkg"
+  },
+  {
    "fieldname": "cbm",
    "fieldtype": "Float",
-   "in_list_view": 1,
    "label": "CBM"
+  },
+  {
+   "columns": 1,
+   "fieldname": "box_to",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Box To"
+  },
+  {
+   "columns": 1,
+   "fieldname": "total_box",
+   "fieldtype": "Int",
+   "label": "Total Box"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-04-30 15:08:12.172192",
+ "modified": "2026-05-18 15:53:27.393324",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "Sales Invoice Packing Slip",

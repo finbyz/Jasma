@@ -52,43 +52,75 @@ def create_manufacture_mr(source_mr):
     return new_mr.name
 
 
-# your_app/your_module/api.py
 
-import frappe
+# @frappe.whitelist()
+# def create_production_plan_from_mr(material_request):
+#     mr = frappe.get_doc("Material Request", material_request)
+
+#     #  Check BOM items
+#     items = []
+#     for row in mr.items:
+#         if row.bom_no:
+#             items.append({
+#                 "item_code": row.item_code,
+#                 "bom_no": row.bom_no,
+#                 "planned_qty": row.qty,
+#                 "material_request_item": row.name,
+#                 "warehouse":row.warehouse
+#             })
+
+#     if not items:
+#         frappe.throw("No items with BOM found")
+
+#     #  Check if already exists
+#     existing = frappe.get_all(
+#         "Production Plan Item",
+#         filters={"material_request_item": ["in", [i["material_request_item"] for i in items]]},
+#         limit=1
+#     )
+
+#     if existing:
+#         frappe.throw("Production Plan already exists for this Material Request")
+
+#     return {
+#         "get_items_from": "Material Request",
+#         "material_request": material_request,
+#         "po_items": items   # pass data to JS
+#     }
+
 
 @frappe.whitelist()
 def create_production_plan_from_mr(material_request):
     mr = frappe.get_doc("Material Request", material_request)
 
-    #  Check BOM items
     items = []
+
     for row in mr.items:
-        if row.bom_no:
-            items.append({
-                "item_code": row.item_code,
-                "bom_no": row.bom_no,
-                "planned_qty": row.qty,
-                "material_request_item": row.name,
-                "warehouse":row.warehouse
-            })
+
+        # Skip if no BOM
+        if not row.bom_no:
+            continue
+
+        # Skip if already linked
+        if row.pp_reference:
+            continue
+
+        items.append({
+            "item_code": row.item_code,
+            "bom_no": row.bom_no,
+            "planned_qty": row.qty,
+            "material_request_item": row.name,
+            "warehouse": row.warehouse,
+            "mr_item_name": row.name
+        })
 
     if not items:
-        frappe.throw("No items with BOM found")
-
-    #  Check if already exists
-    existing = frappe.get_all(
-        "Production Plan Item",
-        filters={"material_request_item": ["in", [i["material_request_item"] for i in items]]},
-        limit=1
-    )
-
-    if existing:
-        frappe.throw("Production Plan already exists for this Material Request")
+        frappe.throw("All BOM items already linked with Production Plan")
 
     return {
         "get_items_from": "Material Request",
         "material_request": material_request,
-        "po_items": items   # pass data to JS
+        "po_items": items
     }
 
 
@@ -107,3 +139,17 @@ def get_production_plan_items(mr_items):
         ignore_permissions=True
     )
 
+def update_mr_pp_reference(doc, method):
+
+    for row in doc.po_items:
+
+        if not row.material_request_item:
+            continue
+
+        frappe.db.set_value(
+            "Material Request Item",
+            row.material_request_item,
+            {
+                "pp_reference": doc.name
+            }
+        )
