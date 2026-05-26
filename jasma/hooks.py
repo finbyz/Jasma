@@ -166,7 +166,8 @@ doc_events = {
          "on_submit": [
             "jasma.jasma.doc_events.production_plan.create_mr_on_submit",
         ],
-         "before_cancel":"jasma.jasma.doc_events.production_plan.before_cancel"
+         "before_cancel":"jasma.jasma.doc_events.production_plan.before_cancel",
+		 "validate":"jasma.jasma.doc_events.production_plan.validate"
     },
 	"Purchase Order": {
         "on_submit": "jasma.jasma.doc_events.purchase_order.before_submit"

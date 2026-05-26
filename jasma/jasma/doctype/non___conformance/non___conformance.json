@@ -64,9 +64,11 @@
    "label": "GRN Date"
   },
   {
+   "fetch_from": "po_reference_no.project",
    "fieldname": "ao_reference_no",
-   "fieldtype": "Data",
-   "label": "AO Reference No"
+   "fieldtype": "Link",
+   "label": "AO Reference No",
+   "options": "Project"
   },
   {
    "fieldname": "product_name",
@@ -192,7 +194,7 @@
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-04-30 14:14:30.475346",
+ "modified": "2026-05-20 18:15:10.741111",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "Non - Conformance",

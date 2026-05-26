@@ -76,3 +76,62 @@ def before_cancel(doc, method):
     for item in doc.po_items:
         mr_item_doc = frappe.get_doc("Material Request Item", item.material_request_item)
         mr_item_doc.db_set("pp_reference", "")
+
+
+# def validate(doc, method):
+#     fetch_stock_qty(doc)
+
+# def fetch_stock_qty(doc):
+#     for item in doc.po_items:
+#         if item.item_code:
+#             item.stock_warehuose = frappe.db.get_value("Bin", {"item_code": item.item_code, "warehouse": item.warehouse}, "actual_qty")
+#             result = frappe.db.sql("""
+#     SELECT COALESCE(SUM(actual_qty), 0)
+#     FROM `tabBin`
+#     WHERE item_code = %s
+# """, item.item_code)[0][0]
+
+#             item.stock_company = result or 0
+
+def validate(doc, method):
+    fetch_stock_qty(doc)
+
+
+def validate(doc, method):
+    fetch_stock_qty(doc)
+
+
+def fetch_stock_qty(doc):
+
+    for item in doc.mr_items:
+
+        if not item.item_code:
+            continue
+
+        # Company stock
+        stock_company = frappe.db.sql("""
+            SELECT COALESCE(SUM(actual_qty), 0)
+            FROM `tabBin`
+            WHERE item_code = %s
+        """, (item.item_code,))[0][0]
+
+        item.stock_company = stock_company or 0
+
+        # Default
+        item.stock_warehuose = 0
+
+        if item.from_warehouse:
+
+            warehouse_stock = frappe.db.sql("""
+                SELECT COALESCE(actual_qty, 0)
+                FROM `tabBin`
+                WHERE item_code = %s
+                AND warehouse = %s
+                LIMIT 1
+            """, (
+                item.item_code,
+                item.from_warehouse
+            ))
+
+            if warehouse_stock:
+                item.stock_warehuose = warehouse_stock[0][0] or 0

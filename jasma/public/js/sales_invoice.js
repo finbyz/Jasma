@@ -1,7 +1,60 @@
 frappe.ui.form.on('Sales Invoice', {
-    setup: function(frm) {
+    refresh(frm) {
 
-        frm.set_query('item_code', 'packing_slip', function(doc) {
+        let currency = frm.doc.currency || '';
+
+        frm.set_df_property(
+            'total_value',
+            'label',
+            `Total Value (${currency})`
+        );
+
+        frm.set_df_property(
+            'total_fob_values',
+            'label',
+            `Total FOB Value (${currency})`
+        );
+
+    },
+
+    currency(frm) {
+
+        let currency = frm.doc.currency || '';
+
+        frm.set_df_property(
+            'total_value',
+            'label',
+            `Total Value (${currency})`
+        );
+
+        frm.set_df_property(
+            'total_fob_values',
+            'label',
+            `Total FOB Value (${currency})`
+        );
+
+    },
+    validate(frm) {
+
+        // Total Value = Net Total
+        frm.set_value(
+            'total_value',
+            flt(frm.doc.net_total)
+        );
+
+        // Total FOB Value = Net Total + Freight + Insurance
+        frm.set_value(
+            'total_fob_values',
+            flt(frm.doc.net_total)
+            - flt(frm.doc.freight)
+            - flt(frm.doc.insurance)
+        );
+
+    },
+
+    setup: function (frm) {
+
+        frm.set_query('item_code', 'packing_slip', function (doc) {
 
             let item_list = [];
 
@@ -19,7 +72,7 @@ frappe.ui.form.on('Sales Invoice', {
         });
 
     },
-    qty: function(frm, cdt, cdn) {
+    qty: function (frm, cdt, cdn) {
 
         let item_total = 0;
         let packing_total = 0;
@@ -43,7 +96,7 @@ frappe.ui.form.on('Sales Invoice', {
 
             frm.refresh_field('packing_slip');
         }
-    }
+    },
 });
 
 
@@ -56,7 +109,7 @@ frappe.ui.form.on('Sales Invoice Packing Slip', {
     box_from: calculate_total_box,
     box_to: calculate_total_box,
 
-    qty: function(frm, cdt, cdn) {
+    qty: function (frm, cdt, cdn) {
 
         let row = locals[cdt][cdn];
         // 1. TOTAL VALIDATION
@@ -129,7 +182,7 @@ frappe.ui.form.on('Sales Invoice Packing Slip', {
     box_from: calculate_total_box,
     box_to: calculate_total_box,
 
-    qty: function(frm, cdt, cdn) {
+    qty: function (frm, cdt, cdn) {
 
         let row = locals[cdt][cdn];
 
