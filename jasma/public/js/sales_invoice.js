@@ -3,6 +3,24 @@ frappe.ui.form.on('Sales Invoice', {
 
         let currency = frm.doc.currency || '';
 
+
+            frm.set_df_property(
+            "total_value",
+            "options",
+            "currency"
+        );
+
+        frm.set_df_property(
+            "total_fob_values",
+            "options",
+            "currency"
+        );
+
+        frm.refresh_fields([
+            "total_value",
+            "total_fob_values"
+        ]);
+
         frm.set_df_property(
             'total_value',
             'label',
@@ -15,6 +33,20 @@ frappe.ui.form.on('Sales Invoice', {
             `Total FOB Value (${currency})`
         );
 
+        const is_manual =
+            frm.doc.freight_calculated === "By Amount" ||
+            frm.doc.freight_calculated === "By Qty";
+
+        const read_only = is_manual ? 0 : 1;
+
+    },
+
+    onload(frm) {
+        const is_manual =
+            frm.doc.freight_calculated === "By Amount" ||
+            frm.doc.freight_calculated === "By Qty";
+
+        const read_only = is_manual ? 0 : 1;
     },
 
     currency(frm) {
