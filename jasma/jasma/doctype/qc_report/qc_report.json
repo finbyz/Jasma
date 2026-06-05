@@ -17,6 +17,7 @@
   "po_no",
   "project",
   "so_no",
+  "irn",
   "section_break_ov20",
   "qc_report_parameter",
   "amended_from",
@@ -151,13 +152,18 @@
    "fieldname": "item_name",
    "fieldtype": "Data",
    "label": "Item Name"
+  },
+  {
+   "fieldname": "irn",
+   "fieldtype": "Data",
+   "label": "IRN"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-05-09 11:35:45.774786",
+ "modified": "2026-06-05 12:43:30.287859",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "QC Report",

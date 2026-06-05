@@ -65,7 +65,9 @@ doctype_js = {
 	"Purchase Order": "public/js/purchase_order.js",
 	"Subcontracting Receipt": "public/js/subcontracting_reciept.js",
 	"Sales Invoice": "public/js/sales_invoice.js",
-	"Quotation": "public/js/quotation.js"
+	"Sales Order": "public/js/Sales_order.js",
+	"Quotation": "public/js/quotation.js",
+	"Item": "public/js/item.js"
 }
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
@@ -171,20 +173,25 @@ doc_events = {
 		 "validate":"jasma.jasma.doc_events.production_plan.validate"
     },
 	"Purchase Order": {
-        "on_submit": "jasma.jasma.doc_events.purchase_order.before_submit"
+        "on_submit": "jasma.jasma.doc_events.purchase_order.before_submit",
+		# "validate": "jasma.jasma.doc_events.purchase_order.validate_delivery_schedule_qty"
     },
 	"Subcontracting Receipt": {
 		"before_submit": "jasma.jasma.doc_events.subcontracting_reciept.validate_qc_report"
 		# "before_save": "jasma.jasma.doc_events.subcontracting_reciept.validate_qc_report"
 	},
  	"Subcontracting Order": {
-		"before_submit": "jasma.jasma.doc_events.subcontracting_order.before_submit"
+		"before_submit": "jasma.jasma.doc_events.subcontracting_order.before_submit",
+		# "on_cancel": "jasma.jasma.doc_events.subcontracting_order.on_cancel"
 	},
   	"Stock Entry": {
 		"before_submit": "jasma.jasma.doc_events.stock_entry.validate_qc_report"
 	},
     "Sales Order": {
 		"validate": "jasma.jasma.doc_events.Sales_order.set_quotation_numbers"
+	},
+    "Material Request": {
+		"validate": "jasma.jasma.doc_events.material_request.validate"
 	},
    
 }
@@ -280,7 +287,8 @@ override_whitelisted_methods = {
 # 	}
 # ]
 override_doctype_class = {
-    "Material Request": "jasma.jasma.ovveride.material_request.CustomMaterialRequest"
+    "Material Request": "jasma.jasma.ovveride.material_request.CustomMaterialRequest",
+    "Purchase Order": "jasma.jasma.ovveride.purchase_order.CustomPurchaseOrder"
 }
 
 # Authentication and authorization

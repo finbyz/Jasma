@@ -153,3 +153,25 @@ def update_mr_pp_reference(doc, method):
                 "pp_reference": doc.name
             }
         )
+        
+import frappe
+
+def validate(doc, method):
+    fetch_stock_qty(doc)
+
+def fetch_stock_qty(doc):
+    for item in doc.items:
+
+        if not item.item_code:
+            continue
+
+        # Total stock across all warehouses
+        total_stock_all_warehouses = frappe.db.sql("""
+            SELECT COALESCE(SUM(actual_qty), 0)
+            FROM `tabBin`
+            WHERE item_code = %s
+        """, (item.item_code,))[0][0]
+
+        item.total_stock_all_warehouses = total_stock_all_warehouses or 0
+
+        

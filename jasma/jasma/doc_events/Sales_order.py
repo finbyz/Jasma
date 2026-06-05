@@ -1,4 +1,8 @@
 def set_quotation_numbers(doc, method):
+    
+    if doc.quotation:
+        return
+    
     quotation_list = []
 
     for row in doc.items:
