@@ -39,6 +39,18 @@ frappe.ui.form.on('Sales Invoice', {
 
         const read_only = is_manual ? 0 : 1;
 
+        frm.set_df_property("freight", "read_only", read_only);
+        frm.set_df_property("insurance", "read_only", read_only);
+
+        frm.set_df_property("freight", "read_only_depends_on", " ");
+        frm.set_df_property("insurance", "read_only_depends_on", " ");
+
+        console.log("freight read_only:", read_only);
+        console.log("insurance read_only:", read_only);
+
+        frm.refresh_field("freight");
+        frm.refresh_field("insurance");
+
     },
 
     onload(frm) {
