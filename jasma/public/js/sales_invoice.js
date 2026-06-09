@@ -96,26 +96,24 @@ frappe.ui.form.on('Sales Invoice', {
 
     },
 
-    setup: function (frm) {
 
-        frm.set_query('item_code', 'packing_slip', function (doc) {
+    setup: function(frm) {
 
-            let item_list = [];
+    frm.set_query("packed_item_code", "packing_slip", function(doc) {
 
-            (doc.items || []).forEach(row => {
-                if (row.item_code) {
-                    item_list.push(row.item_code);
-                }
-            });
+        const item_list = (doc.items || [])
+            .filter(d => d.item_code)
+            .map(d => d.item_code);
 
-            return {
-                filters: {
-                    name: ['in', item_list]
-                }
-            };
-        });
+        return {
+            filters: {
+                name: ["in", item_list.length ? item_list : [""]]
+            }
+        };
+    });
 
-    },
+},
+
     qty: function (frm, cdt, cdn) {
 
         let item_total = 0;
@@ -146,6 +144,17 @@ frappe.ui.form.on('Sales Invoice', {
 
 
 frappe.ui.form.on('Sales Invoice Packing Slip', {
+
+    packed_item_code(frm, cdt, cdn) {
+        let row = locals[cdt][cdn];
+
+        console.log("Packing Row");
+        console.log(row);
+
+        console.log("Items");
+        console.log(frm.doc.items);
+    },
+
     length: calculate_cbm,
     width: calculate_cbm,
     height: calculate_cbm,
@@ -153,10 +162,10 @@ frappe.ui.form.on('Sales Invoice Packing Slip', {
     box_from: calculate_total_box,
     box_to: calculate_total_box,
 
-    qty: function (frm, cdt, cdn) {
+    qty(frm, cdt, cdn) {
 
         let row = locals[cdt][cdn];
-        // 1. TOTAL VALIDATION
+
         let item_total = 0;
         let packing_total = 0;
 
@@ -170,112 +179,113 @@ frappe.ui.form.on('Sales Invoice Packing Slip', {
 
         if (packing_total > item_total) {
             frappe.msgprint("Packing Qty cannot exceed Item Total Qty");
-            frappe.model.set_value(cdt, cdn, 'qty', 0);
+            row.qty = 0;
+            frm.refresh_field("packing_slip");
             return;
         }
 
-        // 2. ITEM-WISE VALIDATION
-        if (row.item_code) {
-
-            let item_qty = 0;
-            let packing_item_qty = 0;
-
-            // Get qty from Items table for this item
-            (frm.doc.items || []).forEach(d => {
-                if (d.item_code === row.item_code) {
-                    item_qty += flt(d.qty);
-                }
-            });
-
-            // Get packing qty for same item
-            (frm.doc.packing_slip || []).forEach(d => {
-                if (d.item_code === row.item_code) {
-                    packing_item_qty += flt(d.qty);
-                }
-            });
-
-            if (packing_item_qty > item_qty) {
-                frappe.msgprint(
-                    `Packing Qty for Item ${row.item_code} cannot exceed ${item_qty}`
-                );
-
-                frappe.model.set_value(cdt, cdn, 'qty', 0);
-            }
-        }
-    }
-});
-
-function calculate_cbm(frm, cdt, cdn) {
-    let row = locals[cdt][cdn];
-
-    let l = row.length || 0;
-    let w = row.width || 0;
-    let h = row.height || 0;
-
-    row.cbm = (l * w * h) / 1000000000;
-
-    frm.refresh_field('packing_slip');
-}
-
-
-frappe.ui.form.on('Sales Invoice Packing Slip', {
-    length: calculate_cbm,
-    width: calculate_cbm,
-    height: calculate_cbm,
-
-    box_from: calculate_total_box,
-    box_to: calculate_total_box,
-
-    qty: function (frm, cdt, cdn) {
-
-        let row = locals[cdt][cdn];
-
-        // 1. TOTAL VALIDATION
-        let item_total = 0;
-        let packing_total = 0;
-
-        (frm.doc.items || []).forEach(d => {
-            item_total += flt(d.qty);
-        });
-
-        (frm.doc.packing_slip || []).forEach(d => {
-            packing_total += flt(d.qty);
-        });
-
-        if (packing_total > item_total) {
-            frappe.msgprint("Packing Qty cannot exceed Item Total Qty");
-            frappe.model.set_value(cdt, cdn, 'qty', 0);
-            return;
-        }
-
-        // 2. ITEM-WISE VALIDATION
-        if (row.item_code) {
+        if (row.packed_item_code) {
 
             let item_qty = 0;
             let packing_item_qty = 0;
 
             (frm.doc.items || []).forEach(d => {
-                if (d.item_code === row.item_code) {
+                if (d.item_code === row.packed_item_code) {
                     item_qty += flt(d.qty);
                 }
             });
 
             (frm.doc.packing_slip || []).forEach(d => {
-                if (d.item_code === row.item_code) {
+                if (d.packed_item_code === row.packed_item_code) {
                     packing_item_qty += flt(d.qty);
                 }
             });
 
             if (packing_item_qty > item_qty) {
+
                 frappe.msgprint(
-                    `Packing Qty for Item ${row.item_code} cannot exceed ${item_qty}`
+                    `Packing Qty for Item ${row.packed_item_code} cannot exceed ${item_qty}`
                 );
 
-                frappe.model.set_value(cdt, cdn, 'qty', 0);
+                row.qty = 0;
+                frm.refresh_field("packing_slip");
             }
         }
     }
 });
+// function calculate_cbm(frm, cdt, cdn) {
+//     let row = locals[cdt][cdn];
+
+//     let l = row.length || 0;
+//     let w = row.width || 0;
+//     let h = row.height || 0;
+
+//     row.cbm = (l * w * h) / 1000000000;
+
+//     frm.refresh_field('packing_slip');
+// }
+
+
+// frappe.ui.form.on('Sales Invoice Packing Slip', {
+//     length: calculate_cbm,
+//     width: calculate_cbm,
+//     height: calculate_cbm,
+
+//     box_from: calculate_total_box,
+//     box_to: calculate_total_box,
+
+//     qty: function (frm, cdt, cdn) {
+
+//         let row = locals[cdt][cdn];
+
+//         // 1. TOTAL VALIDATION
+//         let item_total = 0;
+//         let packing_total = 0;
+
+//         (frm.doc.items || []).forEach(d => {
+//             item_total += flt(d.qty);
+//         });
+
+//         (frm.doc.packing_slip || []).forEach(d => {
+//             packing_total += flt(d.qty);
+//         });
+
+//         if (packing_total > item_total) {
+//             frappe.msgprint("Packing Qty cannot exceed Item Total Qty");
+//             row.qty = 0;
+//             frm.refresh_field("packing_slip");
+//             return;
+//         }
+
+//         // 2. ITEM-WISE VALIDATION
+//         if (row.packed_item_code) {
+
+//             let item_qty = 0;
+//             let packing_item_qty = 0;
+
+//             (frm.doc.items || []).forEach(d => {
+//                 if (d.item_code === row.item_code) {
+//                     item_qty += flt(d.qty);
+//                 }
+//             });
+
+//             (frm.doc.packing_slip || []).forEach(d => {
+//                 if (d.item_code === row.item_code) {
+//                     packing_item_qty += flt(d.qty);
+//                 }
+//             });
+
+//             if (packing_item_qty > item_qty) {
+//                 frappe.msgprint(
+//                     `Packing Qty for Item ${row.item_code} cannot exceed ${item_qty}`
+//                 );
+
+//                 row.qty = 0;
+//                 frm.refresh_field("packing_slip");
+//             }
+//         }
+//     }
+// });
 
 function calculate_cbm(frm, cdt, cdn) {
 

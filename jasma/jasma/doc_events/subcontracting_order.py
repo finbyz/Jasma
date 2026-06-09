@@ -3,9 +3,14 @@ from frappe.utils import comma_or, flt
 
 def before_submit(self, method):
     for row in self.items:
+        if not row.purchase_order_item:
+            continue
         mr_item = frappe.db.get_value("Purchase Order Item",row.purchase_order_item, "material_request_item")
-        frappe.db.set_value("Material Request Item", mr_item, "subcontracting_order", self.name)
+        if mr_item:
+            frappe.db.set_value("Material Request Item", mr_item, "subcontracting_order", self.name)
         mr = frappe.db.get_value("Purchase Order Item",row.purchase_order_item, "material_request")
+        if not mr:
+            continue
         mr_doc = frappe.get_doc("Material Request", mr)
 
         all_items_ordered = True
@@ -42,4 +47,29 @@ def before_submit(self, method):
             frappe.db.set_value("Material Request", mr, "status", "Partially Ordered")
             if mr_doc.per_ordered >= 100:
                 frappe.db.set_value("Material Request", mr, "per_ordered", 99.99)
-            
+                
+
+def on_cancel(doc, method):
+    for item in doc.items:
+        if not item.material_request_item:
+            continue
+
+        # Clear in Material Request Item
+        mr_item = frappe.get_doc(
+            "Material Request Item",
+            item.material_request_item
+        )
+
+        mr_item.subcontracting_order = ""
+        mr_item.db_update()
+
+        # Clear in parent Material Request
+        mr = frappe.get_doc(
+            "Material Request",
+            mr_item.parent
+        )
+
+        mr.subcontracting_order = ""
+        mr.db_update()
+
+

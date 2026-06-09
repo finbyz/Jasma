@@ -188,7 +188,10 @@ doc_events = {
 		"before_submit": "jasma.jasma.doc_events.stock_entry.validate_qc_report"
 	},
     "Sales Order": {
-		"validate": "jasma.jasma.doc_events.Sales_order.set_quotation_numbers"
+		"validate": [
+            "jasma.jasma.doc_events.Sales_order.set_quotation_numbers",
+            # "jasma.jasma.doc_events.Sales_order.distribute_packing_charges"
+        ]
 	},
     "Material Request": {
 		"validate": "jasma.jasma.doc_events.material_request.validate"
