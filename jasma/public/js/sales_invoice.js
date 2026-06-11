@@ -1,5 +1,13 @@
 frappe.ui.form.on('Sales Invoice', {
+    packing_charges(frm) {
+         distribute_packing_charges(frm);
+    },
+
+    packing_charges_by(frm) {
+        distribute_packing_charges(frm);
+    },
     refresh(frm) {
+        calculate_packing_totals(frm);
 
         let currency = frm.doc.currency || '';
 
@@ -93,7 +101,7 @@ frappe.ui.form.on('Sales Invoice', {
             - flt(frm.doc.freight)
             - flt(frm.doc.insurance)
         );
-
+        calculate_packing_totals(frm);
     },
 
 
@@ -144,6 +152,25 @@ frappe.ui.form.on('Sales Invoice', {
 
 
 frappe.ui.form.on('Sales Invoice Packing Slip', {
+
+    nt_wt(frm) {
+        calculate_packing_totals(frm);
+    },
+    gr_wt(frm) {
+        calculate_packing_totals(frm);
+    },
+    box_from(frm) {
+        calculate_packing_totals(frm);
+    },
+    box_to(frm) {
+        calculate_packing_totals(frm);
+    },
+    packing_type(frm) {
+        calculate_packing_totals(frm);
+    },
+    packing_slip_remove(frm) {
+        calculate_packing_totals(frm);
+    },
 
     packed_item_code(frm, cdt, cdn) {
         let row = locals[cdt][cdn];
@@ -318,3 +345,107 @@ function calculate_total_box(frm, cdt, cdn) {
         frappe.model.set_value(cdt, cdn, 'total_box', 0);
     }
 }
+
+
+
+
+function distribute_packing_charges(frm) {
+
+    if (!frm.doc.packing_charges || !frm.doc.items?.length) {
+        return;
+    }
+
+    frm.doc.items.forEach(row => {
+
+        let final_rate = flt(row.rate);
+
+        if (frm.doc.packing_charges_by === "By Amount") {
+
+            if (!frm.doc.net_total || !row.qty) return;
+
+            let ratio = flt(row.amount) / flt(frm.doc.net_total);
+            let distributed_amount = flt(frm.doc.packing_charges) * ratio;
+            let packing_rate = distributed_amount / flt(row.qty);
+
+            final_rate = flt(row.rate) + flt(packing_rate);
+
+        } else if (frm.doc.packing_charges_by === "By Qty") {
+
+            if (!frm.doc.total_qty || !row.qty) return;
+
+            let ratio = flt(row.qty) / flt(frm.doc.total_qty);
+            let distributed_amount = flt(frm.doc.packing_charges) * ratio;
+            let packing_rate = distributed_amount / flt(row.qty);
+
+            final_rate = flt(row.rate) + flt(packing_rate);
+        }
+
+        frappe.model.set_value(
+            row.doctype,
+            row.name,
+            "rate",
+            flt(final_rate, 6)
+        );
+    });
+
+    frm.refresh_field("items");
+}
+
+function calculate_packing_totals(frm) {
+
+    let total_nt_wt = 0;
+    let total_gr_wt = 0;
+
+    let unique_boxes = new Set();
+    let total_pkg = 0;
+
+    (frm.doc.packing_slip || []).forEach(row => {
+
+        total_nt_wt += flt(row.nt_wt);
+        total_gr_wt += flt(row.gr_wt);
+
+        if ((row.packing_type || "").toLowerCase() === "pkg") {
+
+            if (row.box_from && row.box_to) {
+                total_pkg += (cint(row.box_to) - cint(row.box_from) + 1);
+            } else {
+                total_pkg += cint(row.total_box || 0);
+            }
+
+        } else {
+
+            if (row.box_from && row.box_to) {
+
+                for (let i = cint(row.box_from); i <= cint(row.box_to); i++) {
+                    unique_boxes.add(i);
+                }
+
+            }
+        }
+    });
+
+    let total_boxes = unique_boxes.size;
+
+    let total_boxes_and_packages = "";
+
+    if (total_boxes > 0) {
+        total_boxes_and_packages += `${total_boxes} BOX${total_boxes > 1 ? "ES" : ""}`;
+    }
+
+    if (total_boxes > 0 && total_pkg > 0) {
+        total_boxes_and_packages += " and ";
+    }
+
+    if (total_pkg > 0) {
+        total_boxes_and_packages += `${total_pkg} PACKAGE${total_pkg > 1 ? "S" : ""}`;
+    }
+
+    if (!total_boxes_and_packages) {
+        total_boxes_and_packages = "0 PACKAGES";
+    }
+
+    frm.set_value("total_nt_wt", total_nt_wt);
+    frm.set_value("total_gr_wtg", total_gr_wt);
+    frm.set_value("total_boxes_and_packages", total_boxes_and_packages);
+}
+

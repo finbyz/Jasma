@@ -66,6 +66,44 @@ function set_port_filters(frm) {
 }
 
 
+// function distribute_packing_charges(frm) {
+
+//     if (!frm.doc.packing_charges || !frm.doc.items?.length) {
+//         return;
+//     }
+
+//     frm.doc.items.forEach(row => {
+
+//         let packing_amount = 0;
+
+//         if (frm.doc.packing_charges_by === "By Amount") {
+
+//             if (!frm.doc.net_total) return;
+
+//             let packing_percent = (flt(row.amount) * 100) / flt(frm.doc.net_total);
+//             packing_amount = (flt(frm.doc.packing_charges) * packing_percent) / 100;
+//             packing_amount = flt(packing_amount) / flt(row.qty);
+//         } else if (frm.doc.packing_charges_by === "By Qty") {
+
+//             if (!frm.doc.total_qty) return;
+
+//             let packing_percent = (flt(row.qty) * 100) / flt(frm.doc.total_qty);
+//             packing_amount = (flt(frm.doc.packing_charges) * packing_percent) / 100;
+//             packing_amount = flt(packing_amount) / flt(row.qty);
+//         }
+
+//         frappe.model.set_value(
+//             row.doctype,
+//             row.name,
+//             "rate",
+//             flt(row.rate) + flt(packing_amount)
+//         );
+//     });
+
+//     frm.refresh_field("items");
+// }
+
+
 function distribute_packing_charges(frm) {
 
     if (!frm.doc.packing_charges || !frm.doc.items?.length) {
@@ -74,28 +112,34 @@ function distribute_packing_charges(frm) {
 
     frm.doc.items.forEach(row => {
 
-        let packing_amount = 0;
+        let final_rate = flt(row.rate);
 
         if (frm.doc.packing_charges_by === "By Amount") {
 
-            if (!frm.doc.net_total) return;
+            if (!frm.doc.net_total || !row.qty) return;
 
-            let packing_percent = (flt(row.amount) * 100) / flt(frm.doc.net_total);
-            packing_amount = (flt(frm.doc.packing_charges) * packing_percent) / 100;
+            let ratio = flt(row.amount) / flt(frm.doc.net_total);
+            let distributed_amount = flt(frm.doc.packing_charges) * ratio;
+            let packing_rate = distributed_amount / flt(row.qty);
+
+            final_rate = flt(row.rate) + flt(packing_rate);
 
         } else if (frm.doc.packing_charges_by === "By Qty") {
 
-            if (!frm.doc.total_qty) return;
+            if (!frm.doc.total_qty || !row.qty) return;
 
-            let packing_percent = (flt(row.qty) * 100) / flt(frm.doc.total_qty);
-            packing_amount = (flt(frm.doc.packing_charges) * packing_percent) / 100;
+            let ratio = flt(row.qty) / flt(frm.doc.total_qty);
+            let distributed_amount = flt(frm.doc.packing_charges) * ratio;
+            let packing_rate = distributed_amount / flt(row.qty);
+
+            final_rate = flt(row.rate) + flt(packing_rate);
         }
 
         frappe.model.set_value(
             row.doctype,
             row.name,
             "rate",
-            flt(row.rate) + flt(packing_amount)
+            flt(final_rate, 6)
         );
     });
 
