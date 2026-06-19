@@ -40,7 +40,7 @@ fixtures = [
 # include js, css files in header of desk.html
 # app_include_css = "/assets/jasma/css/jasma.css"
 # app_include_js = "/assets/jasma/js/jasma.js"
-
+app_include_js = "jasma.bundle.js"
 # include js, css files in header of web template
 # web_include_css = "/assets/jasma/css/jasma.css"
 # web_include_js = "/assets/jasma/js/jasma.js"
@@ -67,7 +67,9 @@ doctype_js = {
 	"Sales Invoice": "public/js/sales_invoice.js",
 	"Sales Order": "public/js/Sales_order.js",
 	"Quotation": "public/js/quotation.js",
-	"Item": "public/js/item.js"
+	"Item": "public/js/item.js",
+	"Employee Advance": "public/js/employee_advance.js",
+	"Payment Entry": "public/js/payment_entry.js"
 }
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
@@ -177,8 +179,8 @@ doc_events = {
 		# "validate": "jasma.jasma.doc_events.purchase_order.validate_delivery_schedule_qty"
     },
 	"Subcontracting Receipt": {
-		"before_submit": "jasma.jasma.doc_events.subcontracting_reciept.validate_qc_report"
-		# "before_save": "jasma.jasma.doc_events.subcontracting_reciept.validate_qc_report"
+		"before_submit": "jasma.jasma.doc_events.subcontracting_reciept.validate_qc_report",
+		"on_submit": "jasma.jasma.doc_events.subcontracting_reciept.subcontracting_receipt_on_submit"
 	},
  	"Subcontracting Order": {
 		"before_submit": "jasma.jasma.doc_events.subcontracting_order.before_submit",
@@ -196,6 +198,22 @@ doc_events = {
     "Material Request": {
 		"validate": "jasma.jasma.doc_events.material_request.validate"
 	},
+    # "Payment Entry": {
+    #     "on_submit": "jasma.jasma.doc_events.payment_entry.update_employee_advance_balance"
+    # }
+    
+    "Expense Claim": {
+        "on_submit": "jasma.api.update_employee_advance_balance",
+        "on_cancel": "jasma.api.update_employee_advance_balance"
+    },
+    "Journal Entry": {
+        "on_submit": "jasma.api.update_employee_advance_balance",
+        "on_cancel": "jasma.api.update_employee_advance_balance"
+    },
+    "Payment Entry": {
+        "on_submit": "jasma.api.update_employee_advance_balance",
+        "on_cancel": "jasma.api.update_employee_advance_balance"
+    }
    
 }
 
@@ -291,7 +309,8 @@ override_whitelisted_methods = {
 # ]
 override_doctype_class = {
     "Material Request": "jasma.jasma.ovveride.material_request.CustomMaterialRequest",
-    "Purchase Order": "jasma.jasma.ovveride.purchase_order.CustomPurchaseOrder"
+    "Purchase Order": "jasma.jasma.ovveride.purchase_order.CustomPurchaseOrder",
+    # "Payment Entry": "jasma.jasma.ovveride.payment_entry.PaymentEntry"
 }
 
 # Authentication and authorization

@@ -1,5 +1,6 @@
 import frappe
 import json
+# import flt
 from erpnext.subcontracting.doctype.subcontracting_receipt.subcontracting_receipt import SubcontractingReceipt
 
 def validate_qc_report(self, method=None):
@@ -87,3 +88,103 @@ def validate_qc_report(self, method=None):
 		frappe.throw(
 			f"QC Report must be Created for items: <b>{items}</b>"
 		)
+  
+  
+def subcontracting_receipt_on_submit(doc, method=None):
+	pr_item_meta = frappe.get_meta("Purchase Receipt Item")
+	has_fg_item = pr_item_meta.has_field("fg_item")
+	has_fg_item_name = pr_item_meta.has_field("fg_item_name")
+	if not (has_fg_item or has_fg_item_name):
+		return
+
+	pr_names = frappe.get_all(
+		"Purchase Receipt",
+		filters={"subcontracting_receipt": doc.name},
+		pluck="name",
+	)
+	if not pr_names:
+		return
+
+	# Build SR item lookup
+	sr_item_by_name = {}
+	for row in doc.get("items"):
+		sr_item_by_name[row.name] = {
+			"item_code": row.item_code,
+			"item_name": row.item_name,
+		}
+	
+	sr_item_codes = {row["item_code"] for row in sr_item_by_name.values()}
+	
+	# Build item name lookup from SR items
+	item_name_by_code = {}
+	for row in sr_item_by_name.values():
+		if row.get("item_code"):
+			item_name_by_code[row["item_code"]] = row["item_name"]
+
+	po_item_names = set()
+	for pr_name in pr_names:
+		pr = frappe.get_doc("Purchase Receipt", pr_name)
+		for row in pr.get("items"):
+			if row.purchase_order_item:
+				po_item_names.add(row.purchase_order_item)
+
+	# Get PO items - extract clean item code from concatenated "Code: Name" format
+	po_fg_item_by_name = {}
+	if po_item_names:
+		po_items = frappe.get_all(
+			"Purchase Order Item",
+			filters={"name": ["in", list(po_item_names)]},
+			fields=["name", "fg_item"],
+		)
+		for row in po_items:
+			raw_fg = row.fg_item or ""
+			# FIX: Extract only the item code part before ": "
+			if ": " in raw_fg:
+				po_fg_item_by_name[row.name] = raw_fg.split(": ")[0]
+			else:
+				po_fg_item_by_name[row.name] = raw_fg
+
+	# Fetch missing item names from Item master
+	missing_codes = set()
+	for code in po_fg_item_by_name.values():
+		if code and code not in item_name_by_code:
+			missing_codes.add(code)
+	
+	if missing_codes:
+		items = frappe.get_all(
+			"Item",
+			filters={"name": ["in", list(missing_codes)]},
+			fields=["name", "item_name"],
+		)
+		for row in items:
+			item_name_by_code[row.name] = row.item_name
+
+	# Update Purchase Receipt Items
+	for pr_name in pr_names:
+		pr = frappe.get_doc("Purchase Receipt", pr_name)
+		
+		for row in pr.get("items"):
+			sr_item = sr_item_by_name.get(row.subcontracting_receipt_item) or {}
+			fg_item = sr_item.get("item_code")
+			fg_item_name = sr_item.get("item_name")
+
+			# Fallback to PO item's fg_item (clean code)
+			if not fg_item and row.purchase_order_item:
+				fg_item = po_fg_item_by_name.get(row.purchase_order_item)
+				fg_item_name = item_name_by_code.get(fg_item)
+
+			if not (fg_item and (not sr_item_codes or fg_item in sr_item_codes)):
+				continue
+
+			values = {}
+			if has_fg_item:
+				values["fg_item"] = fg_item  # Now correctly stores "58258"
+			if has_fg_item_name:
+				values["fg_item_name"] = fg_item_name or item_name_by_code.get(fg_item)
+
+			frappe.db.set_value(
+				"Purchase Receipt Item",
+				row.name,
+				values,
+				update_modified=False,
+			)

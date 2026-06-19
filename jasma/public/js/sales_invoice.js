@@ -7,7 +7,10 @@ frappe.ui.form.on('Sales Invoice', {
         distribute_packing_charges(frm);
     },
     refresh(frm) {
-        calculate_packing_totals(frm);
+        // calculate_packing_totals(frm);
+       
+        // calculate_total_fob_values(frm);
+    
 
         let currency = frm.doc.currency || '';
 
@@ -86,23 +89,27 @@ frappe.ui.form.on('Sales Invoice', {
         );
 
     },
-    validate(frm) {
-
-        // Total Value = Net Total
-        frm.set_value(
-            'total_value',
-            flt(frm.doc.net_total)
-        );
-
-        // Total FOB Value = Net Total + Freight + Insurance
-        frm.set_value(
-            'total_fob_values',
-            flt(frm.doc.net_total)
-            - flt(frm.doc.freight)
-            - flt(frm.doc.insurance)
-        );
-        calculate_packing_totals(frm);
+    
+    total_fob_value: function (frm) {
+        calculate_total_fob_values(frm);
     },
+
+    // ── Recalculate when exchange rate changes ────────────────────────────
+    conversion_rate: function (frm) {
+        calculate_total_fob_values(frm);
+    },
+
+    // ── Recalculate on document load (handles saved docs) ─────────────────
+    
+
+    before_save: function (frm) {
+        calculate_total_fob_values(frm);
+    },
+    
+   validate(frm) {
+   
+    calculate_packing_totals(frm);
+},
 
 
     setup: function(frm) {
@@ -240,79 +247,7 @@ frappe.ui.form.on('Sales Invoice Packing Slip', {
         }
     }
 });
-// function calculate_cbm(frm, cdt, cdn) {
-//     let row = locals[cdt][cdn];
 
-//     let l = row.length || 0;
-//     let w = row.width || 0;
-//     let h = row.height || 0;
-
-//     row.cbm = (l * w * h) / 1000000000;
-
-//     frm.refresh_field('packing_slip');
-// }
-
-
-// frappe.ui.form.on('Sales Invoice Packing Slip', {
-//     length: calculate_cbm,
-//     width: calculate_cbm,
-//     height: calculate_cbm,
-
-//     box_from: calculate_total_box,
-//     box_to: calculate_total_box,
-
-//     qty: function (frm, cdt, cdn) {
-
-//         let row = locals[cdt][cdn];
-
-//         // 1. TOTAL VALIDATION
-//         let item_total = 0;
-//         let packing_total = 0;
-
-//         (frm.doc.items || []).forEach(d => {
-//             item_total += flt(d.qty);
-//         });
-
-//         (frm.doc.packing_slip || []).forEach(d => {
-//             packing_total += flt(d.qty);
-//         });
-
-//         if (packing_total > item_total) {
-//             frappe.msgprint("Packing Qty cannot exceed Item Total Qty");
-//             row.qty = 0;
-//             frm.refresh_field("packing_slip");
-//             return;
-//         }
-
-//         // 2. ITEM-WISE VALIDATION
-//         if (row.packed_item_code) {
-
-//             let item_qty = 0;
-//             let packing_item_qty = 0;
-
-//             (frm.doc.items || []).forEach(d => {
-//                 if (d.item_code === row.item_code) {
-//                     item_qty += flt(d.qty);
-//                 }
-//             });
-
-//             (frm.doc.packing_slip || []).forEach(d => {
-//                 if (d.item_code === row.item_code) {
-//                     packing_item_qty += flt(d.qty);
-//                 }
-//             });
-
-//             if (packing_item_qty > item_qty) {
-//                 frappe.msgprint(
-//                     `Packing Qty for Item ${row.item_code} cannot exceed ${item_qty}`
-//                 );
-
-//                 row.qty = 0;
-//                 frm.refresh_field("packing_slip");
-//             }
-//         }
-//     }
-// });
 
 function calculate_cbm(frm, cdt, cdn) {
 
@@ -449,3 +384,23 @@ function calculate_packing_totals(frm) {
     frm.set_value("total_boxes_and_packages", total_boxes_and_packages);
 }
 
+
+
+
+// ── Calculation function ──────────────────────────────────────────────────────
+function calculate_total_fob_values(frm) {
+    const base_fob        = flt(frm.doc.total_fob_value);
+    const conversion_rate = flt(frm.doc.conversion_rate);
+
+   
+
+    if (!base_fob || !conversion_rate) {
+        frm.set_value("total_fob_values", 0);
+        return;
+    }
+
+    const result = flt(base_fob / conversion_rate, 2);
+
+    frm.set_value("total_fob_values", result);
+    frm.set_value("total_value", frm.doc.total);
+}
