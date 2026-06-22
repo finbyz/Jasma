@@ -457,6 +457,7 @@ function update_commercial_items(frm) {
     }
 
     frm.clear_table("commercial_item");
+    
 
     commercial_rows.forEach(row => {
         let d = frm.add_child("commercial_item");
