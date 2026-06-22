@@ -20,12 +20,8 @@ frappe.ui.form.on("Payment Entry", {
 			return;
 		}
 
-		if (!frm.doc.reference_no) {
-			frappe.throw(__("Bank Reference No  is mandatory"));
-		}
-
-		if (!frm.doc.reference_date) {
-			frappe.throw(__("Bank Reference Date is mandatory"));
+		if (!frm.doc.reference_no|| !frm.doc.reference_date) {
+			frappe.throw(__("Bank Reference No and Bank Reference Date is mandatory"));
 		}
 	},
 });

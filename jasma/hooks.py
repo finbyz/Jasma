@@ -310,7 +310,7 @@ override_whitelisted_methods = {
 override_doctype_class = {
     "Material Request": "jasma.jasma.ovveride.material_request.CustomMaterialRequest",
     "Purchase Order": "jasma.jasma.ovveride.purchase_order.CustomPurchaseOrder",
-    # "Payment Entry": "jasma.jasma.ovveride.payment_entry.PaymentEntry"
+    "Payment Entry": "jasma.jasma.ovveride.payment_entry.PaymentEntry"
 }
 
 # Authentication and authorization
