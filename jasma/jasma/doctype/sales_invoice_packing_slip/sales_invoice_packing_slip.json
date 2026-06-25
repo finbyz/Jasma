@@ -12,6 +12,7 @@
   "packing_type",
   "packed_item_code",
   "qty",
+  "small_box_qty",
   "nt_wt",
   "gr_wt",
   "column_break_yqdo",
@@ -107,13 +108,20 @@
    "in_list_view": 1,
    "label": "Item Code",
    "options": "Item"
+  },
+  {
+   "columns": 1,
+   "fieldname": "small_box_qty",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Small Box Qty"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-06-08 14:04:03.442852",
+ "modified": "2026-06-24 11:02:55.500303",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "Sales Invoice Packing Slip",

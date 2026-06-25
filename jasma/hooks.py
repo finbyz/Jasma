@@ -71,8 +71,13 @@ doctype_js = {
 	"Employee Advance": "public/js/employee_advance.js",
 	"Payment Entry": "public/js/payment_entry.js"
 }
+
+doctype_list_js = {
+    "Payment Entry": "public/js/list_js/payment_entry_list.js"
+}
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
+
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
 
@@ -165,7 +170,8 @@ doc_events = {
 		"validate": "jasma.jasma.doc_events.item.validate",
 	},
 	"Purchase Receipt": {
-		"before_submit": "jasma.jasma.doc_events.purchase_reciept.validate_qc_report"
+		"before_submit": "jasma.jasma.doc_events.purchase_reciept.validate_qc_report",
+        "on_submit": "jasma.jasma.doc_events.purchase_reciept.create_purchase_invoice_on_submit"
 	},
 	"Production Plan": {
          "on_submit": [

@@ -1,6 +1,8 @@
 import frappe
 from frappe.model.mapper import get_mapped_doc
 import json
+from erpnext.stock.doctype.purchase_receipt.purchase_receipt import make_purchase_invoice
+
 
 @frappe.whitelist()
 def make_stock_entry_from_purchase_receipt(source_name, target_doc=None, args=None):
@@ -113,3 +115,33 @@ def validate_qc_report(self, method=None):
 		frappe.throw(
 			f"QC Report must be Created for items: <b>{items}</b>"
 		)
+  
+def on_submit(self, method=None):
+	create_purchase_invoice_on_submit(self)
+  
+def create_purchase_invoice_on_submit(doc, method=None):
+    # Prevent duplicate invoices
+    existing_pi = frappe.db.exists(
+        "Purchase Invoice Item",
+        {
+            "purchase_receipt": doc.name,
+            "docstatus": ["!=", 2]
+        }
+    )
+
+    if existing_pi:
+        return
+
+    # Create Purchase Invoice from Purchase Receipt
+    pi = make_purchase_invoice(doc.name)
+
+    # Optional: set posting date same as Purchase Receipt
+    pi.posting_date = doc.posting_date
+    pi.bill_date = doc.posting_date
+    # pi.bill_no = doc.name  # You can set the bill number to the Purchase Receipt name or any other logic
+    pi.flags.ignore_validate = True
+    pi.insert(
+		ignore_permissions=True,
+	)
+
+    frappe.msgprint(f"Purchase Invoice {pi.name} created.")
