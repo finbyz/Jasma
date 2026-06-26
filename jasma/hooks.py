@@ -40,7 +40,10 @@ fixtures = [
 # include js, css files in header of desk.html
 # app_include_css = "/assets/jasma/css/jasma.css"
 # app_include_js = "/assets/jasma/js/jasma.js"
-app_include_js = "jasma.bundle.js"
+app_include_js = [
+    "jasma.bundle.js",
+    "/assets/jasma/js/file_uploader_link_name.js",
+]
 # include js, css files in header of web template
 # web_include_css = "/assets/jasma/css/jasma.css"
 # web_include_js = "/assets/jasma/js/jasma.js"
