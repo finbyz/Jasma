@@ -120,6 +120,15 @@ def on_submit(self, method=None):
 	create_purchase_invoice_on_submit(self)
   
 def create_purchase_invoice_on_submit(doc, method=None):
+    
+    
+    # Check Buying Settings
+    if not frappe.db.get_single_value(
+        "Buying Settings",
+        "auto_generate_purchase_invoice_on_purchase_receipt_submission"
+    ):
+        return
+    
     # Prevent duplicate invoices
     existing_pi = frappe.db.exists(
         "Purchase Invoice Item",

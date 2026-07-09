@@ -1,27 +1,39 @@
 frappe.ui.form.on("Payment Entry", {
-	refresh(frm) {
-		frm.toggle_reqd(["reference_no", "reference_date"], false);
-	},
+    refresh(frm) {
+        setTimeout(() => {
+            frm.toggle_reqd("reference_no", false);
+            frm.toggle_reqd("reference_date", false);
+        }, 100);
+    },
 
-	paid_from(frm) {
-		frm.toggle_reqd(["reference_no", "reference_date"], false);
-	},
+    paid_from(frm) {
+        setTimeout(() => {
+            frm.toggle_reqd("reference_no", false);
+            frm.toggle_reqd("reference_date", false);
+        }, 100);
+    },
 
-	paid_to(frm) {
-		frm.toggle_reqd(["reference_no", "reference_date"], false);
-	},
+    paid_to(frm) {
+        setTimeout(() => {
+            frm.toggle_reqd("reference_no", false);
+            frm.toggle_reqd("reference_date", false);
+        }, 100);
+    },
 
-	before_submit(frm) {
-		const is_bank =
-			frm.doc.paid_from_account_type === "Bank" ||
-			frm.doc.paid_to_account_type === "Bank";
+    bank_account(frm) {
+        setTimeout(() => {
+            frm.toggle_reqd("reference_no", false);
+            frm.toggle_reqd("reference_date", false);
+        }, 100);
+    },
 
-		if (!is_bank) {
-			return;
-		}
+    before_submit(frm) {
+        const is_bank =
+            frm.doc.paid_from_account_type === "Bank" ||
+            frm.doc.paid_to_account_type === "Bank";
 
-		if (!frm.doc.reference_no|| !frm.doc.reference_date) {
-			frappe.throw(__("Bank Reference No and Bank Reference Date is mandatory"));
-		}
-	},
+        if (is_bank && (!frm.doc.reference_no || !frm.doc.reference_date)) {
+            frappe.throw(__("Bank Reference No and Bank Reference Date are mandatory."));
+        }
+    }
 });
