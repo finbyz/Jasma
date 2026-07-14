@@ -52,6 +52,9 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
+from frappe.utils import nowdate
+
+
 
 
 @frappe.whitelist()
@@ -107,12 +110,19 @@ def export_payment_entries(payment_entries):
         pe = frappe.get_doc("Payment Entry", pe_name)
 
         party_name = pe.party_name or ""
-        mode_of_payment = pe.mode_of_payment or ""
+        mode_of_payment =  ""
         amount = pe.paid_amount
+        
+        if amount >= 200000:
+            mode_of_payment = "RTGS"
+        else:
+            mode_of_payment = "NEFT"
+        
 
         party_bank_account = ""
         bank_account = ""
         ifsc = ""
+        ban_name = ""
         
         if pe.bank_account:
             bank = frappe.get_doc("Bank Account", pe.bank_account)
@@ -123,22 +133,35 @@ def export_payment_entries(payment_entries):
         if pe.party_bank_account:
             bank = frappe.get_doc("Bank Account", pe.party_bank_account)
             party_bank_account = bank.bank_account_no or ""
+            ban_name = bank.bank or ""
+            
+        debit_narr = ""
+
+        if pe.references:
+            ref = pe.references[0]
+
+            if ref.bill_no:
+                debit_narr = ref.bill_no
+            else:
+                debit_narr = ref.reference_name or ""
+
+        debit_narr = debit_narr[:30]
 
         row = [
             "PAB_VENDOR",
             mode_of_payment,
             bank_account,
-            party_name,
+            ban_name,
             party_bank_account,
             ifsc,
             amount,
-            pe.narration or "",
+            debit_narr,
             "",
             "",
             "",
-            pe.remarks or "",
-            getdate(pe.posting_date),
-            pe.reference_no or "",
+            "",
+            getdate(nowdate()),
+            "",
             "",
             "",
             "",

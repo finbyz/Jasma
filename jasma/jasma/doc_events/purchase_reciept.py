@@ -101,13 +101,14 @@ def validate_qc_report(self, method=None):
 			AND qr.reference_type = 'Purchase Receipt'
 			AND qr.docstatus = 1
 		WHERE pri.parent = %s
+		AND %s = 0
 		AND EXISTS (
 			SELECT 1
 			FROM `tabQC Report Parameter` qrp
 			WHERE qrp.parent = i.name
 		)
 		AND qr.name IS NULL
-	""", self.name, as_dict=True)
+	""", (self.name, self.is_return), as_dict=True)
 
 	if missing_items:
 		items = ", ".join([d.item_code for d in missing_items])
