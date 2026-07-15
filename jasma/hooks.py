@@ -72,7 +72,8 @@ doctype_js = {
 	"Quotation": "public/js/quotation.js",
 	"Item": "public/js/item.js",
 	"Employee Advance": "public/js/employee_advance.js",
-	"Payment Entry": "public/js/payment_entry.js"
+	"Payment Entry": "public/js/payment_entry.js",
+	"Purchase Invoice": "public/js/purchase_invoice.js"
 }
 
 doctype_list_js = {
@@ -221,7 +222,11 @@ doc_events = {
     },
     "Payment Entry": {
         "on_submit": "jasma.api.update_employee_advance_balance",
-        "on_cancel": "jasma.api.update_employee_advance_balance"
+        "on_cancel": "jasma.api.update_employee_advance_balance",
+        "before_submit": "jasma.jasma.doc_events.payment_entry.validate_future_payment_date"
+    },
+    "Employee Advance": {
+        "on_submit": "jasma.jasma.doc_events.employee_advance.create_payment_entry"
     }
    
 }

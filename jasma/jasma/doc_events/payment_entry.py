@@ -1,5 +1,6 @@
 import frappe
-from frappe.utils import flt
+from frappe.utils import  getdate, nowdate,flt
+from frappe import _
 
 def update_employee_advance_balance(doc, method):
 
@@ -23,3 +24,8 @@ def update_employee_advance_balance(doc, method):
             balance_amount,
             update_modified=False
         )
+        
+
+def validate_future_payment_date(self, method=None):
+    if getdate(self.posting_date) > getdate(nowdate()):
+        frappe.throw(_("Payment Date cannot be a future date."))

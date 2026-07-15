@@ -127,8 +127,7 @@ def export_payment_entries(payment_entries):
         if pe.bank_account:
             bank = frappe.get_doc("Bank Account", pe.bank_account)
             bank_account = bank.bank_account_no or ""
-            ifsc = bank.ifs_code or ""
-
+            ifsc = "" if bank.ifs_code == "ICIC0000011" else (bank.ifs_code or "")
 
         if pe.party_bank_account:
             bank = frappe.get_doc("Bank Account", pe.party_bank_account)
@@ -205,7 +204,7 @@ def export_payment_entries(payment_entries):
 
     # Format Amount Column
     for cell in ws["G"][1:]:
-        cell.number_format = '#,##0.00'
+        cell.number_format = '0.00'
 
     # Format Date Column
     for cell in ws["M"][1:]:
