@@ -1,5 +1,6 @@
 {
  "actions": [],
+ "allow_bulk_edit": 1,
  "allow_rename": 1,
  "creation": "2026-04-22 10:44:53.537347",
  "doctype": "DocType",
@@ -23,7 +24,7 @@
   },
   {
    "fieldname": "information",
-   "fieldtype": "Small Text",
+   "fieldtype": "Text Editor",
    "in_list_view": 1,
    "label": "Information"
   }
@@ -32,7 +33,7 @@
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-04-22 10:47:59.219147",
+ "modified": "2026-07-17 12:22:41.073376",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "Quotation Additional Information",

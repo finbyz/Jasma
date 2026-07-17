@@ -1,12 +1,12 @@
 {
  "actions": [],
+ "allow_bulk_edit": 1,
  "autoname": "QC-.YYYY.-.#####",
  "creation": "2026-03-13 10:29:49.809981",
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
   "item_group",
-  "qc_status",
   "item",
   "item_name",
   "remarks",
@@ -17,15 +17,16 @@
   "po_no",
   "project",
   "so_no",
-  "irn",
   "section_break_ov20",
   "qc_report_parameter",
   "amended_from",
   "section_break_ttan",
   "received_quantity",
+  "accepted_quantity",
   "rejected_quantity",
   "column_break_ebzi",
-  "accepted_quantity"
+  "qc_status",
+  "irn"
  ],
  "fields": [
   {
@@ -130,7 +131,7 @@
   {
    "fieldname": "received_quantity",
    "fieldtype": "Float",
-   "label": "Received Quantity",
+   "label": "Total Quantity",
    "read_only": 1
   },
   {
@@ -163,7 +164,7 @@
  "index_web_pages_for_search": 1,
  "is_submittable": 1,
  "links": [],
- "modified": "2026-06-05 12:43:30.287859",
+ "modified": "2026-07-16 12:40:10.743045",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "QC Report",

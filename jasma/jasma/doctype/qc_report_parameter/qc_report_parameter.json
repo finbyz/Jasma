@@ -1,5 +1,6 @@
 {
  "actions": [],
+ "allow_bulk_edit": 1,
  "allow_rename": 1,
  "creation": "2026-03-13 12:07:55.921046",
  "doctype": "DocType",
@@ -11,7 +12,8 @@
   "column_break_zyuz",
   "jasma_report_check",
   "vendor_report_check",
-  "third_party_report_check"
+  "third_party_report_check",
+  "comments"
  ],
  "fields": [
   {
@@ -51,14 +53,19 @@
    "fieldname": "third_party_report_check",
    "fieldtype": "Check",
    "in_list_view": 1,
-   "label": "Third Party Report Check"
+   "label": "TPI Report Check"
+  },
+  {
+   "fieldname": "comments",
+   "fieldtype": "Small Text",
+   "label": "Comments"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-04-28 12:21:10.081010",
+ "modified": "2026-07-16 12:41:09.479770",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "QC Report Parameter",

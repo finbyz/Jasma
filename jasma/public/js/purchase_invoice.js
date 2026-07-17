@@ -1,6 +1,6 @@
 frappe.ui.form.on("Purchase Invoice", {
     refresh: function(frm) {
-        if (frm.doc.docstatus === 1) {
+        if (frm.doc.docstatus === 1 &&  frm.doc.is_return !== 1) {
             frm.add_custom_button(
                 __("Cash/Discount"),
                 function() {

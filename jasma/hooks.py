@@ -227,6 +227,9 @@ doc_events = {
     },
     "Employee Advance": {
         "on_submit": "jasma.jasma.doc_events.employee_advance.create_payment_entry"
+    },
+    "Sales Invoice": {
+        "before_save": "jasma.jasma.doc_events.sales_invoice.before_save"
     }
    
 }

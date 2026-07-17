@@ -25,8 +25,14 @@ def create_payment_entry(doc, method=None):
     # Mode of Payment (change field if different in your Employee Advance)
     pe.mode_of_payment = doc.mode_of_payment
 
+
+    bank_account =  frappe.db.get_value(
+        "Mode of Payment",
+        doc.mode_of_payment,
+        "default_bank_account",
+    )   
     # Accounts (adjust according to your implementation)
-    pe.paid_from = company.default_cash_account
+    pe.paid_from = bank_account
     pe.paid_to = doc.advance_account
 
     pe.paid_amount = doc.advance_amount

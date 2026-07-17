@@ -65,6 +65,27 @@ frappe.ui.form.on('Sales Invoice', {
         update_commercial_items_after_mapping(frm);
     },
 
+    caclulate_total: function (frm) {
+		if (frm.doc.gst_category != "Overseas" || frm.doc.manually_enter_fob_value) {
+			return;
+		}
+
+		if (!["CFR", "CPT", "DAP", "DPU", "DDP"].includes(frm.doc.incoterm)) {
+			return;
+		}
+
+		let total_fob_value = 0;
+		frm.doc.items.forEach(function (d) {
+			d.fob_value = flt(d.base_amount)
+				- flt(d.freight * frm.doc.conversion_rate)
+				- flt(d.insurance * frm.doc.conversion_rate);
+			total_fob_value += flt(d.fob_value);
+		});
+
+		frm.refresh_field("items");
+		frm.set_value("total_fob_value", total_fob_value);
+	},
+
     onload(frm) {
         const is_manual =
             frm.doc.freight_calculated === "By Amount" ||
