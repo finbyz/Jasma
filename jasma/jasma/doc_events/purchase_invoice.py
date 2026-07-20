@@ -34,3 +34,18 @@ def make_cash_discount(source_name, target_doc=None):
     doc.is_return = 1
     doc.taxes =None
     return doc
+
+
+def set_po_pr_numbers(doc, method):
+    po_list = []
+    pr_list = []
+
+    for row in doc.items:
+        if row.purchase_order and row.purchase_order not in po_list:
+            po_list.append(row.purchase_order)
+
+        if row.purchase_receipt and row.purchase_receipt not in pr_list:
+            pr_list.append(row.purchase_receipt)
+
+    doc.po = ", ".join(po_list)
+    doc.pr = ", ".join(pr_list)

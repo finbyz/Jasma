@@ -188,6 +188,9 @@ doc_events = {
         "on_submit": "jasma.jasma.doc_events.purchase_order.before_submit",
 		# "validate": "jasma.jasma.doc_events.purchase_order.validate_delivery_schedule_qty"
     },
+    "Purchase Invoice": {
+        "validate": "jasma.jasma.doc_events.purchase_invoice.set_po_pr_numbers",
+    },
 	"Subcontracting Receipt": {
 		"before_submit": "jasma.jasma.doc_events.subcontracting_reciept.validate_qc_report",
 		"on_submit": "jasma.jasma.doc_events.subcontracting_reciept.subcontracting_receipt_on_submit"
