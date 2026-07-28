@@ -73,7 +73,8 @@ doctype_js = {
 	"Item": "public/js/item.js",
 	"Employee Advance": "public/js/employee_advance.js",
 	"Payment Entry": "public/js/payment_entry.js",
-	"Purchase Invoice": "public/js/purchase_invoice.js"
+	"Purchase Invoice": "public/js/purchase_invoice.js",
+	# "Payment Request" : "public/js/payemnt_request.js"
 }
 
 doctype_list_js = {
@@ -187,13 +188,18 @@ doc_events = {
 	"Purchase Order": {
         "on_submit": "jasma.jasma.doc_events.purchase_order.before_submit",
 		# "validate": "jasma.jasma.doc_events.purchase_order.validate_delivery_schedule_qty"
+		"validate": "jasma.jasma.doc_events.purchase_order.validate"
     },
     "Purchase Invoice": {
-        "validate": "jasma.jasma.doc_events.purchase_invoice.set_po_pr_numbers",
+        "before_insert": "jasma.jasma.doc_events.purchase_invoice.set_po_pr_numbers",
     },
 	"Subcontracting Receipt": {
 		"before_submit": "jasma.jasma.doc_events.subcontracting_reciept.validate_qc_report",
-		"on_submit": "jasma.jasma.doc_events.subcontracting_reciept.subcontracting_receipt_on_submit"
+		"on_submit":  [
+            "jasma.jasma.doc_events.subcontracting_reciept.subcontracting_receipt_on_submit",
+            "jasma.jasma.doc_events.subcontracting_reciept.sync_supplier_delivery_note",
+            "jasma.jasma.doc_events.subcontracting_reciept.auto_submit_purchase_receipt",
+      ]
 	},
  	"Subcontracting Order": {
 		"before_submit": "jasma.jasma.doc_events.subcontracting_order.before_submit",
@@ -233,7 +239,12 @@ doc_events = {
     },
     "Sales Invoice": {
         "before_save": "jasma.jasma.doc_events.sales_invoice.before_save"
-    }
+    },
+    # "Payment Request": {
+    #     "before_submit": "jasma.jasma.doc_events.payment_request.before_submit",
+    #     "on_submit": "jasma.jasma.doc_events.payment_request.on_submit",
+    #     "on_cancel": "jasma.jasma.doc_events.payment_request.on_submit"
+    # }
    
 }
 
