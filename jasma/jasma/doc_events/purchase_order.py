@@ -83,3 +83,35 @@ def validate_delivery_schedule_qty(self,method):
             title=_("Delivery Qty Adjusted"),
             indicator="orange"
         )
+        
+        
+def validate(doc,method):
+    validate_subcontracted_items(doc, method)
+    
+def validate_subcontracted_items(doc, method):
+    if doc.is_subcontracted:
+        return
+
+    flagged_items = []
+
+    for row in doc.items:
+        if not row.item_code:
+            continue
+
+        item = frappe.db.get_value(
+            "Item",
+            row.item_code,
+            ["is_sub_contracted_item", "default_bom"],
+            as_dict=True
+        )
+
+        if item and item.is_sub_contracted_item and item.default_bom:
+            flagged_items.append(row.item_code)
+
+    if flagged_items:
+        frappe.throw(
+            "Items <b>{0}</b> are Subcontracted Items with a Default BOM set.<br>"
+            "Please either remove Item, "
+            "or check <b>'Supply Raw Materials'</b> (Is Subcontracted) on this Purchase Order."
+            .format(", ".join(flagged_items))
+        )

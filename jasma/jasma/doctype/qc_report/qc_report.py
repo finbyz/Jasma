@@ -125,6 +125,66 @@ class QCReport(Document):
 				frappe.throw(
 					f"Row #{row.idx}: Please select at least one checkbox (Jasma / Vendor / Third Party Report)."
 				)
-		
+    
+		self.create_non_conformance()
 
-	
+
+	def create_non_conformance(self):
+		# self IS the QC Report, no need to re-fetch
+
+		if not self.rejected_quantity:
+			return
+
+		# Avoid duplicate NC for same QC Report
+		existing_nc = frappe.db.exists("Non - Conformance", {
+			"qc_report": self.name,
+			"docstatus": ["!=", 2]
+		})
+
+		if existing_nc:
+			frappe.throw("Non Conformance already created for this QC Report")
+
+		data = {
+			"doctype": "Non - Conformance",
+			"qc_report": self.name,
+			"reference_type": self.reference_type,
+			"reference_name": self.reference_name,
+			"rejected_quantity": self.rejected_quantity,
+			"ao_reference_no":self.project
+		}
+
+		if self.item:
+			item = frappe.get_doc("Item", self.item)
+
+			data.update({
+				"product_name": item.name,
+				"jasma_part_code": item.item_code,
+				"product_drawing_no": item.drawing_1,
+			})
+
+		if self.reference_type == "Purchase Receipt":
+			pr = frappe.get_doc("Purchase Receipt", self.reference_name)
+
+			data.update({
+				"grn_date": pr.posting_date,
+				"supplier": pr.supplier
+			})
+
+			for row in pr.items:
+				if row.item_code == self.item:
+					data.update({
+						"po_reference_no": row.purchase_order,
+						"warehouse": row.warehouse
+					})
+					break
+
+		nc_doc = frappe.get_doc(data)
+		nc_doc.insert(ignore_permissions=True, ignore_mandatory=True)  
+  
+		frappe.msgprint(
+			f"Non-Conformance <a href='/desk/non---conformance/{nc_doc.name}'>{nc_doc.name}</a> has been created in Draft mode.",
+			title="Non-Conformance Created",
+			indicator="orange"
+		)
+
+		return nc_doc.name

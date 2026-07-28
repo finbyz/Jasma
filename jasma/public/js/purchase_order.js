@@ -1,4 +1,27 @@
 frappe.ui.form.on("Purchase Order Item", {
+
+    qty: function(frm, cdt, cdn) {
+
+        if (!frm.doc.is_subcontracted) return;
+
+        let row = locals[cdt][cdn];
+
+        if (flt(row.fg_item_qty) === flt(row.qty)) return;
+
+        frappe.model.set_value(cdt, cdn, "fg_item_qty", row.qty);
+    },
+
+    fg_item_qty: function(frm, cdt, cdn) {
+
+        if (!frm.doc.is_subcontracted) return;
+
+        let row = locals[cdt][cdn];
+
+        if (flt(row.qty) === flt(row.fg_item_qty)) return;
+
+        frappe.model.set_value(cdt, cdn, "qty", row.fg_item_qty);
+    },
+
     item_code: function(frm, cdt, cdn) {
 
         if (!frm.doc.is_subcontracted) return;
@@ -45,6 +68,20 @@ frappe.ui.form.on("Purchase Order Item", {
 
 
 frappe.ui.form.on("Purchase Order", {
+
+    onload: function(frm) {
+
+        if (!frm.doc.is_subcontracted) return;
+
+        (frm.doc.items || []).forEach(function(row) {
+
+            if (!row.qty) return;
+
+            if (!flt(row.fg_item_qty)) {
+                frappe.model.set_value(row.doctype, row.name, "fg_item_qty", row.qty);
+            }
+        });
+    },
 
     is_subcontracted: function(frm) {
 

@@ -1,5 +1,7 @@
 import frappe
 import json
+from frappe import _
+from frappe.utils import get_link_to_form
 # import flt
 from erpnext.subcontracting.doctype.subcontracting_receipt.subcontracting_receipt import SubcontractingReceipt
 
@@ -188,3 +190,54 @@ def subcontracting_receipt_on_submit(doc, method=None):
 				values,
 				update_modified=False,
 			)
+   
+def sync_supplier_delivery_note(doc, method=None):
+	if not doc.get("supplier_delivery_note"):
+		return
+
+	pr_names = frappe.get_all(
+		"Purchase Receipt",
+		filters={"subcontracting_receipt": doc.name},
+		pluck="name",
+	)
+
+	for pr_name in pr_names:
+		frappe.db.set_value(
+			"Purchase Receipt",
+			pr_name,
+			"supplier_delivery_note",
+			doc.supplier_delivery_note,
+			update_modified=False,
+		)
+  
+def auto_submit_purchase_receipt(doc, method):
+    """
+    Core ERPNext's auto_create_purchase_receipt() creates the Purchase Receipt
+    in Draft (save=True only, no submit). This hook runs after core's on_submit
+    and auto-submits that Purchase Receipt.
+    """
+    if not frappe.db.get_single_value("Buying Settings", "auto_create_purchase_receipt"):
+        return
+
+    pr_name = frappe.db.get_value(
+        "Purchase Receipt",
+        {"subcontracting_receipt": doc.name, "docstatus": 0},
+        "name"
+    )
+
+    if not pr_name:
+        return
+
+    pr_doc = frappe.get_doc("Purchase Receipt", pr_name)
+
+    if frappe.has_permission(pr_doc.doctype, "submit", pr_doc):
+        try:
+            pr_doc.submit()
+        except Exception as e:
+            frappe.msgprint(
+                _("Purchase Receipt {0} was created but could not be auto-submitted: {1}").format(
+                    get_link_to_form(pr_doc.doctype, pr_doc.name), str(e)
+                ),
+                title="Auto-Submit Failed",
+                indicator="orange"
+            )
