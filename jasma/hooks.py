@@ -38,7 +38,9 @@ fixtures = [
 # ------------------
 
 # include js, css files in header of desk.html
-# app_include_css = "/assets/jasma/css/jasma.css"
+# app_include_css = [
+#     "/assets/jasma/css/business_cycle_dashboard.css",
+# ]
 # app_include_js = "/assets/jasma/js/jasma.js"
 app_include_js = [
     "jasma.bundle.js",
@@ -74,7 +76,7 @@ doctype_js = {
 	"Employee Advance": "public/js/employee_advance.js",
 	"Payment Entry": "public/js/payment_entry.js",
 	"Purchase Invoice": "public/js/purchase_invoice.js",
-	# "Payment Request" : "public/js/payemnt_request.js"
+	"Payment Request" : "public/js/payemnt_request.js"
 }
 
 doctype_list_js = {
@@ -240,11 +242,11 @@ doc_events = {
     "Sales Invoice": {
         "before_save": "jasma.jasma.doc_events.sales_invoice.before_save"
     },
-    # "Payment Request": {
-    #     "before_submit": "jasma.jasma.doc_events.payment_request.before_submit",
-    #     "on_submit": "jasma.jasma.doc_events.payment_request.on_submit",
-    #     "on_cancel": "jasma.jasma.doc_events.payment_request.on_submit"
-    # }
+    "Payment Request": {
+        "before_submit": "jasma.jasma.doc_events.payment_request.before_submit",
+        "on_submit": "jasma.jasma.doc_events.payment_request.on_submit",
+        "on_cancel": "jasma.jasma.doc_events.payment_request.on_submit"
+    }
    
 }
 
