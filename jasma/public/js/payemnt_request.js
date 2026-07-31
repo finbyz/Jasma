@@ -110,6 +110,21 @@ function build_dashboard_html(d) {
         </span>
     `;
 
+    const outstanding_days_color = d.outstanding_days > 0 ? "#dc2626" : "#16a34a";
+    const outstanding_days_label = d.outstanding_days > 0
+        ? `${d.outstanding_days} days overdue`
+        : d.outstanding_days < 0
+            ? `${Math.abs(d.outstanding_days)} days left`
+            : "Due Today";
+
+    const outstanding_date_html = d.outstanding_date
+        ? frappe.datetime.str_to_user(d.outstanding_date)
+        : '<span style="color:#98a2b3;font-weight:500;font-size:15px;">Not Set</span>';
+
+    const outstanding_days_html = d.outstanding_date
+        ? `<span style="color:${outstanding_days_color};">${outstanding_days_label}</span>`
+        : '<span style="color:#98a2b3;font-weight:500;font-size:15px;">—</span>';
+
     // --- Card 4: Purchase Receipt Return(s), clickable ---
     const returns = d.purchase_receipt_returns || [];
     const return_value_html = returns.length
@@ -140,7 +155,8 @@ function build_dashboard_html(d) {
                 margin-bottom: 16px;
             }
             .pr-info-dashboard.pr-info-dashboard-row2,
-            .pr-info-dashboard.pr-info-dashboard-row3 {
+            .pr-info-dashboard.pr-info-dashboard-row3,
+            .pr-info-dashboard.pr-info-dashboard-row4 {
                 margin-bottom: 16px;
             }
             .pr-info-card {
@@ -222,6 +238,7 @@ function build_dashboard_html(d) {
             ${card("Invoice Value", fmt(d.invoice_value), PR_ICONS.invoice, "#6366f1")}
             ${card("Outstanding", fmt(d.outstanding_value), PR_ICONS.clock, "#f59e0b")}
             ${card("Payment Req.", fmt(d.payment_request_amount), PR_ICONS.card, "#0ea5e9")}
+            
         </div>
         <div class="pr-info-dashboard pr-info-dashboard-row2">
             ${card("Payment Status", payment_status_pill, PR_ICONS.status, "#8b5cf6")}
@@ -232,6 +249,10 @@ function build_dashboard_html(d) {
             ${card("Debit Note (No Ref.)", fmt(d.debit_note_without_reference), PR_ICONS.debit_note, "#ca8a04")}
             ${card("Purchase Receipt Return", return_value_html, PR_ICONS.return, "#f97316")}
             ${card(`General Ledger (${fy_label})`, "View Ledger →", PR_ICONS.ledger, "#0891b2", "pr-gl-card", gl_attrs)}
+        </div>
+        <div class="pr-info-dashboard pr-info-dashboard-row4">
+            ${card("Outstanding Date", outstanding_date_html, PR_ICONS.clock, "#64748b")}
+            ${card("Outstanding Days", outstanding_days_html, PR_ICONS.alert, outstanding_days_color)}
         </div>
     `;
 }

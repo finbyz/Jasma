@@ -87,6 +87,9 @@ def validate_delivery_schedule_qty(self,method):
         
 def validate(doc,method):
     validate_subcontracted_items(doc, method)
+
+def on_submit(doc, method):
+    auto_submit_subcontracting_order(doc, method)
     
 def validate_subcontracted_items(doc, method):
     if doc.is_subcontracted:
@@ -115,3 +118,54 @@ def validate_subcontracted_items(doc, method):
             "or check <b>'Supply Raw Materials'</b> (Is Subcontracted) on this Purchase Order."
             .format(", ".join(flagged_items))
         )
+        
+
+def auto_submit_subcontracting_order(doc, method):
+    if not doc.is_subcontracted:
+        return
+
+    if not frappe.db.get_single_value(
+        "Buying Settings",
+        "auto_submit_subcontracting_order_on_purchase_order_submission"
+    ):
+        return
+
+    sco_list = frappe.get_all(
+        "Subcontracting Order",
+        filters={"purchase_order": doc.name, "docstatus": 0},
+        pluck="name"
+    )
+
+    for sco_name in sco_list:
+        sco = frappe.get_doc("Subcontracting Order", sco_name)
+        sco.submit()
+        
+
+
+@frappe.whitelist()
+def get_manufacturing_notes_summary(purchase_order):
+    if not frappe.db.get_single_value("Buying Settings", "show_manufacturing_notes_popup_on_purchase_order_save"):
+        return []
+
+    po = frappe.get_doc("Purchase Order", purchase_order)
+
+    notes_summary = []
+    seen_items = set()
+
+    for row in po.items:
+        # Subcontracted PO -> use fg_item, else use item_code
+        lookup_item = row.fg_item if po.is_subcontracted else row.item_code
+
+        if not lookup_item or lookup_item in seen_items:
+            continue
+        seen_items.add(lookup_item)
+
+        manufacturing_notes = frappe.db.get_value("Item", lookup_item, "manufacturing_notes")
+
+        if lookup_item:
+            notes_summary.append({
+                "item_code": lookup_item,
+                "manufacturing_notes": manufacturing_notes
+            })
+
+    return notes_summary
