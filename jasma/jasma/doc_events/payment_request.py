@@ -1,6 +1,6 @@
 import frappe
 from frappe.utils import flt
-
+from frappe.utils import flt, nowdate, date_diff
 
 
 
@@ -429,7 +429,7 @@ def get_dashboard_data(reference_doctype, reference_name, pr_name=None, pr_amoun
     pi = frappe.db.get_value(
         "Purchase Invoice",
         reference_name,
-        ["grand_total", "outstanding_amount", "supplier", "company"],
+        ["grand_total", "outstanding_amount", "supplier", "company", "due_date"],
         as_dict=True
     )
 
@@ -440,6 +440,8 @@ def get_dashboard_data(reference_doctype, reference_name, pr_name=None, pr_amoun
         "invoice_value": pi.grand_total,
         "outstanding_value": pi.outstanding_amount,
         "payment_request_amount": pr_amount,
+        "outstanding_date": pi.due_date,
+        "outstanding_days": get_outstanding_days(pi.due_date, pi.outstanding_amount),
         "qc_status": get_qc_status(reference_name),
         "payment_entry_status": get_payment_entry_status(pr_name),
         "available_advance": get_available_advance(pi.supplier, reference_name),
@@ -451,6 +453,17 @@ def get_dashboard_data(reference_doctype, reference_name, pr_name=None, pr_amoun
         "fiscal_year": get_current_fiscal_year(),
     }
 
+def get_outstanding_days(due_date, outstanding_amount):
+    """
+    Days overdue from the Purchase Invoice's due_date, based on today.
+    Positive = overdue by that many days. Negative = still within terms
+    (due_date is in the future). Returns 0 if fully paid (outstanding = 0)
+    or due_date isn't set.
+    """
+    if not due_date or not flt(outstanding_amount):
+        return 0
+
+    return date_diff(nowdate(), due_date)
 
 def get_purchase_receipt_returns(reference_name):
     """
