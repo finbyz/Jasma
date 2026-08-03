@@ -699,46 +699,44 @@ def _get_procurement_cards(
         })
 
     # ── 4. PR Pending ────────────────────────────────────────────────────────
-    if _doctype_exists("Purchase Order") and frappe.has_permission("Purchase Order", "read"):
-        filters = {"docstatus": 1}
-        if company:
-            filters["company"] = company
-        records = frappe.get_list(
-            "Purchase Order",
-            filters=filters,
-            fields=["name", "transaction_date", "supplier", "supplier_name", "owner", "status", "per_received"],
-            limit_page_length=50,
-            order_by="modified desc",
-        )
-        records = [
-            r for r in records
-            if flt(r.get("per_received")) < 100
-            and r.get("status") not in ("Closed", "On Hold", "Delivered", "Completed")
-        ]
-        card_recs = [
-            {
-                "ao": r.name,
-                "date": str(r.transaction_date or ""),
-                "item": r.supplier_name or r.supplier or r.name,
-                "jpc": f"PO-{r.name[-4:]}",
-                "status": r.status or "To Receive",
-                "who": r.owner or "—",
-                "doctype": "Purchase Order",
+        if _doctype_exists("Purchase Order") and frappe.has_permission("Purchase Order", "read"):
+            filters = {
+                "docstatus": 1,
+                "status": ["not in", ["Closed", "Completed"]],
+                "per_received": ["<", 100],
             }
-            for r in records
-        ]
-        # Attach child items
-        items_map = _fetch_items_for_docs("Purchase Order", [r.name for r in records])
-        for rec in card_recs:
-            rec["doc_items"] = items_map.get(rec["ao"], [])
-        cards.append({
-            "id": "pr_pending",
-            "title": _("PR Pending"),
-            "doctype": "Purchase Order",
-            "count": len(card_recs),
-            "urg": False,
-            "items": card_recs,
-        })
+            if company:
+                filters["company"] = company
+            records = frappe.get_list(
+                "Purchase Order",
+                filters=filters,
+                fields=["name", "transaction_date", "supplier", "supplier_name", "owner", "status", "per_received"],
+                order_by="modified desc",
+            )
+            card_recs = [
+                {
+                    "ao": r.name,
+                    "date": str(r.transaction_date or ""),
+                    "item": r.supplier_name or r.supplier or r.name,
+                    "jpc": f"PO-{r.name[-4:]}",
+                    "status": r.status or "To Receive",
+                    "who": r.owner or "—",
+                    "doctype": "Purchase Order",
+                }
+                for r in records
+            ]
+            # Attach child items
+            items_map = _fetch_items_for_docs("Purchase Order", [r.name for r in records])
+            for rec in card_recs:
+                rec["doc_items"] = items_map.get(rec["ao"], [])
+            cards.append({
+                "id": "pr_pending",
+                "title": _("PR Pending"),
+                "doctype": "Purchase Order",
+                "count": len(card_recs),
+                "urg": False,
+                "items": card_recs,
+            })
 
     # ── 5. QC Pending ────────────────────────────────────────────────────────
     # Each record carries its own doctype for correct routing
@@ -841,11 +839,8 @@ def _get_procurement_cards(
             "Purchase Order",
             filters=filters,
             fields=["name", "transaction_date", "schedule_date", "supplier", "supplier_name", "owner", "status", "per_received"],
-            limit_page_length=50,
             order_by="modified desc",
         )
-        po_names = [r.name for r in records if r.name]
-        earliest_pr_dates = _get_po_earliest_pr_creation_dates(po_names)
 
         overdue_recs = []
         for r in records:
@@ -854,20 +849,12 @@ def _get_procurement_cards(
             if flt(r.get("per_received")) >= 100:
                 continue
 
-            sched = r.get("schedule_date") or r.get("transaction_date")
+            sched = r.get("schedule_date")
             if not sched:
                 continue
             sched_date = frappe.utils.getdate(sched)
-            pr_date = earliest_pr_dates.get(r.name)
 
-            if pr_date and pr_date > sched_date:
-                overdue = True
-            elif not pr_date and sched_date < today_date:
-                overdue = True
-            else:
-                overdue = False
-
-            if overdue:
+            if sched_date <= today_date:  # inclusive — matches List View's "<=" filter
                 overdue_recs.append({
                     "ao": r.name,
                     "date": str(r.transaction_date or ""),
@@ -877,6 +864,7 @@ def _get_procurement_cards(
                     "who": r.owner or "—",
                     "doctype": "Purchase Order",
                 })
+
         # Attach child items
         items_map = _fetch_items_for_docs("Purchase Order", [r["ao"] for r in overdue_recs])
         for rec in overdue_recs:
@@ -891,7 +879,6 @@ def _get_procurement_cards(
         })
 
     return cards
-
 
 def _get_po_earliest_pr_creation_dates(po_names: list[str]) -> dict[str, Any]:
     """Return the earliest Payment Request creation date per Purchase Order."""
