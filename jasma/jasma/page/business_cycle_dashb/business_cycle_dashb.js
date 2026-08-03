@@ -10,6 +10,9 @@ function ensure_business_cycle_dashboard(wrapper) {
 			wrapper.business_cycle_dashb = new MELBusinessCycleDashboard(wrapper);
 		}
 	});
+	if (!wrapper.business_cycle_dashb) {
+		wrapper.business_cycle_dashb = new MELBusinessCycleDashboard(wrapper);
+	}
 }
 
 business_cycle_dashboard_routes.forEach((route) => {
@@ -26,26 +29,45 @@ business_cycle_dashboard_routes.forEach((route) => {
 	}
 });
 
-
+// ─── Utility: Format date string (YYYY-MM-DD) → DD/MM/YYYY ──────────────────
+function fmt_date(val) {
+	if (!val || val === "—") return "—";
+	const s = String(val).split(" ")[0]; // strip time if any
+	const parts = s.split("-");
+	if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
+	return s;
+}
 
 class MELBusinessCycleDashboard {
 	constructor(wrapper) {
 		this.wrapper = wrapper;
 		this.page = frappe.ui.make_app_page({
 			parent: wrapper,
-			title: __("Business Cycle Dashboard"),
+			title: __("Procurement & Business Cycle Dashboard"),
 			single_column: true,
 		});
 		this.api = "jasma.jasma.page.business_cycle_dashb.business_cycle_dashb";
 		this.cycle = "sales";
 		this.data = null;
+		this.procurement_cards = [];
+		this.stock_data = [];
+		this.supplier_data = [];
 		this.current_stage = null;
 		this.current_records = [];
 		this.controls = {};
 		this.loading = false;
 		this.refresh_timer = null;
-		this.search_timer = null;
 		this.suppress_filter_refresh = true;
+
+		this.colors = {
+			mr_approved: { cls: "clr-cyan", icon: "octicon octicon-file", clr: "#0891b2" },
+			po_pending: { cls: "clr-amber", icon: "octicon octicon-shopping-bag", clr: "#d97706" },
+			subcon_po: { cls: "clr-indigo", icon: "octicon octicon-git-branch", clr: "#4f46e5" },
+			pr_pending: { cls: "clr-slate", icon: "octicon octicon-list-unordered", clr: "#475569" },
+			qc_pending: { cls: "clr-emerald", icon: "octicon octicon-search", clr: "#059669" },
+			nc_pending: { cls: "clr-rose", icon: "octicon octicon-alert", clr: "#e11d48" },
+			overdue_po: { cls: "clr-red", icon: "octicon octicon-clock", clr: "#dc2626" },
+		};
 
 		this.build();
 		this.suppress_filter_refresh = false;
@@ -57,128 +79,94 @@ class MELBusinessCycleDashboard {
 	build() {
 		this.$main = $(`
 			<div class="mel-cycle-dashboard">
-				<section class="mel-cycle-hero">
-					<div>
-						<div class="mel-cycle-eyebrow">${__("ERPNext Live Flow")}</div>
-						<h2>${__("Sales, Purchase & Subcontracting")}</h2>
-						<p>${__(
-							"Follow every document from its source to completion, then open the native List or current Form."
-						)}</p>
-					</div>
-					<div class="mel-cycle-live">
-						<span class="mel-live-dot"></span>
-						<span>${__("Live ERPNext data")}</span>
-					</div>
-				</section>
+				<div class="toast-box" id="mel-toasts"></div>
+				<div class="modal-wrap" id="mel-modal">
+					<div class="modal-bg"></div>
+					<div class="modal-box" id="mel-modalBody" style="max-width:900px;width:90%;"></div>
+				</div>
 
-				<section class="mel-cycle-toolbar">
-					<div class="mel-cycle-tabs" role="tablist">
-						<button class="mel-cycle-tab is-active" data-cycle="sales" type="button">
-							${__("Sales Cycle")}
-						</button>
-						<button class="mel-cycle-tab" data-cycle="purchase" type="button">
-							${__("Purchase Cycle")}
-						</button>
-						<button class="mel-cycle-tab" data-cycle="subcontracting" type="button">
-							${__("Subcontracting")}
-						</button>
+				<div class="sec-bar">
+					<div>
+						<div class="sec-title">${__("Dashboard Overview")}</div>
+						<div class="sec-sub">${__("Click any card to view detailed stage records")}</div>
 					</div>
-					<div class="mel-filter-grid">
+					<div class="mel-filter-grid" style="display:flex;gap:10px;align-items:center;">
 						<div class="mel-filter-control" data-filter="company"></div>
 						<div class="mel-filter-control" data-filter="from_date"></div>
 						<div class="mel-filter-control" data-filter="to_date"></div>
-						<div class="mel-filter-control" data-filter="party"></div>
-						<button class="btn btn-default mel-clear-filters" type="button">
-							${__("Clear")}
+						<button class="btn btn-default mel-clear-filters" type="button">${__("Clear")}</button>
+					</div>
+				</div>
+
+				<div style="padding: 8px 24px 28px 24px;">
+					<div class="grid-7" id="mel-cardGrid"></div>
+				</div>
+
+				<div class="sec-bar">
+					<div>
+						<div class="sec-title">${__("Stock Overview")}</div>
+						<div class="sec-sub">${__("Item-wise stock levels, valuation, and export commitments")}</div>
+					</div>
+					<div style="display:flex; align-items:center; gap:12px;">
+						<input type="text" class="f-input-light" id="mel-stockSearch" placeholder="${__("Search items...")}" style="width:360px;">
+						<button class="btn-b mel-export-stock" type="button" style="padding:10px 20px;border-radius:9999px;">
+							${__("Export Stock CSV")}
 						</button>
 					</div>
-				</section>
-
-				<div class="mel-dashboard-alert" hidden></div>
-				<div class="mel-dashboard-loading" hidden>
-					<div class="mel-loading-line"></div>
-					<div class="mel-loading-grid">
-						<div></div><div></div><div></div><div></div>
+				</div>
+				<div style="padding: 8px 24px 32px 24px;">
+					<div class="tbl-wrap">
+						<div class="tbl-scroll">
+							<table class="dtable" id="mel-stockTbl">
+								<thead>
+									<tr>
+										<th>${__("Item Name")}</th>
+										<th style="white-space:nowrap;">${__("JPC")}</th>
+										<th style="white-space:nowrap;">${__("Valuation Rate")}</th>
+										<th style="white-space:nowrap;">${__("Total Stock")}</th>
+										<th title="${__("Qty not yet received past required date")}">${__("Pending Orders")}</th>
+										<th style="width:110px;line-height:1.2;">${__("Export Commitment")}</th>
+										<th style="width:110px;line-height:1.2;">${__("Export Forecast")}</th>
+										<th style="width:100px;">${__("Actions")}</th>
+									</tr>
+								</thead>
+								<tbody id="mel-stockBody"></tbody>
+							</table>
+						</div>
 					</div>
 				</div>
 
-				<div class="mel-dashboard-content">
-					<section class="mel-summary-grid"></section>
-
-					<section class="mel-cycle-section">
-						<div class="mel-section-heading">
-							<div>
-								<h3 class="mel-flow-title">${__("Document Flow")}</h3>
-								<p class="mel-flow-description"></p>
-							</div>
-							<div class="mel-as-of"></div>
-						</div>
-						<div class="mel-flow-scroll">
-							<div class="mel-flow-grid"></div>
-						</div>
-					</section>
-
-					<section class="mel-cycle-section mel-records-section">
-						<div class="mel-section-heading mel-records-heading">
-							<div>
-								<div class="mel-heading-row">
-									<h3 class="mel-records-title">${__("Current Stage")}</h3>
-									<span class="mel-record-count">0</span>
-								</div>
-								<p>${__("Click a document to inspect its current data and connected records.")}</p>
-							</div>
-							<div class="mel-record-actions">
-								<div class="mel-record-search">
-									<svg class="icon icon-sm" aria-hidden="true">
-										<use href="#icon-search"></use>
-									</svg>
-									<input type="search" placeholder="${__("Search current stage")}">
-								</div>
-								<button class="btn btn-default mel-export-stage" type="button">
-									${__("Export CSV")}
-								</button>
-								<button class="btn btn-primary mel-open-list" type="button">
-									${__("List View")}
-								</button>
-							</div>
-						</div>
-						<div class="mel-stage-table-wrap">
-							<table class="mel-stage-table">
+				<div class="sec-bar">
+					<div>
+						<div class="sec-title">${__("Supplier Performance")}</div>
+						<div class="sec-sub">${__("Order history, NC tracking, and PO delay analysis")}</div>
+					</div>
+					<input type="text" class="f-input-light" id="mel-suppSearch" placeholder="${__("Search suppliers...")}" style="width:360px;">
+				</div>
+				<div style="padding: 8px 24px 32px 24px;">
+					<div class="tbl-wrap">
+						<div class="tbl-scroll">
+							<table class="dtable" id="mel-suppTbl">
 								<thead>
 									<tr>
-										<th>${__("Date")}</th>
-										<th>${__("Document")}</th>
-										<th>${__("Party / Title")}</th>
-										<th>${__("Status")}</th>
-										<th>${__("Amount")}</th>
-										<th>${__("Due Date")}</th>
-										<th class="mel-actions-column">${__("Actions")}</th>
+										<th>${__("Supplier Name")}</th>
+										<th>${__("Total Orders")}</th>
+										<th>${__("Total Value")}</th>
+										<th>${__("NC Count")}</th>
+										<th>${__("PO Delayed")}</th>
+										<th>${__("Avg Delay")}</th>
+										<th>${__("Contract Expiry")}</th>
+										<th>${__("Actions")}</th>
 									</tr>
 								</thead>
-								<tbody></tbody>
+								<tbody id="mel-suppBody"></tbody>
 							</table>
-							<div class="mel-stage-empty" hidden></div>
 						</div>
-					</section>
+					</div>
 				</div>
-
-				<div class="mel-doc-backdrop" data-drawer-close hidden></div>
-				<aside class="mel-doc-drawer" aria-hidden="true">
-					<div class="mel-doc-drawer-body"></div>
-				</aside>
 			</div>
 		`).appendTo(this.page.main);
 
-		this.$content = this.$main.find(".mel-dashboard-content");
-		this.$loading = this.$main.find(".mel-dashboard-loading");
-		this.$alert = this.$main.find(".mel-dashboard-alert");
-		this.$summary = this.$main.find(".mel-summary-grid");
-		this.$flow = this.$main.find(".mel-flow-grid");
-		this.$table_body = this.$main.find(".mel-stage-table tbody");
-		this.$empty = this.$main.find(".mel-stage-empty");
-		this.$drawer = this.$main.find(".mel-doc-drawer");
-		this.$drawer_body = this.$main.find(".mel-doc-drawer-body");
-		this.$backdrop = this.$main.find(".mel-doc-backdrop");
 		this.make_filter_controls();
 	}
 
@@ -203,7 +191,6 @@ class MELBusinessCycleDashboard {
 			label: __("To Date"),
 			default: today,
 		});
-		this.make_party_control();
 	}
 
 	make_control(slot, df) {
@@ -213,7 +200,7 @@ class MELBusinessCycleDashboard {
 			df: {
 				...df,
 				onchange: () => {
-					if (!this.suppress_filter_refresh) this.queue_refresh();
+					if (!this.suppress_filter_refresh) this.refresh();
 				},
 			},
 			render_input: true,
@@ -225,98 +212,82 @@ class MELBusinessCycleDashboard {
 		return control;
 	}
 
-	make_party_control() {
-		const previous = this.controls.party ? this.controls.party.get_value() : "";
-		const is_sales = this.cycle === "sales";
-		this.controls.party = this.make_control("party", {
-			fieldtype: "Link",
-			options: is_sales ? "Customer" : "Supplier",
-			label: is_sales ? __("Customer") : __("Supplier"),
-		});
-		if (previous) {
-			this.controls.party.set_value("");
-		}
-	}
-
-	configure_page_actions() {
-		this.page.set_primary_action(__("Refresh"), () => this.refresh(), "refresh");
-		this.page.add_menu_item(__("Export Current Stage"), () => this.export_current_stage());
-		this.page.add_menu_item(__("Open Selected List"), () => this.open_list());
-	}
-
-	bind_events() {
-		this.$main.on("click", "[data-cycle]", (event) => {
-			const cycle = $(event.currentTarget).data("cycle");
-			if (cycle === this.cycle) return;
-			this.cycle = cycle;
-			this.current_stage = null;
-			this.current_records = [];
-			this.$main.find("[data-cycle]").removeClass("is-active");
-			$(event.currentTarget).addClass("is-active");
-			this.make_party_control();
-			this.close_drawer();
-			this.refresh();
-		});
-
-		this.$main.on("click", ".mel-clear-filters", () => this.clear_filters());
-		this.$main.on("click", ".mel-open-list", () => this.open_list());
-		this.$main.on("click", ".mel-export-stage", () => this.export_current_stage());
-
-		this.$main.on("click", ".mel-stage-card", (event) => {
-			if ($(event.target).closest("[data-stage-list]").length) return;
-			const doctype = $(event.currentTarget).data("doctype");
-			const disabled = $(event.currentTarget).attr("aria-disabled") === "true";
-			if (!disabled) this.load_stage(doctype);
-		});
-
-		this.$main.on("click", "[data-stage-list]", (event) => {
-			event.stopPropagation();
-			this.open_list($(event.currentTarget).data("stage-list"));
-		});
-
-		this.$main.on("click", "[data-doc-preview]", (event) => {
-			const $target = $(event.currentTarget);
-			this.open_document_preview($target.data("doctype"), $target.data("doc-preview"));
-		});
-
-		this.$main.on("click", "[data-doc-open]", (event) => {
-			const $target = $(event.currentTarget);
-			this.open_form($target.data("doctype"), $target.data("doc-open"));
-		});
-
-		this.$main.on("click", "[data-linked-doctype]", (event) => {
-			const $target = $(event.currentTarget);
-			this.open_form($target.data("linked-doctype"), $target.data("linked-name"));
-		});
-
-		this.$main.on("click", "[data-drawer-close]", () => this.close_drawer());
-
-		this.$main.find(".mel-record-search input").on("input", (event) => {
-			clearTimeout(this.search_timer);
-			this.search_timer = setTimeout(() => {
-				if (this.current_stage) {
-					this.load_stage(this.current_stage.doctype, $(event.currentTarget).val());
-				}
-			}, 350);
-		});
-
-		$(document).on("keydown.mel-business-cycle-dashboard", (event) => {
-			if (event.key === "Escape") this.close_drawer();
-		});
-	}
-
-	queue_refresh() {
-		clearTimeout(this.refresh_timer);
-		this.refresh_timer = setTimeout(() => this.refresh(), 300);
-	}
-
 	get_filters() {
 		return {
 			company: this.controls.company?.get_value() || "",
 			from_date: this.controls.from_date?.get_value() || "",
 			to_date: this.controls.to_date?.get_value() || "",
-			party: this.controls.party?.get_value() || "",
 		};
+	}
+
+	configure_page_actions() {
+		this.page.set_primary_action(__("Refresh"), () => this.refresh(), "refresh");
+	}
+
+	bind_events() {
+		this.$main.on("click", ".modal-bg, [data-close-modal]", () => this.close_modal());
+		this.$main.on("click", ".mel-clear-filters", () => this.clear_filters());
+
+		this.$main.on("input", "#mel-stockSearch", (e) => {
+			const query = $(e.currentTarget).val().toLowerCase();
+			this.render_stock_table(query);
+		});
+
+		this.$main.on("input", "#mel-suppSearch", (e) => {
+			const query = $(e.currentTarget).val().toLowerCase();
+			this.render_supplier_table(query);
+		});
+
+		this.$main.on("click", ".dash-card", (e) => {
+			const cid = $(e.currentTarget).data("cid");
+			this.open_stage_list_dialog(cid);
+		});
+
+		this.$main.on("click", ".mel-open-filtered-desk-list", (e) => {
+			const $t = $(e.currentTarget);
+			const cid = $t.data("cid");
+			const doctype = $t.data("doctype");
+			this.open_filtered_desk_list(cid, doctype);
+		});
+
+		// Export Forecast → Quotation dialog
+		this.$main.on("click", ".mel-view-export-forecast", (e) => {
+			const $t = $(e.currentTarget);
+			this.open_export_forecast_modal($t.data("item"), $t.data("item-code"));
+		});
+
+		// Export Commitment → SO dialog with date filter
+		this.$main.on("click", ".mel-view-export-commitment", (e) => {
+			const $t = $(e.currentTarget);
+			const filters = this.get_filters();
+			this.open_export_commitment_modal(
+				$t.data("item"),
+				$t.data("item-code"),
+				filters.from_date,
+				filters.to_date
+			);
+		});
+
+		// Pending Orders (overdue PO qty) → PO dialog
+		this.$main.on("click", ".mel-view-pending-po", (e) => {
+			const $t = $(e.currentTarget);
+			this.open_pending_po_modal($t.data("item"), $t.data("item-code"));
+		});
+
+		this.$main.on("click", ".mel-view-delayed-po", (e) => {
+			const $t = $(e.currentTarget);
+			this.open_delayed_po_drawer($t.data("supplier"), $t.data("supplier-code"));
+		});
+
+		this.$main.on("click", ".mel-export-stock", () => {
+			this.export_stock_csv();
+		});
+
+		$(document).on("keydown.mel-dash", (e) => {
+			if (e.key === "Escape") {
+				this.close_modal();
+			}
+		});
 	}
 
 	clear_filters() {
@@ -324,7 +295,6 @@ class MELBusinessCycleDashboard {
 		this.controls.company.set_value(frappe.defaults.get_user_default("Company") || "");
 		this.controls.from_date.set_value("");
 		this.controls.to_date.set_value("");
-		this.controls.party.set_value("");
 		this.suppress_filter_refresh = false;
 		this.refresh();
 	}
@@ -340,633 +310,607 @@ class MELBusinessCycleDashboard {
 	async refresh() {
 		if (this.loading) return;
 		this.loading = true;
-		this.set_loading(true);
-		this.hide_alert();
 
 		try {
-			const data = await this.call("get_dashboard", {
-				cycle: this.cycle,
-				...this.get_filters(),
-			});
-			this.data = data;
-			this.render_dashboard();
+			const filters = this.get_filters();
+			const [dashboard_data, stock, suppliers] = await Promise.all([
+				this.call("get_dashboard", { cycle: "sales", ...filters }),
+				this.call("get_stock_overview", {}),
+				this.call("get_supplier_performance", {}),
+			]);
+			this.data = dashboard_data;
+			this.procurement_cards = dashboard_data?.procurement_cards || [];
+			this.stock_data = stock || [];
+			this.supplier_data = suppliers || [];
+
+			this.render_overview_cards();
+			this.render_stock_table();
+			this.render_supplier_table();
 		} catch (error) {
-			this.show_alert(
-				error?.message || __("Could not load the business-cycle dashboard."),
-				"danger"
-			);
+			this.toast(error?.message || __("Could not refresh dashboard."));
 		} finally {
 			this.loading = false;
-			this.set_loading(false);
 		}
 	}
 
-	set_loading(is_loading) {
-		this.$loading.prop("hidden", !is_loading);
-		this.$content.toggleClass("is-loading", is_loading);
-	}
+	render_overview_cards() {
+		const $grid = this.$main.find("#mel-cardGrid").empty();
+		let html = "";
+		const cards = this.procurement_cards || [];
 
-	show_alert(message, tone = "warning") {
-		this.$alert
-			.removeClass("is-warning is-danger")
-			.addClass(`is-${tone}`)
-			.text(message)
-			.prop("hidden", false);
-	}
-
-	hide_alert() {
-		this.$alert.prop("hidden", true).text("");
-	}
-
-	render_dashboard() {
-		this.$main.find(".mel-flow-title").text(this.data.label);
-		this.$main.find(".mel-flow-description").text(this.data.description);
-		this.$main
-			.find(".mel-as-of")
-			.text(`${__("As of")} ${this.format_date(this.data.as_of)}`);
-		this.render_summary();
-
-		let stage = null;
-		if (this.current_stage) {
-			stage = this.data.stages.find(
-				(item) => item.doctype === this.current_stage.doctype && item.can_read
-			);
-		}
-		if (!stage) {
-			stage = this.data.stages.find((item) => item.can_read);
-		}
-		this.current_stage = stage || null;
-		this.current_records = stage?.records || [];
-		this.render_flow();
-		this.render_stage_table();
-	}
-
-	render_summary() {
-		const cards = [
-			{
-				label: __("Available Steps"),
-				value: this.data.summary.available_steps,
-				note: __("on this site"),
-				tone: "slate",
-			},
-			{
-				label: __("Documents"),
-				value: this.data.summary.documents,
-				note: __("in selected period"),
-				tone: "blue",
-			},
-			{
-				label: __("Draft"),
-				value: this.data.summary.drafts,
-				note: __("needs action"),
-				tone: "amber",
-			},
-			{
-				label: __("Submitted"),
-				value: this.data.summary.submitted,
-				note: __("confirmed records"),
-				tone: "green",
-			},
-		];
-
-		this.$summary.html(
-			cards
-				.map(
-					(card) => `
-						<article class="mel-summary-card is-${card.tone}">
-							<div class="mel-summary-label">${this.escape(card.label)}</div>
-							<div class="mel-summary-value">${this.number(card.value)}</div>
-							<div class="mel-summary-note">${this.escape(card.note)}</div>
-						</article>
-					`
-				)
-				.join("")
-		);
-	}
-
-	render_flow() {
-		this.$flow.html(
-			this.data.stages
-				.map((stage, index) => {
-					const disabled = !stage.available || !stage.can_read;
-					const active = this.current_stage?.doctype === stage.doctype;
-					const reason = disabled ? stage.reason : __("Load current records");
-					return `
-						<article
-							class="mel-stage-card ${active ? "is-active" : ""} ${
-								disabled ? "is-disabled" : ""
-							}"
-							data-doctype="${this.escape(stage.doctype)}"
-							aria-disabled="${disabled ? "true" : "false"}"
-							title="${this.escape(reason || "")}"
-						>
-							<div class="mel-stage-top">
-								<span class="mel-stage-index">${String(index + 1).padStart(2, "0")}</span>
-								<button
-									class="mel-stage-list"
-									type="button"
-									data-stage-list="${this.escape(stage.doctype)}"
-									${disabled ? "disabled" : ""}
-								>
-									${__("List")}
-								</button>
-							</div>
-							<div class="mel-stage-count">${disabled ? "—" : this.number(stage.count)}</div>
-							<div class="mel-stage-label">${this.escape(stage.label)}</div>
-							<div class="mel-stage-meta">
-								${
-									disabled
-										? this.escape(stage.available ? __("No permission") : __("Not installed"))
-										: stage.is_submittable
-										? `${this.number(stage.draft_count)} ${__("draft")} · ${this.number(
-												stage.submitted_count
-										  )} ${__("submitted")}`
-										: `${this.number(stage.count)} ${__("records")}`
-								}
-							</div>
-						</article>
-					`;
-				})
-				.join("")
-		);
-	}
-
-	async load_stage(doctype, search = "") {
-		const stage = this.data?.stages.find((item) => item.doctype === doctype);
-		if (!stage || !stage.can_read) return;
-
-		this.current_stage = stage;
-		this.$flow.find(".mel-stage-card").removeClass("is-active");
-		this.$flow
-			.find(`.mel-stage-card[data-doctype="${this.selector_escape(doctype)}"]`)
-			.addClass("is-active");
-		this.render_table_loading(stage.label);
-
-		try {
-			const result = await this.call("get_stage_records", {
-				cycle: this.cycle,
-				doctype,
-				search,
-				limit: 100,
-				...this.get_filters(),
-			});
-			this.current_records = result.records || [];
-			this.current_stage = {
-				...stage,
-				count: result.count,
-				date_field: result.date_field,
-			};
-			this.render_stage_table();
-		} catch (error) {
-			this.show_alert(error?.message || __("Could not load the selected stage."), "danger");
-			this.current_records = [];
-			this.render_stage_table();
-		}
-	}
-
-	render_table_loading(label) {
-		this.$main.find(".mel-records-title").text(label);
-		this.$main.find(".mel-record-count").text(__("Loading"));
-		this.$empty.prop("hidden", true);
-		this.$table_body.html(
-			`<tr><td colspan="7"><div class="mel-table-loading">${__("Loading live records…")}</div></td></tr>`
-		);
-	}
-
-	render_stage_table() {
-		const stage = this.current_stage;
-		if (!stage) {
-			this.$main.find(".mel-records-title").text(__("No readable stage"));
-			this.$main.find(".mel-record-count").text("0");
-			this.$table_body.empty();
-			this.show_table_empty(__("No cycle DocTypes are available with your current permissions."));
-			return;
-		}
-
-		this.$main.find(".mel-records-title").text(stage.label);
-		this.$main.find(".mel-record-count").text(this.number(stage.count));
-		this.$main.find(".mel-open-list").prop("disabled", !stage.can_read);
-		this.$main.find(".mel-export-stage").prop("disabled", !this.current_records.length);
-
-		if (!this.current_records.length) {
-			this.$table_body.empty();
-			this.show_table_empty(__("No documents match the selected filters."));
-			return;
-		}
-
-		this.$empty.prop("hidden", true);
-		this.$table_body.html(
-			this.current_records
-				.map(
-					(record) => `
-						<tr>
-							<td class="mel-date-cell">${this.escape(this.format_date(record.date))}</td>
-							<td>
-								<button
-									class="mel-doc-link"
-									type="button"
-									data-doc-preview="${this.escape(record.name)}"
-									data-doctype="${this.escape(record.doctype)}"
-								>
-									${this.escape(record.name)}
-								</button>
-								<div class="mel-doc-type">${this.escape(record.doctype)}</div>
-							</td>
-							<td>
-								<div class="mel-party-name">${this.escape(record.party || record.title || "—")}</div>
-								${record.project ? `<div class="mel-project">${this.escape(record.project)}</div>` : ""}
-							</td>
-							<td>${this.status_badge(record.status, record.docstatus)}</td>
-							<td class="mel-amount-cell">${this.format_amount(
-								record.amount,
-								record.currency
-							)}</td>
-							<td class="mel-date-cell">${this.escape(this.format_date(record.due_date))}</td>
-							<td>
-								<div class="mel-row-actions">
-									<button
-										class="btn btn-xs btn-default"
-										type="button"
-										data-doc-preview="${this.escape(record.name)}"
-										data-doctype="${this.escape(record.doctype)}"
-									>
-										${__("Preview")}
-									</button>
-									<button
-										class="btn btn-xs btn-default"
-										type="button"
-										data-doc-open="${this.escape(record.name)}"
-										data-doctype="${this.escape(record.doctype)}"
-									>
-										${__("Open")}
-									</button>
-								</div>
-							</td>
-						</tr>
-					`
-				)
-				.join("")
-		);
-	}
-
-	show_table_empty(message) {
-		this.$empty.text(message).prop("hidden", false);
-	}
-
-	async open_document_preview(doctype, name) {
-		this.open_drawer();
-		this.$drawer_body.html(`
-			<div class="mel-drawer-loading">
-				<div class="mel-spinner"></div>
-				<div>${__("Loading current document…")}</div>
-			</div>
-		`);
-
-		try {
-			const doc = await this.call("get_document_preview", { doctype, name });
-			this.render_document_preview(doc);
-		} catch (error) {
-			this.$drawer_body.html(`
-				<div class="mel-drawer-error">
-					<h4>${__("Unable to open preview")}</h4>
-					<p>${this.escape(error?.message || __("The document could not be loaded."))}</p>
-					<button class="btn btn-default" type="button" data-drawer-close>${__("Close")}</button>
+		cards.forEach((c, idx) => {
+			const config = this.colors[c.id] || { cls: "clr-slate", icon: "octicon octicon-file", clr: "#475569" };
+			html += `
+				<div class="dash-card ${config.cls} anim-in" style="animation-delay:${idx * 0.05}s" data-cid="${c.id}">
+					${c.urg ? `<div class="urgent-dot"></div>` : ""}
+					<div class="card-icon"><i class="${config.icon}"></i></div>
+					<div class="card-num" data-ct="${c.count}">${c.count}</div>
+					<div class="card-label">${frappe.utils.escape_html(c.title)}</div>
+					<div class="card-hint"><i class="octicon octicon-link-external" style="margin-right:6px;"></i>${__("Click to View")}</div>
 				</div>
-			`);
-		}
+			`;
+		});
+		$grid.html(html || `<div class="text-muted p-4">${__("No procurement cards available")}</div>`);
 	}
 
-	render_document_preview(doc) {
-		const fields = (doc.fields || [])
-			.map(
-				(field) => `
-					<div class="mel-preview-field">
-						<div class="mel-preview-label">${this.escape(field.label)}</div>
-						<div class="mel-preview-value">
-							${this.format_field_value(field)}
+	render_stock_table(filter_query = "") {
+		const $body = this.$main.find("#mel-stockBody").empty();
+		let items = this.stock_data || [];
+
+		if (filter_query) {
+			items = items.filter((i) => (i.item && i.item.toLowerCase().includes(filter_query)) || (i.jpc && i.jpc.toLowerCase().includes(filter_query)));
+		}
+
+		let html = "";
+		items.forEach((it) => {
+			const pending_po = it.pending_po_qty || 0;
+			const export_commit = it.export || 0;
+			const export_fcast = it.export_forecast || 0;
+			const pending_po_cls = pending_po > 0 ? "bdg-rose" : "bdg-green";
+			const export_cls = export_commit > 0 ? "bdg-amber" : "bdg-slate";
+			const fcast_cls = export_fcast > 0 ? "bdg-cyan" : "bdg-slate";
+
+			html += `
+				<tr>
+					<td style="max-width:350px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${frappe.utils.escape_html(it.item)}"><strong>${frappe.utils.escape_html(it.item)}</strong></td>
+					<td style="white-space:nowrap;font-size:12px;color:#64748b;">${frappe.utils.escape_html(it.jpc)}</td>
+					<td style="white-space:nowrap;">${format_currency(it.rate)}</td>
+					<td style="white-space:nowrap;"><span class="bdg ${it.stock > 0 ? "bdg-green" : "bdg-amber"}">${it.stock}</span></td>
+					<td>
+						<button class="btn-s mel-view-pending-po ${pending_po > 0 ? "btn-s-danger" : ""}"
+							data-item="${frappe.utils.escape_html(it.item)}"
+							data-item-code="${frappe.utils.escape_html(it.item_code || it.item)}">
+							<span class="bdg ${pending_po_cls}" style="font-size:12px;">${pending_po}</span>
+						</button>
+					</td>
+					<td>
+						<button class="btn-s mel-view-export-commitment"
+							data-item="${frappe.utils.escape_html(it.item)}"
+							data-item-code="${frappe.utils.escape_html(it.item_code || it.item)}">
+							<span class="bdg ${export_cls}" style="font-size:12px;">${export_commit}</span>
+						</button>
+					</td>
+					<td>
+						<button class="btn-s mel-view-export-forecast"
+							data-item="${frappe.utils.escape_html(it.item)}"
+							data-item-code="${frappe.utils.escape_html(it.item_code || it.item)}">
+							<span class="bdg ${fcast_cls}" style="font-size:12px;">${export_fcast}</span>
+						</button>
+					</td>
+					<td>
+						<button class="btn-b" onclick="frappe.set_route('Form', 'Item', '${frappe.utils.escape_html(it.item_code || it.item)}')">
+							${__("View Item")}
+						</button>
+					</td>
+				</tr>
+			`;
+		});
+		$body.html(html || `<tr><td colspan="8" class="text-center text-muted p-4">${__("No stock records found")}</td></tr>`);
+	}
+
+	render_supplier_table(filter_query = "") {
+		const $body = this.$main.find("#mel-suppBody").empty();
+		let sups = this.supplier_data || [];
+
+		if (filter_query) {
+			sups = sups.filter((s) => s.name && s.name.toLowerCase().includes(filter_query));
+		}
+
+		let html = "";
+		sups.forEach((s) => {
+			// Contract expiry badge
+			let contract_html = "";
+			const cs = s.contract_status || "none";
+			if (cs === "expired") {
+				contract_html = `<span class="bdg bdg-contract-expired">🔴 ${frappe.utils.escape_html(s.contract)} ${__("(Expired)")}</span>`;
+			} else if (cs === "expiring_soon") {
+				contract_html = `<span class="bdg bdg-contract-expiring">🟡 ${frappe.utils.escape_html(s.contract)} ${__("(Expiring Soon)")}</span>`;
+			} else if (cs === "active") {
+				contract_html = `<span class="bdg bdg-contract-ok">🟢 ${frappe.utils.escape_html(s.contract)}</span>`;
+			} else {
+				contract_html = `<span class="bdg bdg-slate">${__("No Contract")}</span>`;
+			}
+
+			html += `
+				<tr>
+					<td><strong>${frappe.utils.escape_html(s.name)}</strong></td>
+					<td>${s.orders}</td>
+					<td>${format_currency(s.value)}</td>
+					<td><span class="bdg ${s.nc > 0 ? "bdg-rose" : "bdg-green"}">${s.nc}</span></td>
+					<td>
+						<button class="btn-s mel-view-delayed-po" data-supplier="${frappe.utils.escape_html(s.name)}" data-supplier-code="${frappe.utils.escape_html(s.supplier_code || s.name)}">
+							${s.delayed} ${__("delayed")}
+						</button>
+					</td>
+					<td>${s.avg}</td>
+					<td>${contract_html}</td>
+					<td>
+						<button class="btn-b" onclick="frappe.set_route('Form', 'Supplier', '${frappe.utils.escape_html(s.supplier_code || s.name)}')">
+							${__("Open Supplier")}
+						</button>
+					</td>
+				</tr>
+			`;
+		});
+		$body.html(html || `<tr><td colspan="8" class="text-center text-muted p-4">${__("No supplier records found")}</td></tr>`);
+	}
+
+
+	// ─── Stage Dialog (accordion, single-open, date formatted, no dupe button) ──
+	open_stage_list_dialog(cid) {
+		const cards = this.procurement_cards || [];
+		const card = cards.find((c) => c.id === cid);
+		if (!card) return;
+
+		const card_default_doctype = card.doctype || "Purchase Order";
+		const items = card.items || [];
+
+		let rows_html = "";
+		if (items.length) {
+			items.forEach((it, idx) => {
+				const row_id = `mel-row-${idx}`;
+				// Use per-item doctype if available (e.g. QC Pending: PR vs SCR)
+				const row_doctype = it.doctype || card_default_doctype;
+				const date_display = fmt_date(it.date);
+
+				// Status badge color
+				const status_lc = (it.status || "").toLowerCase();
+				let status_cls = "bdg-slate";
+				if (status_lc.includes("draft")) status_cls = "bdg-amber";
+				else if (status_lc.includes("overdue")) status_cls = "bdg-rose";
+				else if (status_lc.includes("ordered") || status_lc.includes("received") || status_lc.includes("submitted")) status_cls = "bdg-green";
+
+				rows_html += `
+					<div class="mel-collapsible-row" id="${row_id}" data-row-idx="${idx}">
+						<div class="mel-row-header" data-row-toggle="${row_id}">
+							<span class="mel-row-chevron" id="${row_id}-icon">▶</span>
+							<a class="mel-row-docid" onclick="event.stopPropagation();frappe.set_route('Form', '${row_doctype}', '${frappe.utils.escape_html(it.ao)}')">
+								${frappe.utils.escape_html(it.ao)}
+							</a>
+							${row_doctype !== "Non - Conformance" ? `<span class="mel-row-doctype-hint">${frappe.utils.escape_html(it.item || "")}</span>` : ""}
+							<span class="mel-row-date-badge">${date_display}</span>
+							<span class="bdg ${status_cls} mel-row-status-badge">${frappe.utils.escape_html(it.status || "")}</span>
+							${it.project ? `<span class="bdg bdg-indigo mel-row-project-badge" title="${__('Project')}: ${frappe.utils.escape_html(it.project)}" onclick="event.stopPropagation();frappe.set_route('Form','Project','${frappe.utils.escape_html(it.project)}')">&#128193; ${frappe.utils.escape_html(it.project)}</span>` : ""}
+						</div>
+						<div class="mel-row-detail" id="${row_id}-detail" style="display:none;">
+						${(() => {
+							if (row_doctype === "Non - Conformance") {
+								return `
+								<div style="padding:16px;background:#f8fafc;border-radius:8px;margin-bottom:12px;border:1px solid #e2e8f0;">
+									<div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:4px;">${__("Product Name")}</div>
+									<div style="font-size:14px;font-weight:600;color:#1e293b;">${frappe.utils.escape_html(it.item || "—")}</div>
+								</div>`;
+							}
+							const doc_items = it.doc_items || [];
+							if (!doc_items.length) {
+								return `<div class="text-center text-muted" style="padding:14px 0;font-size:13px;">${__("No line items found")}</div>`;
+							}
+							const has_received_col = doc_items.some(di => di.received_qty > 0);
+							const has_rate_col = doc_items.some(di => di.rate > 0);
+							const trows = doc_items.map((di) => {
+								const rem = has_received_col ? (di.qty - (di.received_qty || 0)) : null;
+								const rem_cls = rem !== null && rem > 0 ? "bdg-amber" : "bdg-green";
+								return `<tr>
+									<td><span class="bdg bdg-indigo" style="font-size:11px;">${frappe.utils.escape_html(di.item_code)}</span></td>
+									<td style="font-weight:600;">${frappe.utils.escape_html(di.item_name)}</td>
+									<td style="text-align:right;"><span class="bdg bdg-slate">${di.qty} ${frappe.utils.escape_html(di.uom)}</span></td>
+									${has_received_col ? `<td style="text-align:right;"><span class="bdg ${rem_cls}">${rem} ${__("rem")}</span></td>` : ""}
+									<td style="color:#64748b;">${di.schedule_date ? fmt_date(di.schedule_date) : "—"}</td>
+									${has_rate_col ? `<td style="color:#475569;">${di.rate > 0 ? format_currency(di.rate) : "—"}</td>` : ""}
+								</tr>`;
+							}).join("");
+							return `
+							<div class="mel-doc-items-scroll">
+								<table class="mel-doc-items-table">
+									<thead>
+										<tr>
+											<th>${__("Code")}</th>
+											<th>${__("Item Name")}</th>
+											<th style="text-align:right;">${__("Qty")}</th>
+											${has_received_col ? `<th style="text-align:right;">${__("Remaining")}</th>` : ""}
+											<th>${__("Req. Date")}</th>
+											${has_rate_col ? `<th>${__("Rate")}</th>` : ""}
+										</tr>
+									</thead>
+									<tbody>${trows}</tbody>
+								</table>
+							</div>`;
+						})()}
+						<div style="margin-top:10px;display:flex;justify-content:flex-end;">
+							<button class="btn-b" type="button" onclick="frappe.set_route('Form', '${row_doctype}', '${frappe.utils.escape_html(it.ao)}')">
+								<i class="octicon octicon-link-external" style="margin-right:6px;"></i>${__("Open Full Form")}
+							</button>
 						</div>
 					</div>
-				`
-			)
-			.join("");
-
-		const items = doc.items ? this.render_items_preview(doc.items) : "";
-		const connections = (doc.connections || []).length
-			? `
-				<section class="mel-preview-section">
-					<div class="mel-preview-section-title">
-						${__("Connected Documents")}
-						<span>${this.number(doc.connections.length)}</span>
 					</div>
-					<div class="mel-connection-grid">
-						${doc.connections
-							.map(
-								(link) => `
-									<button
-										class="mel-connection-card"
-										type="button"
-										data-linked-doctype="${this.escape(link.doctype)}"
-										data-linked-name="${this.escape(link.name)}"
-									>
-										<span>${this.escape(link.doctype)}</span>
-										<strong>${this.escape(link.name)}</strong>
-									</button>
-								`
-							)
-							.join("")}
-					</div>
-				</section>
-			`
-			: `
-				<section class="mel-preview-section">
-					<div class="mel-preview-section-title">${__("Connected Documents")}</div>
-					<div class="mel-preview-empty">${__("No directly linked cycle document was found.")}</div>
-				</section>
-			`;
+				`;
+			});
+		} else {
+			rows_html = `<div class="text-center text-muted p-4">${__("No records found in database for this stage")}</div>`;
+		}
 
-		this.$drawer_body.html(`
-			<header class="mel-preview-header">
+		const content = `
+			<div class="modal-head">
 				<div>
-					<div class="mel-preview-doctype">${this.escape(doc.doctype)}</div>
-					<h3>${this.escape(doc.name)}</h3>
-					<div class="mel-preview-title">${this.escape(doc.title || doc.name)}</div>
+					<div class="modal-head-title">${frappe.utils.escape_html(card.title)} — ${__("Detailed Record Inspection")}</div>
+					<div class="modal-head-sub">${items.length} ${__("records in current workflow stage")}</div>
 				</div>
-				<button class="mel-drawer-close" type="button" data-drawer-close aria-label="${__("Close")}">
-					<svg class="icon icon-lg" aria-hidden="true"><use href="#icon-close"></use></svg>
-				</button>
-			</header>
-
-			<div class="mel-preview-actions">
-				<button
-					class="btn btn-primary"
-					type="button"
-					data-doc-open="${this.escape(doc.name)}"
-					data-doctype="${this.escape(doc.doctype)}"
-				>
-					${__("Open Full Form")}
-				</button>
-				<button
-					class="btn btn-default"
-					type="button"
-					data-stage-list="${this.escape(doc.doctype)}"
-				>
-					${__("List View")}
+				<div style="display:flex;align-items:center;gap:8px;">
+					<button class="btn-x" data-close-modal type="button">✕</button>
+				</div>
+			</div>
+			<div style="padding:16px 24px 8px 24px;display:flex;align-items:center;justify-content:space-between;">
+				<input type="text" class="f-input-light" id="mel-dialogSearch" placeholder="${__("Search records...")}" style="width:300px;">
+				<span style="font-size:13px;color:#64748b;">${__("DocType")}: <strong>${card_default_doctype}</strong></span>
+			</div>
+			<div style="padding:8px 24px 24px 24px;max-height:60vh;overflow-y:auto;" id="mel-collapsible-list">
+				${rows_html}
+			</div>
+			<div style="padding:16px 24px;border-top:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;background:#f8fafc;border-bottom-left-radius:16px;border-bottom-right-radius:16px;">
+				<span style="font-size:13px;color:#64748b;">${items.length} ${__("records loaded from database")}</span>
+				<button class="btn-b mel-open-filtered-desk-list" data-cid="${cid}" data-doctype="${card_default_doctype}" type="button" style="background:#2563eb;color:#ffffff;border:none;padding:8px 18px;">
+					<i class="octicon octicon-filter" style="margin-right:6px;"></i>${__("Open Filtered List View")}
 				</button>
 			</div>
-
-			<section class="mel-preview-section">
-				<div class="mel-preview-section-title">${__("Current Document")}</div>
-				<div class="mel-preview-fields">
-					${fields || `<div class="mel-preview-empty">${__("No summary fields available.")}</div>`}
-				</div>
-			</section>
-
-			${items}
-			${connections}
-
-			<section class="mel-preview-section">
-				<div class="mel-preview-section-title">${__("Audit Trail")}</div>
-				<div class="mel-audit-grid">
-					<div><span>${__("Created By")}</span><strong>${this.escape(
-						doc.audit?.owner || "—"
-					)}</strong><small>${this.escape(this.format_datetime(doc.audit?.creation))}</small></div>
-					<div><span>${__("Modified By")}</span><strong>${this.escape(
-						doc.audit?.modified_by || "—"
-					)}</strong><small>${this.escape(this.format_datetime(doc.audit?.modified))}</small></div>
-				</div>
-			</section>
-		`);
-	}
-
-	render_items_preview(items) {
-		const columns = items.columns || [];
-		const rows = items.rows || [];
-		if (!columns.length || !rows.length) return "";
-
-		return `
-			<section class="mel-preview-section">
-				<div class="mel-preview-section-title">
-					${__("Items")}
-					<span>${this.number(items.total_rows)}</span>
-				</div>
-				<div class="mel-items-table-wrap">
-					<table class="mel-items-table">
-						<thead>
-							<tr>${columns.map((column) => `<th>${this.escape(column.label)}</th>`).join("")}</tr>
-						</thead>
-						<tbody>
-							${rows
-								.map(
-									(row) => `
-										<tr>
-											${columns
-												.map(
-													(column) =>
-														`<td>${this.escape(
-															this.simple_value(row[column.fieldname], column.fieldtype)
-														)}</td>`
-												)
-												.join("")}
-										</tr>
-									`
-								)
-								.join("")}
-						</tbody>
-					</table>
-				</div>
-				${
-					items.total_rows > rows.length
-						? `<div class="mel-items-note">${__(
-								"Showing first {0} of {1} rows",
-								[rows.length, items.total_rows]
-						  )}</div>`
-						: ""
-				}
-			</section>
 		`;
+
+		this.$main.find("#mel-modalBody").html(content);
+		this.$main.find("#mel-modal").addClass("show");
+
+		// ── Accordion: single-open logic ────────────────────────────────────
+		this.$main.find("#mel-collapsible-list").off("click", "[data-row-toggle]").on("click", "[data-row-toggle]", (e) => {
+			e.stopPropagation();
+			const row_id = $(e.currentTarget).data("row-toggle");
+			const $detail = this.$main.find(`#${row_id}-detail`);
+			const $icon = this.$main.find(`#${row_id}-icon`);
+			const isOpen = $detail.is(":visible");
+
+			// Close all
+			this.$main.find(".mel-row-detail").hide();
+			this.$main.find(".mel-row-chevron").text("▶");
+
+			// Open clicked if it was closed
+			if (!isOpen) {
+				$detail.show();
+				$icon.text("▼");
+			}
+		});
+
+		// ── Search filter ────────────────────────────────────────────────────
+		this.$main.find("#mel-dialogSearch").off("input").on("input", (e) => {
+			const q = $(e.currentTarget).val().toLowerCase();
+			this.$main.find(".mel-collapsible-row").each((_, row) => {
+				const text = $(row).text().toLowerCase();
+				$(row).toggle(text.includes(q));
+			});
+		});
 	}
 
-	format_field_value(field) {
-		if (field.fieldtype === "Link" && field.options && field.value) {
-			return `
-				<button
-					class="mel-inline-link"
-					type="button"
-					data-linked-doctype="${this.escape(field.options)}"
-					data-linked-name="${this.escape(field.value)}"
-				>
-					${this.escape(field.value)}
-				</button>
-			`;
-		}
-		if (field.fieldtype === "Currency") {
-			return this.format_amount(field.value);
-		}
-		return this.escape(this.simple_value(field.value, field.fieldtype));
-	}
+	open_filtered_desk_list(cid, doctype) {
+		const today = frappe.datetime.get_today();
+		const filter_map = {
+			mr_approved:  { docstatus: 0 },
+			po_pending:   { docstatus: 1, material_request_type: "Purchase" },
+			subcon_po:    { docstatus: 1 },
+			pr_pending: {
+				docstatus: 1,
+				status: ["not in", ["Completed", "Closed"]],
+				per_received: ["<", 100],
+			},
+			qc_pending:   { docstatus: 0 },
+			nc_pending:   { docstatus: 0 },
+			overdue_po: {
+				docstatus: 1,
+				status: ["not in", ["Completed", "Closed", "Delivered", "On Hold"]],
+				per_received: ["<", 100],
+				schedule_date: ["<=", today],
+			},
+		};
 
-	simple_value(value, fieldtype) {
-		if (value === null || value === undefined || value === "") return "—";
-		if (fieldtype === "Date") return this.format_date(value);
-		if (fieldtype === "Datetime") return this.format_datetime(value);
-		if (fieldtype === "Check") return Number(value) ? __("Yes") : __("No");
-		if (["Float", "Currency", "Percent"].includes(fieldtype)) {
-			return format_number(value, null, 2);
-		}
-		return String(value).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-	}
-
-	open_drawer() {
-		this.$backdrop.prop("hidden", false);
-		this.$drawer.addClass("is-open").attr("aria-hidden", "false");
-		$("body").addClass("mel-drawer-open");
-	}
-
-	close_drawer() {
-		this.$backdrop.prop("hidden", true);
-		this.$drawer.removeClass("is-open").attr("aria-hidden", "true");
-		$("body").removeClass("mel-drawer-open");
-	}
-
-	open_list(doctype = null) {
-		const stage =
-			this.data?.stages.find((item) => item.doctype === doctype) || this.current_stage;
-		if (!stage?.can_read) return;
-
-		const filters = this.get_filters();
-		const route_options = {};
-		if (filters.company) route_options.company = filters.company;
-		if (stage.date_field && filters.from_date && filters.to_date) {
-			route_options[stage.date_field] = ["between", [filters.from_date, filters.to_date]];
-		} else if (stage.date_field && filters.from_date) {
-			route_options[stage.date_field] = [">=", filters.from_date];
-		} else if (stage.date_field && filters.to_date) {
-			route_options[stage.date_field] = ["<=", filters.to_date];
-		}
-		if (this.cycle === "subcontracting" && stage.doctype === "Purchase Order") {
-			route_options.is_subcontracted = 1;
-		}
-		if (this.cycle === "subcontracting" && stage.doctype === "Stock Entry") {
-			route_options.stock_entry_type = "Send to Subcontractor";
-		}
-		if (this.cycle === "purchase" && stage.doctype === "Purchase Order") {
-			route_options.is_subcontracted = 0;
-		}
+		const route_options = {
+			...(filter_map[cid] || {}),
+		};
 
 		frappe.route_options = route_options;
-		frappe.set_route("List", stage.doctype, "List");
+		frappe.set_route("List", doctype);
 	}
 
-	open_form(doctype, name) {
-		if (!doctype || !name) return;
-		frappe.set_route("Form", doctype, name);
+	// ─── Overdue PO dialog (Pending Orders column) ───────────────────────────
+	async open_pending_po_modal(item_name, item_code) {
+		const code = item_code || item_name;
+		let details = [];
+		try {
+			details = await this.call("get_pending_po_details", { item_code: code });
+		} catch (_e) {}
+
+		let rows_html = "";
+		if (details && details.length) {
+			details.forEach((d) => {
+				const type_cls = d.type === "Subcontracting Order" ? "bdg-indigo" : "bdg-amber";
+				const route_doctype = d.type === "Subcontracting Order" ? "Subcontracting Order" : "Purchase Order";
+				rows_html += `
+					<tr style="cursor:pointer;" onclick="frappe.set_route('Form', '${route_doctype}', '${frappe.utils.escape_html(d.doc)}')">
+						<td>
+							<a style="font-weight:700;color:#dc2626;text-decoration:underline;" onclick="event.stopPropagation();frappe.set_route('Form', '${route_doctype}', '${frappe.utils.escape_html(d.doc)}')">${frappe.utils.escape_html(d.doc)}</a>
+						</td>
+						<td><span class="bdg ${type_cls}">${frappe.utils.escape_html(d.type)}</span></td>
+						<td>${frappe.utils.escape_html(d.supplier)}</td>
+						<td><span class="bdg bdg-rose">${d.qty}</span></td>
+						<td>${fmt_date(d.required_date)}</td>
+					</tr>
+				`;
+			});
+		} else {
+			rows_html = `<tr><td colspan="5" class="text-center text-muted p-4">${__("No overdue pending orders for this item.")}</td></tr>`;
+		}
+
+		const total_qty = details.reduce((s, d) => s + (d.qty || 0), 0);
+
+		const content = `
+			<div class="modal-head">
+				<div>
+					<div class="modal-head-title">📦 ${__("Overdue Pending Orders")}: ${frappe.utils.escape_html(item_name)}</div>
+					<div class="modal-head-sub">${__("PO & Subcontracting Orders past required date — not yet received")} · ${__("Total")}: <strong>${Math.round(total_qty * 100) / 100}</strong></div>
+				</div>
+				<button class="btn-x" data-close-modal type="button">✕</button>
+			</div>
+			<div style="padding:12px 24px 24px 24px;max-height:60vh;overflow-y:auto;">
+				<table class="dtable">
+					<thead>
+						<tr>
+							<th>${__("Document")}</th>
+							<th>${__("Type")}</th>
+							<th>${__("Supplier")}</th>
+							<th>${__("Qty Pending")}</th>
+							<th>${__("Required Date")}</th>
+						</tr>
+					</thead>
+					<tbody>${rows_html}</tbody>
+				</table>
+			</div>
+		`;
+		this.$main.find("#mel-modalBody").html(content);
+		this.$main.find("#mel-modal").addClass("show");
 	}
 
-	export_current_stage() {
-		if (!this.current_stage || !this.current_records.length) {
-			frappe.show_alert({ message: __("No records to export."), indicator: "orange" });
+	// ─── Export Forecast dialog (Quotations) ─────────────────────────────────
+	async open_export_forecast_modal(item_name, item_code) {
+		const code = item_code || item_name;
+		let quotes = [];
+		try {
+			quotes = await this.call("get_export_forecast_details", { item_code: code });
+		} catch (_e) {}
+
+		let rows_html = "";
+		if (quotes && quotes.length) {
+			quotes.forEach((q) => {
+				rows_html += `
+					<tr style="cursor:pointer;" onclick="frappe.set_route('Form', 'Quotation', '${frappe.utils.escape_html(q.quot)}')">
+						<td>
+							<a style="font-weight:700;color:#0ea5e9;text-decoration:underline;" onclick="event.stopPropagation();frappe.set_route('Form', 'Quotation', '${frappe.utils.escape_html(q.quot)}')">
+								${frappe.utils.escape_html(q.quot)}
+							</a>
+							${q.via ? `<div style="font-size:11px;color:#64748b;">via ${frappe.utils.escape_html(q.via)}</div>` : ""}
+						</td>
+						<td>${frappe.utils.escape_html(q.party)}</td>
+						<td><span class="bdg bdg-cyan">${q.qty} ${frappe.utils.escape_html(q.uom)}</span></td>
+						<td>${fmt_date(q.date)}</td>
+					</tr>
+				`;
+			});
+		} else {
+			rows_html = `<tr><td colspan="4" class="text-center text-muted p-4">${__("No export forecast (Quotations) for this item.")}</td></tr>`;
+		}
+
+		const total_qty = quotes.reduce((s, q) => s + (q.qty || 0), 0);
+
+		const content = `
+			<div class="modal-head">
+				<div>
+					<div class="modal-head-title">📈 ${__("Export Forecast")}: ${frappe.utils.escape_html(item_name)}</div>
+					<div class="modal-head-sub">${__("Quotations linked to this item")} · ${__("Total")}: <strong>${Math.round(total_qty * 100) / 100}</strong></div>
+				</div>
+				<div style="display:flex;align-items:center;gap:8px;">
+					<button class="btn-b" type="button" onclick="frappe.set_route('List', 'Quotation')">
+						${__("Quotation List")}
+					</button>
+					<button class="btn-x" data-close-modal type="button">✕</button>
+				</div>
+			</div>
+			<div style="padding:24px;max-height:60vh;overflow-y:auto;">
+				<table class="dtable">
+					<thead>
+						<tr>
+							<th>${__("Quotation")}</th>
+							<th>${__("Party")}</th>
+							<th>${__("Quantity")}</th>
+							<th>${__("Date")}</th>
+						</tr>
+					</thead>
+					<tbody>
+						${rows_html}
+					</tbody>
+				</table>
+			</div>
+		`;
+		this.$main.find("#mel-modalBody").html(content);
+		this.$main.find("#mel-modal").addClass("show");
+	}
+
+	// ─── Export Commitment dialog (with date filter) ─────────────────────────
+	async open_export_commitment_modal(item_name, item_code, from_date, to_date) {
+		const code = item_code || item_name;
+		let orders = [];
+		try {
+			orders = await this.call("get_pending_so_details", { item_code: code, from_date: from_date || "", to_date: to_date || "" });
+		} catch (_e) {}
+
+		let rows_html = "";
+		if (orders && orders.length) {
+			orders.forEach((o) => {
+				rows_html += `
+					<tr style="cursor:pointer;" onclick="frappe.set_route('Form', 'Sales Order', '${frappe.utils.escape_html(o.so.split(" ")[0])}')">
+						<td>
+							<a style="font-weight:700;color:#3b82f6;text-decoration:underline;" onclick="event.stopPropagation();frappe.set_route('Form', 'Sales Order', '${frappe.utils.escape_html(o.so.split(" ")[0])}')">
+								${frappe.utils.escape_html(o.so)}
+							</a>
+						</td>
+						<td>${frappe.utils.escape_html(o.cust)}</td>
+						<td><span class="bdg bdg-amber">${o.qty}</span></td>
+						<td>${fmt_date(o.due)}</td>
+					</tr>
+				`;
+			});
+		} else {
+			rows_html = `<tr><td colspan="4" class="text-center text-muted p-4">${__("No export commitments for this item in the selected date range.")}</td></tr>`;
+		}
+
+		const date_range_label = (from_date || to_date)
+			? `${from_date ? fmt_date(from_date) : "…"} → ${to_date ? fmt_date(to_date) : "…"}`
+			: __("All dates");
+
+		const total_qty = orders.reduce((s, o) => s + (o.qty || 0), 0);
+
+		const content = `
+			<div class="modal-head">
+				<div>
+					<div class="modal-head-title">📊 ${__("Export Commitment")}: ${frappe.utils.escape_html(item_name)}</div>
+					<div class="modal-head-sub">${__("Sales Orders linked to this item")} · ${__("Date range")}: <strong>${date_range_label}</strong> · ${__("Total")}: <strong>${Math.round(total_qty * 100) / 100}</strong></div>
+				</div>
+				<div style="display:flex;align-items:center;gap:8px;">
+					<button class="btn-b" type="button" onclick="frappe.set_route('List', 'Sales Order')">
+						${__("SO List")}
+					</button>
+					<button class="btn-x" data-close-modal type="button">✕</button>
+				</div>
+			</div>
+			<div style="padding:24px;max-height:60vh;overflow-y:auto;">
+				<table class="dtable">
+					<thead>
+						<tr>
+							<th>${__("Sales Order")}</th>
+							<th>${__("Customer")}</th>
+							<th>${__("Quantity")}</th>
+							<th>${__("Delivery Date")}</th>
+						</tr>
+					</thead>
+					<tbody>${rows_html}</tbody>
+				</table>
+			</div>
+		`;
+
+		this.$main.find("#mel-modalBody").html(content);
+		this.$main.find("#mel-modal").addClass("show");
+	}
+
+	// ─── Delayed PO drawer (Supplier Performance row) ───────────────────────
+	async open_delayed_po_drawer(supplier_name, supplier_code) {
+		const supplier_key = supplier_code || supplier_name;
+		let details = [];
+		try {
+			details = await this.call("get_delayed_po_details", { supplier: supplier_key });
+		} catch (_e) {}
+
+		let rows_html = "";
+		if (details && details.length) {
+			details.forEach((p) => {
+				rows_html += `
+					<tr style="cursor:pointer;" onclick="frappe.set_route('Form', 'Purchase Order', '${frappe.utils.escape_html(p.po)}')">
+						<td>
+							<a style="font-weight:700;color:#dc2626;text-decoration:underline;" onclick="event.stopPropagation();frappe.set_route('Form', 'Purchase Order', '${frappe.utils.escape_html(p.po)}')">${frappe.utils.escape_html(p.po)}</a>
+						</td>
+						<td><strong>${frappe.utils.escape_html(p.item)}</strong></td>
+						<td>${fmt_date(p.due)}</td>
+						<td>${p.received && p.received !== "—" ? fmt_date(p.received) : '<span class="bdg bdg-slate">—</span>'}</td>
+						<td><span class="bdg bdg-rose">${frappe.utils.escape_html(p.delay)}</span></td>
+						<td><span class="bdg bdg-amber">${frappe.utils.escape_html(p.st)}</span></td>
+					</tr>
+				`;
+			});
+		} else {
+			rows_html = `<tr><td colspan="6" class="text-center text-muted p-4">${__("No delayed purchase orders for this supplier.")}</td></tr>`;
+		}
+
+		const content = `
+			<div class="modal-head">
+				<div>
+					<div class="modal-head-title">${frappe.utils.escape_html(supplier_name)}</div>
+					<div class="modal-head-sub">${__("Delayed Purchase Orders Breakdown")}</div>
+				</div>
+				<div style="display:flex;align-items:center;gap:8px;">
+					<button class="btn-b" type="button" onclick="frappe.route_options={'supplier':'${frappe.utils.escape_html(supplier_key)}'};frappe.set_route('List', 'Purchase Order')">
+						${__("PO List")}
+					</button>
+					<button class="btn-x" data-close-modal type="button">✕</button>
+				</div>
+			</div>
+			<div style="padding:12px 24px 24px 24px;max-height:60vh;overflow-y:auto;">
+				<table class="dtable">
+					<thead>
+						<tr>
+							<th>${__("PO")}</th>
+							<th>${__("Item")}</th>
+							<th>${__("Required Date")}</th>
+							<th>${__("Received Date")}</th>
+							<th>${__("Delay")}</th>
+							<th>${__("Status")}</th>
+						</tr>
+					</thead>
+					<tbody>${rows_html}</tbody>
+				</table>
+			</div>
+		`;
+		this.$main.find("#mel-modalBody").html(content);
+		this.$main.find("#mel-modal").addClass("show");
+	}
+
+	close_modal() {
+		this.$main.find("#mel-modal").removeClass("show");
+	}
+
+	toast(msg) {
+		const $box = this.$main.find("#mel-toasts");
+		const $t = $(`<div class="toast-msg">${frappe.utils.escape_html(msg)}</div>`).appendTo($box);
+		setTimeout(() => $t.remove(), 2600);
+	}
+
+	export_stock_csv() {
+		if (!this.stock_data.length) {
+			this.toast(__("No stock records to export."));
 			return;
 		}
-		const headers = [
-			"Date",
-			"DocType",
-			"Document",
-			"Party / Title",
-			"Status",
-			"Amount",
-			"Currency",
-			"Due Date",
-			"Project",
-		];
-		const rows = this.current_records.map((record) => [
-			record.date || "",
-			record.doctype || "",
-			record.name || "",
-			record.party || record.title || "",
-			record.status || "",
-			record.amount ?? "",
-			record.currency || "",
-			record.due_date || "",
-			record.project || "",
-		]);
-		const csv = [headers, ...rows]
-			.map((row) => row.map((value) => this.csv_cell(value)).join(","))
-			.join("\r\n");
+		const headers = ["Item Name", "JPC", "Valuation Rate", "Total Stock", "Pending PO Qty", "Export Commitment", "Export Forecast"];
+		const rows = this.stock_data.map((i) => [i.item, i.jpc, i.rate, i.stock, i.pending_po_qty || 0, i.export, i.export_forecast]);
+		const csv = [headers, ...rows].map((r) => r.map((val) => `"${String(val ?? "").replace(/"/g, '""')}"`).join(",")).join("\r\n");
 		const blob = new Blob(["\ufeff", csv], { type: "text/csv;charset=utf-8" });
 		const url = URL.createObjectURL(blob);
-		const link = document.createElement("a");
-		link.href = url;
-		link.download = `${frappe.scrub(this.current_stage.doctype)}_${frappe.datetime.get_today()}.csv`;
-		document.body.appendChild(link);
-		link.click();
-		link.remove();
+		const a = document.createElement("a");
+		a.href = url;
+		a.download = `stock_overview_${frappe.datetime.get_today()}.csv`;
+		document.body.appendChild(a);
+		a.click();
+		a.remove();
 		URL.revokeObjectURL(url);
-		frappe.show_alert({ message: __("CSV exported."), indicator: "green" });
-	}
-
-	csv_cell(value) {
-		return `"${String(value ?? "").replace(/"/g, '""')}"`;
-	}
-
-	status_badge(status, docstatus) {
-		const value = status || { 0: __("Draft"), 1: __("Submitted"), 2: __("Cancelled") }[docstatus];
-		const normalized = String(value || "").toLowerCase();
-		let tone = "gray";
-		if (
-			["submitted", "completed", "paid", "delivered", "approved", "active", "closed"].some(
-				(term) => normalized.includes(term)
-			)
-		) {
-			tone = "green";
-		} else if (
-			["cancelled", "rejected", "overdue", "failed", "stopped"].some((term) =>
-				normalized.includes(term)
-			)
-		) {
-			tone = "red";
-		} else if (
-			["draft", "pending", "open", "partly", "partial", "to "].some((term) =>
-				normalized.includes(term)
-			)
-		) {
-			tone = "amber";
-		}
-		return `<span class="mel-status is-${tone}">${this.escape(value || "—")}</span>`;
-	}
-
-	format_amount(value, currency = null) {
-		if (value === null || value === undefined || value === "") return "—";
-		return this.escape(format_currency(value, currency || undefined));
-	}
-
-	format_date(value) {
-		if (!value) return "—";
-		try {
-			return frappe.datetime.str_to_user(String(value).slice(0, 10));
-		} catch (_error) {
-			return String(value);
-		}
-	}
-
-	format_datetime(value) {
-		if (!value) return "—";
-		try {
-			return frappe.datetime.str_to_user(value);
-		} catch (_error) {
-			return String(value);
-		}
-	}
-
-	number(value) {
-		return Number(value || 0).toLocaleString();
-	}
-
-	escape(value) {
-		return frappe.utils.escape_html(String(value ?? ""));
-	}
-
-	selector_escape(value) {
-		if (window.CSS?.escape) return CSS.escape(value);
-		return String(value).replace(/(["\\])/g, "\\$1");
+		this.toast(__("Stock Overview CSV exported."));
 	}
 }
