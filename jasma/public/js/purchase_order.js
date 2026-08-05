@@ -145,8 +145,64 @@ frappe.ui.form.on("Purchase Order", {
             });
 
         }, 1000);
-    }
-// });
+    },
+    before_save(frm) {
+        return new Promise((resolve) => {
+            frappe.call({
+                method: "jasma.jasma.doc_events.purchase_order.get_manufacturing_notes_summary",
+                args: {
+                    items: frm.doc.items,
+                    is_subcontracted: frm.doc.is_subcontracted
+                },
+                callback: function (r) {
+                    if (r.message && r.message.length) {
+                        show_manufacturing_notes_popup(r.message, frm.doc.is_subcontracted);
+                    }
+                    resolve();
+                }
+            });
+        });
+}
+});
+
+function show_manufacturing_notes_popup(data, is_subcontracted) {
+    let column_label = is_subcontracted ? __("FG Item") : __("Item Code");
+
+    let rows = data.map(d => `
+        <tr>
+            <td>${frappe.utils.escape_html(d.item_code)}</td>
+            <td>${frappe.utils.escape_html(d.manufacturing_notes || "")}</td>
+        </tr>
+    `).join("");
+
+    let html = `
+        <table class="table table-bordered">
+            <thead>
+                <tr>
+                    <th>${column_label}</th>
+                    <th>${__("Manufacturing Notes")}</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${rows}
+            </tbody>
+        </table>
+    `;
+
+    let d = new frappe.ui.Dialog({
+        title: __("Manufacturing Notes"),
+        size: "large",
+        fields: [
+            {
+                fieldname: "notes_html",
+                fieldtype: "HTML",
+                options: html
+            }
+        ]
+    });
+
+    d.show();
+}
 // });
 
 
@@ -209,10 +265,7 @@ frappe.ui.form.on("Purchase Order", {
 	// 		};
 	// }
 
-});
-
-
-
+// });
 
 // function toggle_delivery_terms_mandatory(frm) {
 

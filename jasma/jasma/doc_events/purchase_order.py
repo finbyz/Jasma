@@ -141,20 +141,23 @@ def auto_submit_subcontracting_order(doc, method):
         sco.submit()
         
 
-
 @frappe.whitelist()
-def get_manufacturing_notes_summary(purchase_order):
-    if not frappe.db.get_single_value("Buying Settings", "show_manufacturing_notes_popup_on_purchase_order_save"):
+def get_manufacturing_notes_summary(items, is_subcontracted=0):
+    if not frappe.db.get_single_value(
+        "Buying Settings", "show_manufacturing_notes_popup_on_purchase_order_save"
+    ):
         return []
 
-    po = frappe.get_doc("Purchase Order", purchase_order)
+    if isinstance(items, str):
+        items = frappe.parse_json(items)
+
+    is_subcontracted = frappe.utils.cint(is_subcontracted)
 
     notes_summary = []
     seen_items = set()
 
-    for row in po.items:
-        # Subcontracted PO -> use fg_item, else use item_code
-        lookup_item = row.fg_item if po.is_subcontracted else row.item_code
+    for row in items:
+        lookup_item = row.get("fg_item") if is_subcontracted else row.get("item_code")
 
         if not lookup_item or lookup_item in seen_items:
             continue
@@ -162,10 +165,9 @@ def get_manufacturing_notes_summary(purchase_order):
 
         manufacturing_notes = frappe.db.get_value("Item", lookup_item, "manufacturing_notes")
 
-        if lookup_item:
-            notes_summary.append({
-                "item_code": lookup_item,
-                "manufacturing_notes": manufacturing_notes
-            })
+        notes_summary.append({
+            "item_code": lookup_item,
+            "manufacturing_notes": manufacturing_notes
+        })
 
     return notes_summary

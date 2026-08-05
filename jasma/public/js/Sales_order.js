@@ -2,14 +2,6 @@ frappe.ui.form.on("Sales Order", {
     setup(frm) {
         set_port_filters(frm);
     },
-    onload(frm) {
-        set_country_of_destination(frm);
-    },
-
-    refresh(frm) {
-        set_country_of_destination(frm);
-    },
-
     shipping_address_name(frm) {
         set_country_of_destination(frm);
     },

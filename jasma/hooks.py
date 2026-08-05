@@ -175,6 +175,7 @@ doctype_list_js = {
 doc_events = {
 	"Item": {
 		"validate": "jasma.jasma.doc_events.item.validate",
+        "on_update": "jasma.jasma.doc_events.item.sync_drawing_number_to_default_bom"
 	},
 	"Purchase Receipt": {
 		"before_submit": "jasma.jasma.doc_events.purchase_reciept.validate_qc_report",
@@ -188,7 +189,10 @@ doc_events = {
 		 "validate":"jasma.jasma.doc_events.production_plan.validate"
     },
 	"Purchase Order": {
-        "on_submit": "jasma.jasma.doc_events.purchase_order.before_submit",
+        "on_submit":[
+             "jasma.jasma.doc_events.purchase_order.before_submit",
+             "jasma.jasma.doc_events.purchase_order.on_submit",
+        ],
 		# "validate": "jasma.jasma.doc_events.purchase_order.validate_delivery_schedule_qty"
 		"validate": "jasma.jasma.doc_events.purchase_order.validate"
     },
@@ -196,12 +200,17 @@ doc_events = {
         "before_insert": "jasma.jasma.doc_events.purchase_invoice.set_po_pr_numbers",
     },
 	"Subcontracting Receipt": {
-		"before_submit": "jasma.jasma.doc_events.subcontracting_reciept.validate_qc_report",
+		"before_submit": [
+            "jasma.jasma.doc_events.subcontracting_reciept.validate_qc_report",
+           
+      ],
 		"on_submit":  [
             "jasma.jasma.doc_events.subcontracting_reciept.subcontracting_receipt_on_submit",
             "jasma.jasma.doc_events.subcontracting_reciept.sync_supplier_delivery_note",
             "jasma.jasma.doc_events.subcontracting_reciept.auto_submit_purchase_receipt",
-      ]
+            # "jasma.jasma.doc_events.subcontracting_reciept.fix_supplied_qty_before_submit"
+      ],
+    #   "on_cancel": "jasma.jasma.doc_events.subcontracting_reciept.revert_supplied_qty_on_cancel"
 	},
  	"Subcontracting Order": {
 		"before_submit": "jasma.jasma.doc_events.subcontracting_order.before_submit",
@@ -246,7 +255,15 @@ doc_events = {
         "before_submit": "jasma.jasma.doc_events.payment_request.before_submit",
         "on_submit": "jasma.jasma.doc_events.payment_request.on_submit",
         "on_cancel": "jasma.jasma.doc_events.payment_request.on_submit"
-    }
+    },
+    "Stock Ledger Entry": {
+        "on_update": "jasma.jasma.doc_events.stock_ledger_entry.update_item_last_valuation_rate",
+        "on_cancel": "jasma.jasma.doc_events.stock_ledger_entry.update_item_last_valuation_rate",
+    },
+    "BOM": {
+		"on_submit": "jasma.jasma.doc_events.bom.deactivate_other_boms",
+		"on_update_after_submit": "jasma.jasma.doc_events.bom.deactivate_other_boms",
+	}
    
 }
 
@@ -352,6 +369,14 @@ override_doctype_class = {
 # auth_hooks = [
 # 	"jasma.auth.validate"
 # ]
+
+# scheduler_events = {
+#     "cron": {
+#         "*/5 * * * *": [
+#             "jasma.api.auto_close_completed_sales_orders"
+#         ]
+#     }
+# }
 
 # Automatically update python controller files with type annotations for this app.
 # export_python_type_annotations = True
