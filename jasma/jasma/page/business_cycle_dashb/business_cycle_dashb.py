@@ -590,7 +590,7 @@ def _get_procurement_cards(
                 "ao": r.name,
                 "date": str(r.transaction_date or ""),
                 "item": r.material_request_type or "Material Request",
-                "jpc": f"MR-{r.name[-4:]}",
+                "jpc": r.name,
                 "status": r.status or "Draft",
                 "who": r.owner or "—",
                 "project": r.project or "",
@@ -629,7 +629,7 @@ def _get_procurement_cards(
                 "ao": r.name,
                 "date": str(r.transaction_date or ""),
                 "item": f"Material Request ({r.name})",
-                "jpc": f"MR-{r.name[-4:]}",
+                "jpc": r.name,
                 "status": r.status or "Submitted",
                 "who": r.owner or "—",
                 "project": r.project or "",
@@ -677,7 +677,7 @@ def _get_procurement_cards(
                 "ao": r.name,
                 "date": str(r.transaction_date or ""),
                 "item": r.get("bom_no") or r.name,
-                "jpc": f"BOM-{r.name[-4:]}",
+                "jpc": r.name,
                 "status": r.status or "Submitted",
                 "who": r.owner or "—",
                 "project": r.get("project") or "",
@@ -718,7 +718,7 @@ def _get_procurement_cards(
                     "ao": r.name,
                     "date": str(r.transaction_date or ""),
                     "item": r.supplier_name or r.supplier or r.name,
-                    "jpc": f"PO-{r.name[-4:]}",
+                    "jpc": r.name,
                     "status": r.status or "To Receive",
                     "who": r.owner or "—",
                     "doctype": "Purchase Order",
@@ -759,7 +759,7 @@ def _get_procurement_cards(
                 "ao": r.name,
                 "date": str(r.posting_date or ""),
                 "item": r.supplier_name or r.supplier or r.name,
-                "jpc": f"{prefix}-{r.name[-4:]}",
+                "jpc": r.name,
                 "status": r.status or "Draft",
                 "who": r.owner or "—",
                 "doctype": dt,
@@ -812,7 +812,7 @@ def _get_procurement_cards(
                 "ao": r.name,
                 "date": str(r.creation).split(" ")[0] if r.creation else "",
                 "item": item_name_by_code.get(r.product_name) or r.product_name or r.jasma_part_code or r.name,
-                "jpc": r.jasma_part_code or f"NC-{r.name[-5:]}",
+                "jpc": r.jasma_part_code or r.name,
                 "status": r.status or "Draft NC",
                 "who": r.owner or "—",
                 "doctype": nc_doctype,
@@ -859,7 +859,7 @@ def _get_procurement_cards(
                     "ao": r.name,
                     "date": str(r.transaction_date or ""),
                     "item": r.supplier_name or r.supplier or r.name,
-                    "jpc": f"PO-{r.name[-4:]}",
+                    "jpc": r.name,
                     "status": "Overdue PO",
                     "who": r.owner or "—",
                     "doctype": "Purchase Order",
@@ -1299,11 +1299,18 @@ def get_pending_po_details(item_code: str | None = None) -> list[dict[str, Any]]
         return []
     return entry.get("details", [])
 
-
 @frappe.whitelist()
-def get_stock_overview(search: str | None = None) -> list[dict[str, Any]]:
+def get_stock_overview(
+    search: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> list[dict[str, Any]]:
     """Return stock overview with Bin valuation, Sales Order + BOM commitments, Quotation + BOM forecasts,
-    and overdue PO qty (not yet received past required date)."""
+    and overdue PO qty (not yet received past required date).
+
+    Export Commitment (Sales Order pending qty) is filtered by delivery_date within
+    from_date..to_date when provided, matching the date range shown in the dashboard filters.
+    """
     if not frappe.has_permission("Item", "read"):
         return []
 
@@ -1313,27 +1320,46 @@ def get_stock_overview(search: str | None = None) -> list[dict[str, Any]]:
 
     items = frappe.get_list(
         "Item",
-        filters=filters,
+        filters={
+            **filters,
+            "is_jpc_item": 1,
+        },
         fields=["name", "item_code", "item_name", "valuation_rate", "standard_rate"],
         limit_page_length=50,
         order_by="modified desc",
     )
 
+    # ── Sales Order pending qty, filtered by delivery_date range ─────────────
     so_pending_by_item: dict[str, float] = {}
     if _doctype_exists("Sales Order Item"):
+        conditions = ["docstatus = 1", "qty > delivered_qty"]
+        params: dict[str, Any] = {}
+        if from_date and to_date:
+            conditions.append("delivery_date BETWEEN %(from_date)s AND %(to_date)s")
+            params["from_date"] = from_date
+            params["to_date"] = to_date
+        elif from_date:
+            conditions.append("delivery_date >= %(from_date)s")
+            params["from_date"] = from_date
+        elif to_date:
+            conditions.append("delivery_date <= %(to_date)s")
+            params["to_date"] = to_date
+
         so_rows = frappe.db.sql(
-            """
+            f"""
             SELECT item_code, SUM(qty - delivered_qty) AS pending_qty
             FROM `tabSales Order Item`
-            WHERE docstatus = 1 AND qty > delivered_qty
+            WHERE {" AND ".join(conditions)}
             GROUP BY item_code
             """,
+            params,
             as_dict=True,
         )
         for r in so_rows:
             if r.get("item_code"):
                 so_pending_by_item[r.get("item_code")] = flt(r.get("pending_qty"))
 
+    # ── Quotation qty (forecast) — left unfiltered by date on purpose ────────
     quot_by_item: dict[str, float] = {}
     if _doctype_exists("Quotation Item"):
         q_rows = frappe.db.sql(
@@ -1403,7 +1429,7 @@ def get_stock_overview(search: str | None = None) -> list[dict[str, Any]]:
         result.append({
             "item": it.get("item_name") or code,
             "item_code": code,
-            "jpc": f"JPC-{code[-4:]}" if len(code) >= 4 else f"JPC-{code}",
+            "jpc": code if len(code) >= 4 else code,
             "rate": val_rate,
             "stock": total_stock,
             "pending_po_qty": pending_po_qty,   # overdue PO qty
@@ -1413,6 +1439,121 @@ def get_stock_overview(search: str | None = None) -> list[dict[str, Any]]:
         })
 
     return result
+
+# @frappe.whitelist()
+# def get_stock_overview(search: str | None = None) -> list[dict[str, Any]]:
+#     if not frappe.has_permission("Item", "read"):
+#         return []
+
+#     filters = {}
+#     if search:
+#         filters["item_name"] = ["like", f"%{search}%"]
+
+#     items = frappe.get_list(
+#         "Item",
+#         filters={
+#             **filters,
+#             "is_jpc_item": 1,
+#         },
+#         fields=["name", "item_code", "item_name", "valuation_rate", "standard_rate"],
+#         limit_page_length=50,
+#         order_by="modified desc",
+#     )
+
+#     so_pending_by_item: dict[str, float] = {}
+#     if _doctype_exists("Sales Order Item"):
+#         so_rows = frappe.db.sql(
+#             """
+#             SELECT item_code, SUM(qty - delivered_qty) AS pending_qty
+#             FROM `tabSales Order Item`
+#             WHERE docstatus = 1 AND qty > delivered_qty
+#             GROUP BY item_code
+#             """,
+#             as_dict=True,
+#         )
+#         for r in so_rows:
+#             if r.get("item_code"):
+#                 so_pending_by_item[r.get("item_code")] = flt(r.get("pending_qty"))
+
+#     quot_by_item: dict[str, float] = {}
+#     if _doctype_exists("Quotation Item"):
+#         q_rows = frappe.db.sql(
+#             """
+#             SELECT item_code, SUM(qty) AS forecast_qty
+#             FROM `tabQuotation Item`
+#             WHERE docstatus = 1
+#             GROUP BY item_code
+#             """,
+#             as_dict=True,
+#         )
+#         for r in q_rows:
+#             if r.get("item_code"):
+#                 quot_by_item[r.get("item_code")] = flt(r.get("forecast_qty"))
+
+#     comp_map = _get_bom_component_map()
+#     overdue_po_map = _get_overdue_po_qty_by_item()
+
+#     result = []
+#     for it in items:
+#         code = it.get("item_code") or it.get("name")
+
+#         val_rate = 0.0
+#         bin_records = frappe.get_all(
+#             "Bin",
+#             filters={"item_code": code},
+#             fields=["valuation_rate", "actual_qty", "ordered_qty"],
+#             order_by="modified desc",
+#         )
+#         for b in bin_records:
+#             v = flt(b.get("valuation_rate"))
+#             if v > 0:
+#                 val_rate = v
+#                 break
+
+#         if val_rate <= 0:
+#             val_rate = flt(it.get("valuation_rate")) or flt(it.get("standard_rate")) or 0.0
+
+#         total_stock = sum(flt(b.get("actual_qty")) for b in bin_records)
+
+#         direct_so_qty = flt(so_pending_by_item.get(code, 0.0))
+#         indirect_so_qty = 0.0
+#         for p_info in comp_map.get(code, []):
+#             p_item = p_info["parent_item"]
+#             ratio = p_info["qty_per_unit"]
+#             p_so_qty = flt(so_pending_by_item.get(p_item, 0.0))
+#             if p_so_qty > 0 and ratio > 0:
+#                 indirect_so_qty += p_so_qty * ratio
+
+#         export_commitment = direct_so_qty + indirect_so_qty
+
+#         direct_q_qty = flt(quot_by_item.get(code, 0.0))
+#         indirect_q_qty = 0.0
+#         for p_info in comp_map.get(code, []):
+#             p_item = p_info["parent_item"]
+#             ratio = p_info["qty_per_unit"]
+#             p_q_qty = flt(quot_by_item.get(p_item, 0.0))
+#             if p_q_qty > 0 and ratio > 0:
+#                 indirect_q_qty += p_q_qty * ratio
+
+#         export_forecast = direct_q_qty + indirect_q_qty
+
+#         # Overdue PO qty (not yet received past required date)
+#         overdue_info = overdue_po_map.get(code, {})
+#         pending_po_qty = round(flt(overdue_info.get("total_qty", 0.0)), 2)
+
+#         result.append({
+#             "item": it.get("item_name") or code,
+#             "item_code": code,
+#             "jpc": code if len(code) >= 4 else code,
+#             "rate": val_rate,
+#             "stock": total_stock,
+#             "pending_po_qty": pending_po_qty,   # overdue PO qty
+#             "pending": round(export_commitment, 2),  # kept for backward compat
+#             "export": round(export_commitment, 2),
+#             "export_forecast": round(export_forecast, 2),
+#         })
+
+#     return result
 
 
 def _get_contract_expiry_field() -> str | None:
@@ -1798,84 +1939,3 @@ def get_export_forecast_details(item_code: str | None = None) -> list[dict[str, 
 
     return result
 
-
-@frappe.whitelist()
-def get_delayed_po_details(supplier: str | None = None) -> list[dict[str, Any]]:
-    """Return live delayed Purchase Orders for a specific supplier.
-    Delay is calculated as receipt_date - required_date for received POs,
-    or today - required_date for open overdue POs.
-    """
-    if not supplier or not frappe.has_permission("Purchase Order", "read"):
-        return []
-
-    pos = frappe.get_all(
-        "Purchase Order",
-        filters={"supplier": supplier, "docstatus": 1},
-        fields=["name", "schedule_date", "transaction_date", "status", "per_received", "grand_total"],
-        limit_page_length=20,
-    )
-
-    today_date = frappe.utils.getdate(nowdate())
-
-    # Get receipt dates for all POs
-    po_names = [p.get("name") for p in pos if p.get("name")]
-    receipt_date_by_po: dict[str, Any] = {}
-    if po_names and _doctype_exists("Purchase Receipt Item"):
-        try:
-            receipts = frappe.db.sql(
-                """
-                SELECT pri.purchase_order AS po_name, MIN(pr.posting_date) AS receipt_date
-                FROM `tabPurchase Receipt Item` pri
-                JOIN `tabPurchase Receipt` pr ON pri.parent = pr.name
-                WHERE pr.docstatus = 1
-                  AND pri.purchase_order IN %(po_names)s
-                GROUP BY pri.purchase_order
-                """,
-                {"po_names": po_names},
-                as_dict=True,
-            )
-            for r in receipts:
-                receipt_date_by_po[r.get("po_name")] = r.get("receipt_date")
-        except Exception:
-            pass
-
-    result = []
-    for p in pos:
-        sched = p.get("schedule_date") or p.get("transaction_date")
-        if not sched:
-            continue
-        sched_date = frappe.utils.getdate(sched)
-
-        receipt_date = receipt_date_by_po.get(p.get("name"))
-        delay_days = 0
-        received_date_str = "—"
-
-        if receipt_date:
-            receipt_dt = frappe.utils.getdate(receipt_date)
-            delay_days = max(0, (receipt_dt - sched_date).days)
-            received_date_str = str(receipt_date)
-            if delay_days == 0:
-                continue  # received on time, skip
-        else:
-            # Not yet received
-            if p.get("status") in ("Closed", "On Hold", "Completed"):
-                continue
-            if flt(p.get("per_received")) >= 100:
-                continue
-            if sched_date >= today_date:
-                continue  # not yet due
-            delay_days = max(0, (today_date - sched_date).days)
-
-        po_items = frappe.get_all("Purchase Order Item", filters={"parent": p.name}, fields=["item_name", "qty"], limit=1)
-        item_title = po_items[0].get("item_name") if po_items else p.name
-
-        result.append({
-            "po": p.name,
-            "item": f"{item_title} (Qty: {po_items[0].qty if po_items else 1})",
-            "due": str(sched or "—"),
-            "received": received_date_str,
-            "delay": f"{delay_days} days" if delay_days > 0 else "Overdue",
-            "st": p.status or "Overdue",
-        })
-
-    return result

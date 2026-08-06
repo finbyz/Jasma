@@ -315,7 +315,7 @@ class MELBusinessCycleDashboard {
 			const filters = this.get_filters();
 			const [dashboard_data, stock, suppliers] = await Promise.all([
 				this.call("get_dashboard", { cycle: "sales", ...filters }),
-				this.call("get_stock_overview", {}),
+				this.call("get_stock_overview", { from_date: filters.from_date, to_date: filters.to_date }),
 				this.call("get_supplier_performance", {}),
 			]);
 			this.data = dashboard_data;
@@ -332,6 +332,32 @@ class MELBusinessCycleDashboard {
 			this.loading = false;
 		}
 	}
+
+	// async refresh() {
+	// 	if (this.loading) return;
+	// 	this.loading = true;
+
+	// 	try {
+	// 		const filters = this.get_filters();
+	// 		const [dashboard_data, stock, suppliers] = await Promise.all([
+	// 			this.call("get_dashboard", { cycle: "sales", ...filters }),
+	// 			this.call("get_stock_overview", {}),
+	// 			this.call("get_supplier_performance", {}),
+	// 		]);
+	// 		this.data = dashboard_data;
+	// 		this.procurement_cards = dashboard_data?.procurement_cards || [];
+	// 		this.stock_data = stock || [];
+	// 		this.supplier_data = suppliers || [];
+
+	// 		this.render_overview_cards();
+	// 		this.render_stock_table();
+	// 		this.render_supplier_table();
+	// 	} catch (error) {
+	// 		this.toast(error?.message || __("Could not refresh dashboard."));
+	// 	} finally {
+	// 		this.loading = false;
+	// 	}
+	// }
 
 	render_overview_cards() {
 		const $grid = this.$main.find("#mel-cardGrid").empty();
@@ -373,7 +399,7 @@ class MELBusinessCycleDashboard {
 			html += `
 				<tr>
 					<td style="max-width:350px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${frappe.utils.escape_html(it.item)}"><strong>${frappe.utils.escape_html(it.item)}</strong></td>
-					<td style="white-space:nowrap;font-size:12px;color:#64748b;">${frappe.utils.escape_html(it.jpc)}</td>
+					<td style="white-space:nowrap;font-weight:700;color:#000000;">${frappe.utils.escape_html(it.jpc)}</td>
 					<td style="white-space:nowrap;">${format_currency(it.rate)}</td>
 					<td style="white-space:nowrap;"><span class="bdg ${it.stock > 0 ? "bdg-green" : "bdg-amber"}">${it.stock}</span></td>
 					<td>
