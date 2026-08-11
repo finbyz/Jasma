@@ -9,6 +9,9 @@ app_license = "mit"
 # ------------------
 
 # required_apps = []
+from jasma.jasma.doc_events.purchase_order import apply_patch
+
+apply_patch()
 
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
@@ -38,9 +41,9 @@ fixtures = [
 # ------------------
 
 # include js, css files in header of desk.html
-# app_include_css = [
-#     "/assets/jasma/css/business_cycle_dashboard.css",
-# ]
+app_include_css = [
+    "/assets/jasma/css/business_cycle_dashboard.css",
+]
 # app_include_js = "/assets/jasma/js/jasma.js"
 app_include_js = [
     "jasma.bundle.js",
@@ -76,7 +79,8 @@ doctype_js = {
 	"Employee Advance": "public/js/employee_advance.js",
 	"Payment Entry": "public/js/payment_entry.js",
 	"Purchase Invoice": "public/js/purchase_invoice.js",
-	"Payment Request" : "public/js/payemnt_request.js"
+	"Payment Request" : "public/js/payemnt_request.js",
+	# "Expense Claim" : "public/js/expanse_claim.js"
 }
 
 doctype_list_js = {
@@ -370,13 +374,11 @@ override_doctype_class = {
 # 	"jasma.auth.validate"
 # ]
 
-# scheduler_events = {
-#     "cron": {
-#         "*/5 * * * *": [
-#             "jasma.api.auto_close_completed_sales_orders"
-#         ]
-#     }
-# }
+scheduler_events = {
+    "daily": [
+        "jasma.api.auto_close_completed_sales_orders"
+    ]
+}
 
 # Automatically update python controller files with type annotations for this app.
 # export_python_type_annotations = True

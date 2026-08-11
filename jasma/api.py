@@ -4,6 +4,61 @@ import openpyxl
 from openpyxl import Workbook
 
 
+
+def auto_close_completed_sales_orders():
+    if not frappe.db.get_single_value("Selling Settings", "auto_close_sales_order_on_full_delivery"):
+        return
+
+    sales_orders = frappe.get_all(
+        "Sales Order",
+        filters={"docstatus": 1, "status": ["not in", ["Closed", "Cancelled"]]},
+        pluck="name"
+    )
+
+    for so_name in sales_orders:
+        try:
+            if is_eligible_for_auto_close(so_name):
+                frappe.db.set_value("Sales Order", so_name, "status", "Closed", update_modified=False)
+                # frappe.db.commit()
+        except Exception:
+            frappe.db.rollback()
+            frappe.log_error(
+                title=f"Auto-close Sales Order failed: {so_name}",
+                message=frappe.get_traceback()
+            )
+
+def is_eligible_for_auto_close(so_name):
+    items = frappe.get_all(
+        "Sales Order Item",
+        filters={"parent": so_name},
+        fields=["item_code", "qty", "delivered_qty"]
+    )
+
+    if not items:
+        return False
+
+    item_codes = list(set(row.item_code for row in items))
+    stock_flags = frappe._dict(
+        frappe.get_all(
+            "Item",
+            filters={"name": ["in", item_codes]},
+            fields=["name", "is_stock_item"],
+            as_list=True
+        )
+    )
+
+    for row in items:
+        maintain_stock = stock_flags.get(row.item_code)
+        if maintain_stock:
+            # stock item -> must be fully delivered
+            if row.qty != row.delivered_qty:
+                return False
+        # non-stock item (maintain_stock disabled) -> no qty check, always qualifies
+
+    return True
+
+
+
 def update_balance(employee_advance):
     if not employee_advance:
         return

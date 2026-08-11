@@ -1,6 +1,7 @@
 import frappe
 from frappe import _
 from frappe.utils import comma_or, flt
+from erpnext.utilities.transaction_base import TransactionBase
 
 def before_submit(self, method):
     if self.is_subcontracted:
@@ -171,3 +172,43 @@ def get_manufacturing_notes_summary(items, is_subcontracted=0):
         })
 
     return notes_summary
+
+
+
+
+
+import frappe
+from erpnext.utilities.transaction_base import TransactionBase
+
+# keep a reference to the original, unpatched method
+_original_validate_with_previous_doc = TransactionBase.validate_with_previous_doc
+
+
+def patched_validate_with_previous_doc(self, ref):
+	"""
+	Allow multiple Purchase Order Item rows to reference the same
+	Material Request Item row (e.g. when the same MR item is split
+	across suppliers, batches, or partial quantities) — but only
+	when "Allow Duplicate Material Request Item Row in Purchase
+	Order" is checked in Buying Settings.
+
+	Core erpnext.utilities.transaction_base.TransactionBase.validate_with_previous_doc
+	throws "Duplicate row {idx} with same {key}" whenever the same
+	ref_dn repeats in a child table ref, unless allow_duplicate_prev_row_id
+	is set. We force it True here, scoped only to Purchase Order +
+	Material Request Item + the settings checkbox, so every other
+	doctype/reference keeps the default strict behaviour, and this
+	one can be toggled off without a code change.
+	"""
+	if self.doctype == "Purchase Order" and frappe.db.get_single_value(
+		"Buying Settings", "allow_duplicate_material_request_item_row_in_purchase_order"
+	):
+		for key, val in ref.items():
+			if val.get("is_child_table") and key == "Material Request Item":
+				val["allow_duplicate_prev_row_id"] = True
+
+	return _original_validate_with_previous_doc(self, ref)
+
+
+def apply_patch():
+	TransactionBase.validate_with_previous_doc = patched_validate_with_previous_doc

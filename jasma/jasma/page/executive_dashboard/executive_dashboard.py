@@ -110,6 +110,22 @@ def fmt_money(value, symbol="₹"):
         return "{0} {1:.2f}K".format(symbol, value / 1e3)
     return "{0} {1:,.0f}".format(symbol, value)
 
+
+def fmt_inr_full(value):
+    """Format a number as a full INR currency string without K/M/Cr abbreviations."""
+    value = value or 0
+    if float(value).is_integer():
+        return "₹ {:,}".format(int(round(value)))
+    return "₹ {:,.2f}".format(value)
+
+
+def fmt_money_full(value, symbol="₹"):
+    """Format a number as a full currency string without K/M/B abbreviations."""
+    value = value or 0
+    if float(value).is_integer():
+        return "{0} {1:,}".format(symbol, int(round(value)))
+    return "{0} {1:,.2f}".format(symbol, value)
+
 # ============================================================
 # CARD 1: TOTAL SALES (DYNAMIC)
 # ============================================================
@@ -155,6 +171,49 @@ def get_total_sales(period_preset="yearly", company=None, from_date=None, to_dat
         "company": company,
     }
 
+
+@frappe.whitelist()
+def get_total_sales_order(period_preset="yearly", company=None, from_date=None, to_date=None):
+    """
+    Returns Total Sales Order Value (Net Total) from submitted Sales
+    Orders only. Mirrors get_total_sales but sourced from Sales Order /
+    transaction_date instead of Sales Invoice / posting_date.
+    """
+    from_date, to_date = get_date_range(period_preset, from_date, to_date)
+
+    conditions = "docstatus = 1 AND transaction_date BETWEEN %(from_date)s AND %(to_date)s"
+    params = {"from_date": from_date, "to_date": to_date}
+    if company:
+        conditions += " AND company = %(company)s"
+        params["company"] = company
+
+    net_total = frappe.db.sql(
+        f"""
+        SELECT SUM(base_net_total)
+        FROM `tabSales Order`
+        WHERE {conditions}
+        """,
+        params,
+    )[0][0] or 0
+
+    filters = {
+        "docstatus": 1,
+        "transaction_date": ["between", [from_date, to_date]],
+    }
+    if company:
+        filters["company"] = company
+
+    order_count = frappe.db.count("Sales Order", filters=filters)
+
+    return {
+        "net_total": net_total,
+        "net_total_fmt": fmt_inr(net_total),
+        "order_count": order_count,
+        "from_date": str(from_date),
+        "to_date": str(to_date),
+        "period_preset": period_preset,
+        "company": company,
+    }
 # ============================================================
 # MONTHLY REVENUE TREND (DYNAMIC)
 # ============================================================
@@ -181,6 +240,54 @@ def get_monthly_revenue_trend(period_preset="yearly", company=None, from_date=No
             DATE_FORMAT(posting_date, '%%Y-%%m') AS month_key,
             SUM(base_net_total) AS net_total
         FROM `tabSales Invoice`
+        WHERE {conditions}
+        GROUP BY month_key
+        """,
+        params,
+        as_dict=True,
+    )
+    totals_by_month = {r.month_key: flt(r.net_total) for r in rows}
+
+    months = []
+    cursor = get_first_day(from_date)
+    last_month = get_first_day(to_date)
+    while cursor <= last_month:
+        months.append(cursor)
+        cursor = add_months(cursor, 1)
+
+    items = [
+        {
+            "month": m.strftime("%b"),
+            "val": totals_by_month.get(m.strftime("%Y-%m"), 0),
+            "revenue": totals_by_month.get(m.strftime("%Y-%m"), 0),
+            "revenue_fmt": fmt_inr(totals_by_month.get(m.strftime("%Y-%m"), 0)),
+        }
+        for m in months
+    ]
+
+    return items
+
+@frappe.whitelist()
+def get_monthly_sales_order_trend(period_preset="yearly", company=None, from_date=None, to_date=None):
+    """
+    Month-wise Net Total from submitted Sales Orders (base_net_total),
+    using transaction_date and the same ranged month buckets as the
+    Revenue Trend chart.
+    """
+    from_date, to_date = get_date_range(period_preset, from_date, to_date)
+
+    conditions = "docstatus = 1 AND transaction_date BETWEEN %(from_date)s AND %(to_date)s"
+    params = {"from_date": from_date, "to_date": to_date}
+    if company:
+        conditions += " AND company = %(company)s"
+        params["company"] = company
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT
+            DATE_FORMAT(transaction_date, '%%Y-%%m') AS month_key,
+            SUM(base_net_total) AS net_total
+        FROM `tabSales Order`
         WHERE {conditions}
         GROUP BY month_key
         """,
@@ -794,7 +901,7 @@ def get_treasury_balances(period_preset="yearly", company=None, from_date=None, 
             symbol_cache[cur] = frappe.db.get_value("Currency", cur, "symbol") or (cur + " ")
         return symbol_cache[cur]
 
-    base_fmt = fmt_inr if base_currency == "INR" else (lambda v: fmt_money(v, currency_symbol(base_currency)))
+    base_fmt = fmt_inr_full if base_currency == "INR" else (lambda v: fmt_money_full(v, currency_symbol(base_currency)))
 
     base_total = sum(flt(r.base_balance) for r in rows)
 
@@ -807,7 +914,7 @@ def get_treasury_balances(period_preset="yearly", company=None, from_date=None, 
         {
             "currency": cur,
             "balance": bal,
-            "balance_fmt": fmt_money(bal, currency_symbol(cur)),
+            "balance_fmt": fmt_money_full(bal, currency_symbol(cur)),
         }
         for cur, bal in sorted(currency_totals.items())
     ]
@@ -898,13 +1005,13 @@ def get_receivables_balances(period_preset="yearly", company=None, from_date=Non
             symbol_cache[cur] = frappe.db.get_value("Currency", cur, "symbol") or (cur + " ")
         return symbol_cache[cur]
 
-    base_fmt = fmt_inr if base_currency == "INR" else (lambda v: fmt_money(v, currency_symbol(base_currency)))
+    base_fmt = fmt_inr_full if base_currency == "INR" else (lambda v: fmt_money_full(v, currency_symbol(base_currency)))
 
     currencies = [
         {
             "currency": cur,
             "balance": bal,
-            "balance_fmt": fmt_money(bal, currency_symbol(cur)),
+            "balance_fmt": fmt_money_full(bal, currency_symbol(cur)),
         }
         for cur, bal in sorted(currency_totals.items())
     ]
@@ -1103,31 +1210,41 @@ def get_aging_payables(period_preset="yearly", company=None, from_date=None, to_
 # ============================================================
 # LEADERBOARD: TOP COMPANIES BY PURCHASE (DYNAMIC)
 # ============================================================
-
 @frappe.whitelist()
 def get_top_purchase_companies(period_preset="yearly", company=None, from_date=None, to_date=None):
     """
     Suppliers we've bought the most from - by Net Total (base_net_total)
-    across submitted Purchase Invoices in the selected period. Powers the
-    "Top Companies" leaderboard.
+    across submitted Purchase Invoices in the selected period.
+    Only includes suppliers belonging to the 'Product Supplier' supplier group.
     """
     from_date, to_date = get_date_range(period_preset, from_date, to_date)
 
-    conditions = "docstatus = 1 AND posting_date BETWEEN %(from_date)s AND %(to_date)s"
-    params = {"from_date": from_date, "to_date": to_date}
+    conditions = """
+        pi.docstatus = 1
+        AND pi.posting_date BETWEEN %(from_date)s AND %(to_date)s
+        AND s.supplier_group = 'Product Supplier'
+    """
+
+    params = {
+        "from_date": from_date,
+        "to_date": to_date,
+    }
+
     if company:
-        conditions += " AND company = %(company)s"
+        conditions += " AND pi.company = %(company)s"
         params["company"] = company
 
     rows = frappe.db.sql(
         f"""
         SELECT
-            supplier,
-            supplier_name,
-            SUM(base_net_total) AS net_total
-        FROM `tabPurchase Invoice`
+            pi.supplier,
+            pi.supplier_name,
+            SUM(pi.base_net_total) AS net_total
+        FROM `tabPurchase Invoice` pi
+        INNER JOIN `tabSupplier` s
+            ON s.name = pi.supplier
         WHERE {conditions}
-        GROUP BY supplier
+        GROUP BY pi.supplier, pi.supplier_name
         ORDER BY net_total DESC
         LIMIT 10
         """,
@@ -1138,6 +1255,7 @@ def get_top_purchase_companies(period_preset="yearly", company=None, from_date=N
     return [
         {
             "name": r.supplier_name or r.supplier,
+            "amount": flt(r.net_total),
             "val": fmt_inr(flt(r.net_total)),
         }
         for r in rows
@@ -1157,7 +1275,7 @@ def get_top_customers(period_preset="yearly", company=None, from_date=None, to_d
     """
     from_date, to_date = get_date_range(period_preset, from_date, to_date)
 
-    conditions = "docstatus = 1 AND posting_date BETWEEN %(from_date)s AND %(to_date)s"
+    conditions = "docstatus = 1 AND transaction_date BETWEEN %(from_date)s AND %(to_date)s"
     params = {"from_date": from_date, "to_date": to_date}
     if company:
         conditions += " AND company = %(company)s"
@@ -1169,7 +1287,7 @@ def get_top_customers(period_preset="yearly", company=None, from_date=None, to_d
             customer,
             customer_name,
             SUM(base_net_total) AS net_total
-        FROM `tabSales Invoice`
+        FROM `tabSales Order`
         WHERE {conditions}
         GROUP BY customer
         ORDER BY net_total DESC
@@ -1205,13 +1323,14 @@ def get_top_customers(period_preset="yearly", company=None, from_date=None, to_d
         if not country:
             return ""
         if country not in code_cache:
-            code_cache[country] = (frappe.db.get_value("Country", country, "code") or "").upper()
+            code_cache[country] = (frappe.db.get_value("Country", country, "country_name") or "").upper()
         return code_cache[country]
 
     return [
         {
             "name": r.customer_name or r.customer,
             "country": country_code(country_by_customer.get(r.customer)),
+            "amount": flt(r.net_total),
             "val": fmt_inr(flt(r.net_total)),
         }
         for r in rows
@@ -1232,7 +1351,6 @@ def get_top_delayed_orders(period_preset="yearly", company=None, from_date=None,
     """
     conditions = (
         "so.docstatus = 1"
-        " AND so.delivery_date < CURDATE()"
         " AND so.status  IN ('To Deliver and Bill', 'To Bill', 'To Deliver')"
     )
     
@@ -1268,12 +1386,28 @@ def get_top_delayed_orders(period_preset="yearly", company=None, from_date=None,
         for r in rows
     ]
 
+import json
+
+def _parse_item_groups(item_groups):
+    """Normalize item_groups which may arrive as a real list (server-side
+    call), a JSON-encoded string (frappe.call from JS), or a single string."""
+    if not item_groups:
+        return None
+    if isinstance(item_groups, str):
+        try:
+            item_groups = json.loads(item_groups)
+        except (ValueError, TypeError):
+            item_groups = [item_groups]
+    if not isinstance(item_groups, (list, tuple, set)):
+        item_groups = [item_groups]
+    item_groups = [g for g in item_groups if g]
+    return item_groups or None
 # ============================================================
 # LEADERBOARD: TOP STOCK ITEMS (DYNAMIC)
 # ============================================================
 
 @frappe.whitelist()
-def get_top_stock_items(company=None, sort_by="qty"):
+def get_top_stock_items(company=None, item_groups=None, sort_by="qty"):
     """
     Current on-hand stock, summed across warehouses per item from Bin
     (actual_qty / stock_value) - a live balance, not scoped to the period
@@ -1287,6 +1421,11 @@ def get_top_stock_items(company=None, sort_by="qty"):
     if company:
         conditions += " AND bin.company = %(company)s"
         params["company"] = company
+
+    item_groups = _parse_item_groups(item_groups)
+    if item_groups:
+        conditions += " AND item.item_group IN %(item_groups)s"
+        params["item_groups"] = tuple(item_groups)
 
     rows = frappe.db.sql(
         f"""
@@ -1309,6 +1448,7 @@ def get_top_stock_items(company=None, sort_by="qty"):
 
     return [
         {
+            "item_code": r.item_code,
             "name": r.item_name or r.item_code,
             "qty": "{:,.0f} {}".format(flt(r.qty), r.stock_uom or ""),
             "val": fmt_inr(flt(r.stock_value)),
@@ -1321,7 +1461,7 @@ def get_top_stock_items(company=None, sort_by="qty"):
 # ============================================================
 
 @frappe.whitelist()
-def get_top_selling_items(period_preset="yearly", company=None, from_date=None, to_date=None, sort_by="qty"):
+def get_top_selling_items(period_preset="yearly", company=None, item_groups=None, from_date=None, to_date=None, sort_by="qty"):
     """
     Items sold the most in the selected period, from submitted Sales
     Invoice Items (qty / base_net_amount). Powers the "Top Selling"
@@ -1339,6 +1479,11 @@ def get_top_selling_items(period_preset="yearly", company=None, from_date=None, 
         conditions += " AND si.company = %(company)s"
         params["company"] = company
 
+    item_groups = _parse_item_groups(item_groups)
+    if item_groups:
+        conditions += " AND item.item_group IN %(item_groups)s"
+        params["item_groups"] = tuple(item_groups)
+
     rows = frappe.db.sql(
         f"""
         SELECT
@@ -1349,6 +1494,7 @@ def get_top_selling_items(period_preset="yearly", company=None, from_date=None, 
             SUM(sii.base_net_amount) AS amount
         FROM `tabSales Invoice Item` sii
         INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
+        INNER JOIN `tabItem` item ON item.name = sii.item_code
         WHERE {conditions}
         GROUP BY sii.item_code
         ORDER BY {order_field} DESC
@@ -1360,6 +1506,7 @@ def get_top_selling_items(period_preset="yearly", company=None, from_date=None, 
 
     return [
         {
+            "item_code": r.item_code,
             "name": r.item_name or r.item_code,
             "qty": "{:,.0f} {}".format(flt(r.qty), r.stock_uom or ""),
             "val": fmt_inr(flt(r.amount)),
@@ -1372,7 +1519,7 @@ def get_top_selling_items(period_preset="yearly", company=None, from_date=None, 
 # ============================================================
 
 @frappe.whitelist()
-def get_top_purchase_items(period_preset="yearly", company=None, from_date=None, to_date=None, sort_by="qty"):
+def get_top_purchase_items(period_preset="yearly", company=None, item_groups=None, from_date=None, to_date=None, sort_by="qty"):
     """
     Items bought the most in the selected period, from submitted Purchase
     Invoice Items (qty / base_net_amount). Powers the "Top Purchase"
@@ -1390,33 +1537,262 @@ def get_top_purchase_items(period_preset="yearly", company=None, from_date=None,
         conditions += " AND pi.company = %(company)s"
         params["company"] = company
 
+    item_groups = _parse_item_groups(item_groups)
+    if item_groups:
+        conditions += " AND item.item_group IN %(item_groups)s"
+        params["item_groups"] = tuple(item_groups)
     rows = frappe.db.sql(
-        f"""
+    f"""
+    SELECT
+        item_code,
+        item_name,
+        stock_uom,
+        SUM(qty) AS qty,
+        SUM(amount) AS amount
+    FROM (
+
+        /* Purchase Receipt */
         SELECT
-            pii.item_code,
-            pii.item_name,
-            pii.stock_uom,
-            SUM(pii.stock_qty) AS qty,
-            SUM(pii.base_net_amount) AS amount
-        FROM `tabPurchase Invoice Item` pii
-        INNER JOIN `tabPurchase Invoice` pi ON pi.name = pii.parent
-        WHERE {conditions}
-        GROUP BY pii.item_code
-        ORDER BY {order_field} DESC
-        LIMIT 10
-        """,
-        params,
-        as_dict=True,
-    )
+            pri.item_code,
+            pri.item_name,
+            pri.stock_uom,
+            pri.stock_qty AS qty,
+            pri.base_net_amount AS amount
+        FROM `tabPurchase Receipt Item` pri
+        INNER JOIN `tabPurchase Receipt` pr
+            ON pr.name = pri.parent
+        INNER JOIN `tabItem` item
+            ON item.name = pri.item_code
+        WHERE
+            pr.docstatus = 1
+            AND pr.posting_date BETWEEN %(from_date)s AND %(to_date)s
+            {f"AND pr.company = %(company)s" if company else ""}
+            {f"AND item.item_group IN %(item_groups)s" if item_groups else ""}
+
+        UNION ALL
+
+        /* Subcontracting Receipt */
+        SELECT
+            sri.item_code,
+            sri.item_name,
+            sri.stock_uom,
+            sri.qty AS qty,
+            sri.amount AS amount
+        FROM `tabSubcontracting Receipt Item` sri
+        INNER JOIN `tabSubcontracting Receipt` sr
+            ON sr.name = sri.parent
+        INNER JOIN `tabItem` item
+            ON item.name = sri.item_code
+        WHERE
+            sr.docstatus = 1
+            AND sr.posting_date BETWEEN %(from_date)s AND %(to_date)s
+            {f"AND sr.company = %(company)s" if company else ""}
+            {f"AND item.item_group IN %(item_groups)s" if item_groups else ""}
+
+        UNION ALL
+
+        /* Stock Entry */
+        SELECT
+            sed.item_code,
+            sed.item_name,
+            sed.stock_uom,
+            sed.qty AS qty,
+            (sed.basic_rate * sed.qty) AS amount
+        FROM `tabStock Entry Detail` sed
+        INNER JOIN `tabStock Entry` se
+            ON se.name = sed.parent
+        INNER JOIN `tabItem` item
+            ON item.name = sed.item_code
+        WHERE
+            se.docstatus = 1
+            AND se.posting_date BETWEEN %(from_date)s AND %(to_date)s
+            {f"AND se.company = %(company)s" if company else ""}
+            {f"AND item.item_group IN %(item_groups)s" if item_groups else ""}
+            AND se.stock_entry_type = 'Material Receipt'
+
+    ) t
+
+    GROUP BY item_code, item_name, stock_uom
+    ORDER BY {order_field} DESC
+    LIMIT 10
+    """,
+    params,
+    as_dict=True,
+)
 
     return [
         {
+            "item_code": r.item_code,
             "name": r.item_name or r.item_code,
             "qty": "{:,.0f} {}".format(flt(r.qty), r.stock_uom or ""),
             "val": fmt_inr(flt(r.amount)),
         }
         for r in rows
     ]
+    
+    
+# ============================================================
+# HELPER: OLD CUSTOMER SET
+# ============================================================
+
+def _get_old_customer_set(from_date, company=None):
+    """
+    Customers with at least one submitted Sales Invoice posting_date
+    strictly before `from_date`. Anyone not in this set (within the
+    selected period) is treated as a New customer.
+    """
+    conditions = "docstatus = 1 AND posting_date < %(from_date)s"
+    params = {"from_date": from_date}
+    if company:
+        conditions += " AND company = %(company)s"
+        params["company"] = company
+
+    rows = frappe.db.sql_list(
+        f"SELECT DISTINCT customer FROM `tabSales Invoice` WHERE {conditions}",
+        params,
+    )
+    return set(rows)
+
+# ============================================================
+# CARD 14: NEW VS OLD CUSTOMERS (DYNAMIC)
+# ============================================================
+
+@frappe.whitelist()
+def get_new_vs_old_customers(period_preset="yearly", company=None, from_date=None, to_date=None):
+    """
+    Splits submitted Sales Invoices in the selected period between New and
+    Old customers (see _get_old_customer_set), by both value (base_net_total)
+    and count (number of invoices), each with a % share of the period total.
+    """
+    from_date, to_date = get_date_range(period_preset, from_date, to_date)
+    old_customers = _get_old_customer_set(from_date, company)
+
+    conditions = "docstatus = 1 AND posting_date BETWEEN %(from_date)s AND %(to_date)s"
+    params = {"from_date": from_date, "to_date": to_date}
+    if company:
+        conditions += " AND company = %(company)s"
+        params["company"] = company
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT customer, SUM(base_net_total) AS net_total, COUNT(*) AS cnt
+        FROM `tabSales Invoice`
+        WHERE {conditions}
+        GROUP BY customer
+        """,
+        params,
+        as_dict=True,
+    )
+
+    new_amount = old_amount = 0.0
+    new_count = old_count = 0
+    for r in rows:
+        if r.customer in old_customers:
+            old_amount += flt(r.net_total)
+            old_count += cint(r.cnt)
+        else:
+            new_amount += flt(r.net_total)
+            new_count += cint(r.cnt)
+
+    total_amount = new_amount + old_amount
+    total_count = new_count + old_count
+
+    def pct(v, t):
+        return round(v / t * 100, 1) if t else 0
+
+    return {
+        "new_customer": {
+            "amount": new_amount,
+            "amount_fmt": fmt_inr(new_amount),
+            "amount_pct": pct(new_amount, total_amount),
+            "count": new_count,
+            "count_pct": pct(new_count, total_count),
+        },
+        "old_customer": {
+            "amount": old_amount,
+            "amount_fmt": fmt_inr(old_amount),
+            "amount_pct": pct(old_amount, total_amount),
+            "count": old_count,
+            "count_pct": pct(old_count, total_count),
+        },
+        "total_amount_fmt": fmt_inr(total_amount),
+        "total_count": total_count,
+        "from_date": str(from_date),
+        "to_date": str(to_date),
+    }
+
+# ============================================================
+# CARD 15: OLD CUSTOMER ACTIVITY - NEW ORDERS VS INVOICES (DYNAMIC)
+# ============================================================
+
+@frappe.whitelist()
+def get_old_customer_order_vs_invoice(period_preset="yearly", company=None, from_date=None, to_date=None):
+    """
+    For customers already established before the period (see
+    _get_old_customer_set), compares:
+      - so_count / so_amount : NEW Sales Orders placed by them in the period
+      - si_count / si_amount : Sales Invoices billed to them in the period
+    repeat_pct = si_count / so_count - roughly "how much of what old
+    customers ordered has actually been invoiced" in the same window.
+    """
+    from_date, to_date = get_date_range(period_preset, from_date, to_date)
+    old_customers = _get_old_customer_set(from_date, company)
+
+    empty = {
+        "so_count": 0, "so_amount_fmt": fmt_inr(0),
+        "si_count": 0, "si_amount_fmt": fmt_inr(0),
+        "repeat_pct": 0, "old_customer_count": 0,
+        "from_date": str(from_date), "to_date": str(to_date),
+    }
+    if not old_customers:
+        return empty
+
+    customers = tuple(old_customers)
+
+    so_conditions = (
+        "docstatus = 1 AND transaction_date BETWEEN %(from_date)s AND %(to_date)s"
+        " AND customer IN %(customers)s"
+    )
+    so_params = {"from_date": from_date, "to_date": to_date, "customers": customers}
+    if company:
+        so_conditions += " AND company = %(company)s"
+        so_params["company"] = company
+
+    so_row = frappe.db.sql(
+        f"SELECT COUNT(*) AS cnt, SUM(base_net_total) AS amt FROM `tabSales Order` WHERE {so_conditions}",
+        so_params,
+        as_dict=True,
+    )[0]
+
+    si_conditions = (
+        "docstatus = 1 AND posting_date BETWEEN %(from_date)s AND %(to_date)s"
+        " AND customer IN %(customers)s"
+    )
+    si_params = {"from_date": from_date, "to_date": to_date, "customers": customers}
+    if company:
+        si_conditions += " AND company = %(company)s"
+        si_params["company"] = company
+
+    si_row = frappe.db.sql(
+        f"SELECT COUNT(*) AS cnt, SUM(base_net_total) AS amt FROM `tabSales Invoice` WHERE {si_conditions}",
+        si_params,
+        as_dict=True,
+    )[0]
+
+    so_count = cint(so_row.cnt)
+    si_count = cint(si_row.cnt)
+    repeat_pct = round(si_count / so_count * 100, 1) if so_count else 0
+
+    return {
+        "so_count": so_count,
+        "so_amount_fmt": fmt_inr(flt(so_row.amt)),
+        "si_count": si_count,
+        "si_amount_fmt": fmt_inr(flt(si_row.amt)),
+        "repeat_pct": repeat_pct,
+        "old_customer_count": len(old_customers),
+        "from_date": str(from_date),
+        "to_date": str(to_date),
+    }
 
 # ============================================================
 # STATIC MOCK DATA (All other cards)
@@ -1482,7 +1858,7 @@ def get_mock_data():
 # ============================================================
 
 @frappe.whitelist()
-def get_page_data(period_preset="yearly", company=None, from_date=None, to_date=None):
+def get_page_data(period_preset="yearly", company=None, item_groups=None, from_date=None, to_date=None):
     """
     Aggregator that returns all dashboard data. Leaderboards, quotation
     mock fallbacks, and a few other cards are still static mock data;
@@ -1490,6 +1866,7 @@ def get_page_data(period_preset="yearly", company=None, from_date=None, to_date=
     """
     # Get dynamic data
     total_sales = get_total_sales(period_preset, company, from_date, to_date)
+    total_sales_order = get_total_sales_order(period_preset, company, from_date, to_date)
     sales_orders = get_sales_order_stats(period_preset, company, from_date, to_date)
     quotations = get_quotation_stats(period_preset, company, from_date, to_date)
     currency_averages = get_currency_averages(period_preset, company, from_date, to_date)
@@ -1502,13 +1879,14 @@ def get_page_data(period_preset="yearly", company=None, from_date=None, to_date=
     receivables = get_receivables_balances(period_preset, company, from_date, to_date)
     tax_claims = get_tax_claims(period_preset, company, from_date, to_date)
     monthly_revenue = get_monthly_revenue_trend(period_preset, company, from_date, to_date)
+    monthly_sales_order = get_monthly_sales_order_trend(period_preset, company, from_date, to_date)
     aging_payables = get_aging_payables(period_preset, company, from_date, to_date)
     top_purchase_companies = get_top_purchase_companies(period_preset, company, from_date, to_date)
     top_customers = get_top_customers(period_preset, company, from_date, to_date)
     top_delayed_orders = get_top_delayed_orders(period_preset, company, from_date, to_date)
-    top_stock_items = get_top_stock_items(company, "qty")
-    top_selling_items = get_top_selling_items(period_preset, company, from_date, to_date, "qty")
-    top_purchase_items = get_top_purchase_items(period_preset, company, from_date, to_date, "qty")
+    top_stock_items = get_top_stock_items(company, item_groups, "qty")
+    top_selling_items = get_top_selling_items(period_preset, company, item_groups, from_date, to_date, "qty")
+    top_purchase_items = get_top_purchase_items(period_preset, company, item_groups, from_date, to_date, "qty")
 
     # Get static mock data
     mock = get_mock_data()
@@ -1530,6 +1908,7 @@ def get_page_data(period_preset="yearly", company=None, from_date=None, to_date=
 
     return {
         "total_sales": total_sales,
+        "total_sales_order": total_sales_order, 
         "sales_orders": sales_orders,
         "quotations": quotations,
         "conversion_ratio": conversion_ratio,
@@ -1540,6 +1919,7 @@ def get_page_data(period_preset="yearly", company=None, from_date=None, to_date=
         "tax_claims": tax_claims,
         "aging_payables": aging_payables,
         "monthly_revenue": monthly_revenue,
+        "monthly_sales_order": monthly_sales_order,
         "leaderboards": leaderboards,
         "period_label": mock["period_label"],
     }

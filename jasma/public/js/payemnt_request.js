@@ -4,6 +4,12 @@ frappe.ui.form.on('Payment Request', {
         render_related_documents(frm);
         render_item_summary(frm);
 
+        if (frm.doc.payment_entry) {
+            setTimeout(() => {
+                frm.page.remove_inner_button(__("Create Payment Entry"));
+            }, 300);
+        }
+
     },
     reference_name(frm) {
         render_info_dashboard(frm);

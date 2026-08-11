@@ -225,7 +225,7 @@ def create_payment_entry_on_submit(doc, method):
     The Payment Entry is intentionally NOT auto-submitted - the Accounts
     team reviews and submits it manually.
     """
-    if doc.reference_doctype != "Purchase Invoice" or not doc.reference_name:
+    if doc.reference_doctype not in ("Purchase Invoice", "Purchase Order") or not doc.reference_name:
         return
  
     # Guard against duplicate creation (e.g. re-run of on_submit on amend)

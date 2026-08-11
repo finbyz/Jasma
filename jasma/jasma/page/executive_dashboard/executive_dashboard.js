@@ -21,6 +21,13 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
         stockSort: "qty",
         sellingSort: "qty",
         purchaseSort: "qty",
+        itemGroups: [],
+        itemGroupsLoaded: false,
+        cardItemGroupFilters: {
+            stockItems: [],
+            topSelling: [],
+            topPurchase: [],
+        },
     };
 
     const $page = $(wrapper).find(".page-content");
@@ -32,6 +39,7 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
 
     bindEvents();
     setupDatePickers();
+    loadItemGroups();
     loadPageData();
 
     // ============================================================
@@ -137,6 +145,35 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
         return options;
     }
 
+    async function loadItemGroups() {
+        try {
+            const groups = await frappe.db.get_list("Item Group", {
+                fields: ["name"],
+                order_by: "name asc",
+                limit: 0,
+            });
+            state.itemGroups = Array.isArray(groups)
+                ? groups
+                : Array.isArray(groups?.message)
+                    ? groups.message
+                    : [];
+        } catch (e) {
+            console.warn("Executive Dashboard: failed to load Item Groups", e);
+            state.itemGroups = [];
+        } finally {
+            state.itemGroupsLoaded = true;
+            updateItemGroupSelectOptions();
+        }
+    }
+
+    function updateItemGroupSelectOptions() {
+        $(".exd-card-item-group-select").each(function () {
+            const key = this.id.replace("exd-card-item-group-", "");
+            const selectedGroup = (state.cardItemGroupFilters[key] || [])[0] || "";
+            $(this).html(getItemGroupOptions(selectedGroup));
+        });
+    }
+
     function shimmerBlock(h) {
         return `<div class="exd-shimmer" style="height:${h || 180}px; border-radius:16px;"></div>`;
     }
@@ -191,6 +228,13 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
         $page.on("click", "#exd-refresh", () => loadPageData());
         $page.on("click", "#exd-theme-toggle", () => toggleTheme());
 
+        $page.on("change", ".exd-card-item-group-select", function () {
+            const key = this.id.replace("exd-card-item-group-", "");
+            const selected = $(this).val();
+            state.cardItemGroupFilters[key] = selected ? [selected] : [];
+            refreshLeaderboardCard(key);
+        });
+
         $(document).on("keydown", function (e) {
             if (e.key === "Escape") closeModal();
         });
@@ -224,6 +268,7 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
         window.openQuotationList = openQuotationList;
         window.openAgingPayablesReport = openAgingPayablesReport;
         window.openMonthlyRevenueReport = openMonthlyRevenueReport;
+        window.openMonthlySalesOrderTrend = openMonthlySalesOrderTrend;
         window.openTaxClaimsReport = openTaxClaimsReport;
         window.openDelayedSalesOrderList = openDelayedSalesOrderList;
         window.switchLeaderboardSort = switchLeaderboardSort;
@@ -276,6 +321,14 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                     state.data = r.message;
                     render();
                     syncDateRangeInputs();
+                    // get_page_data() always computes stockItems/topSelling/
+                    // topPurchase WITHOUT any Item Group filter (it has no
+                    // way to know which cards had one selected). Re-fetch
+                    // those specific cards right after so a previously
+                    // chosen filter keeps applying instead of silently
+                    // reverting to the unfiltered top 5 on every period/
+                    // company change or refresh.
+                    reapplyCardItemGroupFilters();
                 }
             },
             error: function (err) {
@@ -343,8 +396,16 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
 
                 <!-- TOTAL SALES - Spans 6 -->
                 <div class="exd-bento-span-6 exd-card exd-card-sales exd-card-blob exd-anim" style="--delay:1;">
-                    <div class="exd-card-label">${iconSvg("cart")} TOTAL SALES</div>
-                    <div class="exd-card-value-large is-clickable" style="cursor:pointer; display:inline-block;" onclick="openSalesInvoiceList()" title="Click to view Sales Invoices">${getVal(d.total_sales, "net_total_fmt", "₹ 0")}</div>
+                    <div class="exd-card-sales-dual">
+                        <div class="exd-card-sales-half">
+                            <div class="exd-card-label">${iconSvg("cart")} TOTAL SALES</div>
+                            <div class="exd-card-value-large is-clickable" style="cursor:pointer; display:inline-block;" onclick="openSalesInvoiceList()" title="Click to view Sales Invoices">${getVal(d.total_sales, "net_total_fmt", "₹ 0")}</div>
+                        </div>
+                        <div class="exd-card-sales-half">
+                            <div class="exd-card-label">${iconSvg("box")} TOTAL ORDER</div>
+                            <div class="exd-card-value-large is-clickable" style="cursor:pointer; display:inline-block;" onclick="openSalesOrderList()" title="Click to view Sales Orders">${getVal(d.total_sales_order, "net_total_fmt", "₹ 0")}</div>
+                        </div>
+                    </div>
                     <!-- Profit line removed as requested -->
                     <div class="exd-card-stats">
                         <div class="is-clickable" style="cursor:pointer;" onclick="openSalesOrderList()" title="Click to view Sales Orders">
@@ -411,8 +472,8 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                     </div>
                 </div>
 
-                <!-- Treasury / Receivables / Tax Claims (Spans 4 each) -->
-                <div class="exd-bento-span-4 exd-card exd-anim" style="--delay:6;">
+                <!-- TREASURY + RECEIVABLES (Wider, share row) -->
+                <div class="exd-bento-span-6 exd-card exd-anim" style="--delay:6;">
                     <div class="exd-card-label">${iconSvg("bank")} TREASURY BALANCES</div>
                     <div style="margin-top:12px;">
                         <div class="exd-kv-row is-clickable" onclick="openTreasuryLedger()" title="Click to view General Ledger">
@@ -424,7 +485,7 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                     </div>
                 </div>
 
-                <div class="exd-bento-span-4 exd-card exd-anim" style="--delay:7;">
+                <div class="exd-bento-span-6 exd-card exd-anim" style="--delay:7;">
                     <div class="exd-card-label">${iconSvg("download")} RECEIVABLES</div>
                     <div style="margin-top:12px;">
                         <div class="exd-kv-row exd-kv-warn is-clickable" onclick="openReceivablesReport()" title="Click to view Accounts Receivable" style="margin-bottom:8px;">
@@ -435,29 +496,35 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                         </div>
                     </div>
                 </div>
-
-                <div class="exd-bento-span-4 exd-card exd-anim" style="--delay:8;">
-                    <div class="exd-card-label">${iconSvg("shield")} TAX CLAIMS</div>
-                    <div style="margin-top:14px; display:flex; flex-direction:column; gap:16px;">
-                        ${renderTaxClaims(d.tax_claims)}
+                    <!-- Monthly Revenue Trend + Tax Claims (side-by-side) -->
+                    <div class="exd-bento-span-7 exd-card exd-anim is-clickable" style="--delay:9; cursor:pointer;" onclick="openMonthlyRevenueReport()" title="Click to view Sales Analytics report">
+                        <div class="exd-card-label">${iconSvg("bar")} MONTHLY REVENUE TREND (SALES INVOICE)</div>
+                        <div class="exd-chart-container" style="height:180px;">
+                            ${renderMonthlyChart(d.monthly_revenue)}
+                        </div>
                     </div>
-                </div>
 
-                <!-- Monthly Revenue Trend (Spans 7) -->
-                <div class="exd-bento-span-7 exd-card exd-anim is-clickable" style="--delay:9; cursor:pointer;" onclick="openMonthlyRevenueReport()" title="Click to view Sales Analytics report">
-                    <div class="exd-card-label">${iconSvg("bar")} MONTHLY REVENUE TREND</div>
-                    <div class="exd-chart-container" style="height:180px;">
-                        ${renderMonthlyChart(d.monthly_revenue)}
+                    <div class="exd-bento-span-5 exd-card exd-anim" style="--delay:9;">
+                        <div class="exd-card-label">${iconSvg("shield")} TAX CLAIMS</div>
+                        <div style="margin-top:14px; display:flex; flex-direction:column; gap:16px;">
+                            ${renderTaxClaims(d.tax_claims)}
+                        </div>
                     </div>
-                </div>
 
-                <!-- Aging Payables (Spans 5) -->
-                <div class="exd-bento-span-5 exd-card exd-anim is-clickable" style="--delay:10; cursor:pointer;" onclick="openAgingPayablesReport()" title="Click to view Accounts Payable Summary report">
-                    <div class="exd-card-label">${iconSvg("bar")} AGING PAYABLES</div>
-                    <div class="exd-chart-container" style="height:180px;">
-                        ${renderAgingChart(d.aging_payables)}
+                    <!-- Sales Order Trend beside Aging Payables -->
+                    <div class="exd-bento-span-7 exd-card exd-anim is-clickable" style="--delay:10; cursor:pointer;" onclick="openMonthlySalesOrderTrend()" title="Click to view Sales Orders filtered by Sales Order dates">
+                        <div class="exd-card-label">${iconSvg("bar")} MONTHLY REVENUE TREND (SALES ORDER)</div>
+                        <div class="exd-chart-container" style="height:180px;">
+                            ${renderMonthlyChart(d.monthly_sales_order)}
+                        </div>
                     </div>
-                </div>
+
+                    <div class="exd-bento-span-5 exd-card exd-anim is-clickable" style="--delay:11; cursor:pointer;" onclick="openAgingPayablesReport()" title="Click to view Accounts Payable Summary report">
+                        <div class="exd-card-label">${iconSvg("bar")} AGING PAYABLES</div>
+                        <div class="exd-chart-container" style="height:180px;">
+                            ${renderAgingChart(d.aging_payables)}
+                        </div>
+                    </div>
 
                 <!-- Leaderboards Section -->
                 ${renderLeaderboards(d.leaderboards)}
@@ -635,7 +702,16 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
             { key: "topPurchase", title: "Top Purchase", icon: "cart" },
         ];
 
-        const activeSections = sections.filter(s => leaderboards[s.key] && leaderboards[s.key].length > 0);
+        // Sections with the Qty/Amount + Item Group toggle (stockItems,
+        // topSelling, topPurchase) always render, even with zero rows for
+        // the currently selected filters - the card itself shows a "No
+        // data available" message instead of disappearing, so the filter
+        // controls stay reachable and the user can pick a different Item
+        // Group without the card vanishing from the grid.
+        const activeSections = sections.filter(s => {
+            if (TOGGLE_SECTIONS[s.key]) return true;
+            return leaderboards[s.key] && leaderboards[s.key].length > 0;
+        });
 
         // Rendered as a single 2-column CSS grid in original order (rather
         // than two independently-stacked columns) so each row pair -
@@ -652,40 +728,154 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
     }
 
     function renderLeaderboardSection(config, data) {
-        if (!data || data.length === 0) return '';
+        const toggle = TOGGLE_SECTIONS[config.key];
+        data = data || [];
+
+        // Non-toggle sections keep the original behaviour: no data means
+        // the card isn't rendered at all (already filtered out upstream,
+        // this is just a safety net).
+        if (!toggle && data.length === 0) return '';
 
         const maxItems = 5;
         const items = data.slice(0, maxItems);
+        const hasItems = items.length > 0;
         const labelClass = config.critical ? "exd-card-label exd-label-critical" : "exd-card-label";
         const btnClass = config.critical ? "exd-leaderboard-view-all exd-btn-critical" : "exd-leaderboard-view-all";
-        const toggle = TOGGLE_SECTIONS[config.key];
         const cardId = toggle ? ` id="exd-lb-${config.key}"` : '';
+        const fullWidth = ['topSelling', 'topPurchase'].includes(config.key);
 
+        // Qty Wise/Amount Wise selector and the Item Group filter (when the
+        // card has one) sit side by side in the header, at matching size,
+        // rather than the Item Group filter taking its own row underneath.
         let headerRight = '';
         if (toggle) {
-            headerRight = renderSortSelect(config.key, state[toggle.stateKey]);
+            const itemGroupSelectHtml = renderCardItemGroupFilterSelect(config.key);
+            headerRight = `
+                <div class="exd-leaderboard-header-controls">
+                    ${itemGroupSelectHtml}
+                    ${renderSortSelect(config.key, state[toggle.stateKey])}
+                </div>
+            `;
         }
 
+        const chartHtml = (config.key === "topCompanies" || config.key === "topCustomers")
+            ? renderLeaderboardDonut(items, config.key)
+            : '';
+
+        const selectedGroup = toggle ? ((state.cardItemGroupFilters[config.key] || [])[0] || '') : '';
+        const emptyMessage = selectedGroup
+            ? `No data available for "${selectedGroup}".`
+            : `No data available.`;
+
         return `
-            <div class="exd-card exd-anim exd-leaderboard-card"${cardId} style="--delay:12;">
-                <div style="display:flex; align-items:center; justify-content:space-between;">
+            <div class="exd-card exd-anim exd-leaderboard-card"${cardId} style="--delay:12; ${fullWidth ? 'grid-column: 1 / -1;' : ''}">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
                     <div class="${labelClass}">${iconSvg(config.icon)} ${config.title}</div>
                     ${headerRight}
                 </div>
-                ${renderColHeader(config.key)}
+                ${chartHtml}
+                ${hasItems ? renderColHeader(config.key) : ''}
                 <div class="exd-leaderboard-list">
-                    ${items.map((item, i) => `
-                        <div class="exd-leaderboard-item">
-                            <div class="exd-leaderboard-rank">${i + 1}</div>
-                            <div class="exd-leaderboard-info">
-                                ${renderLeaderboardItem(item, config.key, toggle ? state[toggle.stateKey] : null)}
+                    ${hasItems
+                        ? items.map((item, i) => `
+                            <div class="exd-leaderboard-item">
+                                <div class="exd-leaderboard-rank">${i + 1}</div>
+                                <div class="exd-leaderboard-info">
+                                    ${renderLeaderboardItem(item, config.key, toggle ? state[toggle.stateKey] : null)}
+                                </div>
                             </div>
-                        </div>
-                    `).join('')}
+                        `).join('')
+                        : `<div class="exd-leaderboard-empty">${emptyMessage}</div>`
+                    }
                 </div>
-                <button class="${btnClass}" onclick="openModal('${config.title}', '${config.key}')">
-                    VIEW ALL →
-                </button>
+                ${hasItems ? `<button class="${btnClass}" onclick="openModal('${config.title}', '${config.key}')">VIEW ALL →</button>` : ''}
+            </div>
+        `;
+    }
+
+    function formatCompactInr(value) {
+        const amount = value || 0;
+        const absValue = Math.abs(amount);
+        if (absValue >= 1e7) {
+            return `₹ ${Number(amount / 1e7).toFixed(2)} Cr`;
+        }
+        if (absValue >= 1e5) {
+            return `₹ ${Number(amount / 1e5).toFixed(2)} L`;
+        }
+        return `₹ ${Number(amount).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
+    }
+
+    // Compact Item Group <select>, styled and sized to match the Qty
+    // Wise/Amount Wise selector exactly, so both controls sit side by side
+    // in the card header at the same height and width.
+    function renderCardItemGroupFilterSelect(key) {
+        const selectedGroup = (state.cardItemGroupFilters[key] || [])[0] || "";
+        return `
+            <select id="exd-card-item-group-${key}" class="exd-card-item-group-select exd-mini-toggle-select" title="${selectedGroup || 'Select Item Groups'}">
+                ${getItemGroupOptions(selectedGroup)}
+            </select>
+        `;
+    }
+
+    function getItemGroupOptions(selectedGroup = "") {
+        if (!state.itemGroupsLoaded) {
+            return `<option value="">Loading Item Groups...</option>`;
+        }
+
+        let options = `<option value="" ${selectedGroup === "" ? "selected" : ""}>Select Item Groups</option>`;
+        if (!state.itemGroups.length) {
+            return options;
+        }
+
+        options += state.itemGroups
+            .map(g => {
+                const selected = selectedGroup === g.name ? ' selected' : '';
+                return `<option value="${g.name}"${selected}>${g.name}</option>`;
+            })
+            .join("");
+        return options;
+    }
+
+    function renderLeaderboardDonut(items, key) {
+        if (!items || !items.length) return '';
+
+        const topItems = items.slice(0, 5);
+        const total = topItems.reduce((sum, item) => sum + (item.amount || 0), 0);
+        if (!total) return '';
+
+        const colors = ["#6366f1", "#f59e0b", "#10b981", "#ec4899", "#14b8a6"];
+        let current = 0;
+        const stops = topItems.map((item, index) => {
+            const pct = ((item.amount || 0) / total) * 100;
+            const start = current;
+            const end = current + pct;
+            current = end;
+            return `${colors[index]} ${start}% ${end}%`;
+        }).join(", ");
+
+        return `
+            <div class="exd-leaderboard-donut-card">
+                <div class="exd-donut" style="background: conic-gradient(${stops});">
+                    <div class="exd-donut-center">
+                        <div class="exd-donut-total">${formatCompactInr(total)}</div>
+                        <div class="exd-donut-label">Top ${topItems.length}</div>
+                    </div>
+                </div>
+                <div class="exd-donut-legend">
+                    ${topItems.map((item, index) => {
+                    const pct = total ? Math.round(((item.amount || 0) / total) * 100) : 0;
+                    return `
+                        <div class="exd-donut-legend-item" data-tooltip="${item.val || formatCompactInr(item.amount)} · ${pct}%">
+                            <span class="exd-donut-swatch" style="background:${colors[index]};"></span>
+                            <div class="exd-donut-legend-text">
+                                <span class="exd-donut-legend-name">${item.name}</span>
+                                <span class="exd-donut-legend-amount">${item.val || formatCompactInr(item.amount)}</span>
+                            </div>
+                            <span class="exd-donut-legend-percent" style="background:${colors[index]}22; color:${colors[index]};">${pct}%</span>
+                        </div>
+                    `;
+                }).join('')}
+                </div>
             </div>
         `;
     }
@@ -699,6 +889,8 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
     };
 
     function renderLeaderboardItem(item, key, sortMode) {
+        const wideDisplay = ['topSelling', 'topPurchase'].includes(key);
+
         if (key === "topCustomers") {
             return `
                 <span class="exd-leaderboard-country">${item.country || 'IN'}</span>
@@ -710,6 +902,13 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                 <span class="exd-leaderboard-id">${item.id || 'N/A'}</span>
                 <span class="exd-leaderboard-name">${item.customer || 'N/A'}</span>
                 <span class="exd-leaderboard-delay exd-col-fixed">${item.delay || '0 Days'}</span>
+            `;
+        } else if (wideDisplay) {
+            return `
+                <span class="exd-leaderboard-code exd-col-code">${item.item_code || ''}</span>
+                <span class="exd-leaderboard-name exd-col-name-narrow">${item.name || 'N/A'}</span>
+                <span class="exd-leaderboard-qty exd-col-fixed exd-col-wide">${item.qty || '0'}</span>
+                <span class="exd-leaderboard-value exd-col-fixed exd-col-wide">${item.val || '₹ 0'}</span>
             `;
         } else if (sortMode) {
             // Toggle-enabled section: show only the metric currently being ranked by.
@@ -745,6 +944,16 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                     <span class="exd-leaderboard-id" style="min-width:78px;">ORDER ID</span>
                     <span class="exd-leaderboard-name">CUSTOMER</span>
                     <span class="exd-leaderboard-delay exd-col-fixed">DELAY</span>
+                </div>`;
+        }
+        if (['topSelling', 'topPurchase'].includes(key)) {
+            return `
+                <div class="exd-leaderboard-colhead">
+                    <span></span>
+                    <span class="exd-leaderboard-code exd-col-code">CODE</span>
+                    <span class="exd-leaderboard-name exd-col-name-narrow">ITEM</span>
+                    <span class="exd-leaderboard-qty exd-col-fixed exd-col-wide">QTY</span>
+                    <span class="exd-leaderboard-value exd-col-fixed exd-col-wide">AMOUNT</span>
                 </div>`;
         }
         if (TOGGLE_SECTIONS[key]) {
@@ -1047,6 +1256,22 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
         frappe.set_route("query-report", "Sales Analytics");
     }
 
+    function openMonthlySalesOrderTrend() {
+        const so = (state.data && state.data.total_sales_order) || {};
+        frappe.route_options = {
+            tree_type: "Customer",
+            doc_type: "Sales Order",
+            value_quantity: "Value",
+            from_date: so.from_date,
+            to_date: so.to_date,
+            range: "Monthly",
+        };
+        if (state.filters.company) {
+            frappe.route_options.company = state.filters.company;
+        }
+        frappe.set_route("query-report", "Sales Analytics");
+    }
+
     function openDelayedSalesOrderList() {
         closeModal();
         frappe.route_options = {
@@ -1086,7 +1311,22 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
         }
         state[toggle.stateKey] = sortBy;
 
-        const args = key === "stockItems"
+        const args = buildLeaderboardArgs(key, sortBy);
+
+        frappe.call({
+            method: methodRoot + toggle.method,
+            args: args,
+            callback: function (r) {
+                const items = r.message || [];
+                state.data.leaderboards[key] = items;
+                $(`#exd-lb-${key}`).replaceWith(renderLeaderboardSection({ key, ...LEADERBOARD_CONFIG[key] }, items));
+                if (onDone) onDone();
+            }
+        });
+    }
+
+    function buildLeaderboardArgs(key, sortBy) {
+        const baseArgs = key === "stockItems"
             ? { company: state.filters.company, sort_by: sortBy }
             : {
                 period_preset: state.filters.period_preset,
@@ -1096,15 +1336,38 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                 sort_by: sortBy,
             };
 
+        const item_groups = state.cardItemGroupFilters[key] || [];
+        if (item_groups.length) {
+            baseArgs.item_groups = item_groups;
+        }
+        return baseArgs;
+    }
+
+    function reapplyCardItemGroupFilters() {
+        Object.keys(TOGGLE_SECTIONS).forEach(key => {
+            if ((state.cardItemGroupFilters[key] || []).length) {
+                refreshLeaderboardCard(key);
+            }
+        });
+    }
+
+    function refreshLeaderboardCard(key) {
+        const toggle = TOGGLE_SECTIONS[key];
+        if (!toggle) return;
+        const sortBy = state[toggle.stateKey];
+        const args = buildLeaderboardArgs(key, sortBy);
+
         frappe.call({
             method: methodRoot + toggle.method,
             args: args,
             callback: function (r) {
-                if (r.message) {
-                    state.data.leaderboards[key] = r.message;
-                    $(`#exd-lb-${key}`).replaceWith(renderLeaderboardSection({ key, ...LEADERBOARD_CONFIG[key] }, r.message));
-                }
-                if (onDone) onDone();
+                // r.message may legitimately be an empty array (this Item
+                // Group has no matching rows) - keep it as-is rather than
+                // falling back to stale data, so the card correctly shows
+                // "No data available" instead of the previous filter's rows.
+                const items = r.message || [];
+                state.data.leaderboards[key] = items;
+                $(`#exd-lb-${key}`).replaceWith(renderLeaderboardSection({ key, ...LEADERBOARD_CONFIG[key] }, items));
             }
         });
     }
@@ -1633,9 +1896,20 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
 }
 .exd-card-label svg { width: 13px; height: 13px; color: var(--exd-primary); flex-shrink: 0; }
 
+/* Header row controls (Item Group filter + Qty Wise/Amount Wise) - sit
+   side by side, same height and width, in the card's top-right corner. */
+.exd-leaderboard-header-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
 /* Qty Wise / Amount Wise selector (e.g. Stock Items) - an explicit dropdown
    so both options are visible, rather than a single button that only shows
-   the view you'd switch TO. Shared by the mini card header and the modal. */
+   the view you'd switch TO. Shared by the mini card header and the modal.
+   Also reused (with the .exd-card-item-group-select modifier) for the Item
+   Group filter, so both controls in the header render identically. */
 .exd-mini-toggle-select {
     appearance: none;
     -webkit-appearance: none;
@@ -1656,6 +1930,11 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     outline: none;
     box-shadow: 0 1px 2px rgba(0,0,0,0.04);
     transition: all .15s ease;
+    width: 132px;
+    height: 30px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .exd-mini-toggle-select:hover { background-color: var(--exd-bg); }
 .exd-mini-toggle-select:focus { box-shadow: 0 0 0 2px rgba(17,24,39,0.14); }
@@ -1666,6 +1945,41 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     box-shadow: 0 1px 2px rgba(0,0,0,0.2);
 }
 .exd-page[data-theme="dark"] .exd-mini-toggle-select:focus { box-shadow: 0 0 0 2px rgba(243,244,246,0.14); }
+
+/* Item Group select: same height as Qty Wise/Amount Wise, but a bit wider
+   since Item Group names tend to run longer - keeps them readable instead
+   of being ellipsis-truncated into something unrecognisable. */
+.exd-card-item-group-select {
+    width: 172px;
+}
+
+/* CODE / ITEM / QTY / AMOUNT column layout for Top Selling & Top Purchase -
+   Item Code is shown, so the Item name column is narrowed and the Qty and
+   Amount columns are widened to compensate. */
+.exd-col-code {
+    min-width: 200px;
+    max-width: 200px;
+     flex-shrink: 0;
+    font-weight: 700;
+    color: var(--exd-text-3);
+    font-size: 12.5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.exd-col-name-narrow {
+    flex: 0 1 28%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.exd-col-wide {
+    min-width: 96px;
+}
+.exd-leaderboard-value.exd-col-wide {
+    margin-left: 18px;
+}
 
 /* Column header row above a leaderboard list (e.g. Stock Items) */
 .exd-leaderboard-colhead {
@@ -1685,6 +1999,17 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     letter-spacing: 0.3px;
 }
 .exd-col-fixed { min-width: 64px; text-align: right; flex-shrink: 0; }
+
+/* Empty state shown inside a leaderboard card when the current Item Group
+   filter (or the underlying data) has no matching rows - the card itself
+   stays visible (with its filter controls) instead of disappearing. */
+.exd-leaderboard-empty {
+    padding: 24px 8px;
+    text-align: center;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--exd-text-3);
+}
 
 /* Gradient Card for Conversion Ratio - a deliberate signature "hero" card,
    kept dark in both light and dark page themes (matches the monochrome
@@ -1719,6 +2044,19 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     color: var(--exd-text-3);
     letter-spacing: 0.6px;
     margin-bottom: 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+.exd-card-sales-dual {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+}
+.exd-card-sales-half {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
 }
 .exd-card-value-large {
     font-size: 44px;
@@ -1731,7 +2069,7 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     -webkit-text-fill-color: transparent;
     color: var(--exd-text);
 }
-.exd-card-sub {
+.exd-card-sales-sub {
     display: inline-flex;
     align-self: flex-start;
     align-items: center;
@@ -2091,6 +2429,97 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     margin-top:10px;
     height:160px;
 }
+.exd-leaderboard-donut-card {
+    display:grid;
+    grid-template-columns:minmax(128px, 160px) 1fr;
+    gap:14px;
+    align-items:center;
+    padding:14px 0 8px;
+    border-bottom:1px solid var(--exd-border);
+    margin-top:10px;
+}
+.exd-donut {
+    width:128px;
+    height:128px;
+    border-radius:50%;
+    position:relative;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    overflow:hidden;
+    box-shadow:0 12px 30px rgba(15, 23, 42, 0.08);
+}
+.exd-donut::before {
+    content:'';
+    position:absolute;
+    width:72px;
+    height:72px;
+    border-radius:50%;
+    background:var(--exd-surface);
+    z-index:1;
+}
+.exd-donut-center {
+    position:relative;
+    text-align:center;
+    z-index:2;
+}
+.exd-donut-total {
+    font-size:16px;
+    font-weight:800;
+    color:var(--exd-text);
+}
+.exd-donut-label {
+    font-size:11px;
+    font-weight:700;
+    color:var(--exd-text-3);
+    margin-top:4px;
+}
+.exd-donut-legend {
+    display:grid;
+    gap:8px;
+}
+.exd-donut-legend-item {
+    display:grid;
+    grid-template-columns:auto 1fr auto;
+    gap:8px;
+    align-items:center;
+    padding:6px 0;
+    cursor:default;
+}
+.exd-donut-legend-item:hover .exd-donut-legend-percent {
+    color:var(--exd-primary);
+}
+.exd-donut-swatch {
+    width:10px;
+    height:10px;
+    border-radius:50%;
+    flex-shrink:0;
+}
+.exd-donut-legend-text {
+    min-width:0;
+    display:flex;
+    flex-direction:column;
+    overflow:hidden;
+}
+.exd-donut-legend-name {
+    font-size:13px;
+    font-weight:600;
+    color:var(--exd-text);
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+}
+.exd-donut-legend-amount {
+    font-size:12px;
+    color:var(--exd-text-3);
+    margin-top:2px;
+}
+.exd-donut-legend-percent {
+    font-size:12px;
+    font-weight:700;
+    color:var(--exd-text-3);
+    white-space:nowrap;
+}
 .exd-bar-chart {
     display:flex;
     align-items:flex-end;
@@ -2185,10 +2614,18 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     background:var(--exd-bg);
     padding:1px 5px;
     border-radius:3px;
+    min-width:106px;
+    max-width:106px;
+    flex-shrink:0;
+    text-align:left;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
 }
 .exd-leaderboard-value { font-weight:700; color:var(--exd-text); font-size:14px; }
 .exd-leaderboard-qty { font-weight:600; color:var(--exd-primary); font-size:13px; }
-.exd-leaderboard-id { font-weight:700; color:var(--exd-text); font-size:13px; }
+.exd-leaderboard-code { font-weight:700; color:var(--exd-text-3); font-size:13px; min-width:100px; }
+.exd-leaderboard-id { font-weight:700; color:var(--exd-text); font-size:13px;  }
 .exd-leaderboard-delay { font-weight:700; color:#dc2626; font-size:13px; }
 .exd-leaderboard-view-all {
     width:100%;
