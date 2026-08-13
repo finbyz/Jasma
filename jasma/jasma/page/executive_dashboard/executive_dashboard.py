@@ -1436,7 +1436,7 @@ def get_top_stock_items(company=None, item_groups=None, sort_by="qty"):
             SUM(bin.actual_qty) AS qty,
             SUM(bin.stock_value) AS stock_value
         FROM `tabBin` bin
-        INNER JOIN `tabItem` item ON item.name = bin.item_code
+        INNER JOIN `tabItem` item ON item.name = bin.item_code AND item.is_stock_item = 1
         WHERE {conditions}
         GROUP BY bin.item_code
         ORDER BY {order_field} DESC
@@ -1494,7 +1494,7 @@ def get_top_selling_items(period_preset="yearly", company=None, item_groups=None
             SUM(sii.base_net_amount) AS amount
         FROM `tabSales Invoice Item` sii
         INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
-        INNER JOIN `tabItem` item ON item.name = sii.item_code
+        INNER JOIN `tabItem` item ON item.name = sii.item_code AND item.is_stock_item = 1
         WHERE {conditions}
         GROUP BY sii.item_code
         ORDER BY {order_field} DESC
@@ -1563,6 +1563,7 @@ def get_top_purchase_items(period_preset="yearly", company=None, item_groups=Non
             ON pr.name = pri.parent
         INNER JOIN `tabItem` item
             ON item.name = pri.item_code
+            AND item.is_stock_item = 1
         WHERE
             pr.docstatus = 1
             AND pr.posting_date BETWEEN %(from_date)s AND %(to_date)s
@@ -1583,6 +1584,7 @@ def get_top_purchase_items(period_preset="yearly", company=None, item_groups=Non
             ON sr.name = sri.parent
         INNER JOIN `tabItem` item
             ON item.name = sri.item_code
+            AND item.is_stock_item = 1
         WHERE
             sr.docstatus = 1
             AND sr.posting_date BETWEEN %(from_date)s AND %(to_date)s
@@ -1603,6 +1605,7 @@ def get_top_purchase_items(period_preset="yearly", company=None, item_groups=Non
             ON se.name = sed.parent
         INNER JOIN `tabItem` item
             ON item.name = sed.item_code
+            AND item.is_stock_item = 1
         WHERE
             se.docstatus = 1
             AND se.posting_date BETWEEN %(from_date)s AND %(to_date)s
@@ -1724,6 +1727,22 @@ def get_new_vs_old_customers(period_preset="yearly", company=None, from_date=Non
 # ============================================================
 # CARD 15: OLD CUSTOMER ACTIVITY - NEW ORDERS VS INVOICES (DYNAMIC)
 # ============================================================
+@frappe.whitelist()
+def get_stock_item_groups():
+    """
+    Return only item groups having at least one stock item
+    (maintain_stock = 1).
+    """
+    return frappe.db.sql("""
+        SELECT DISTINCT item_group
+        FROM `tabItem`
+        WHERE disabled = 0
+          AND is_stock_item = 1
+          AND item_group IS NOT NULL
+          AND item_group != ''
+        ORDER BY item_group
+    """, as_dict=True)
+
 
 @frappe.whitelist()
 def get_old_customer_order_vs_invoice(period_preset="yearly", company=None, from_date=None, to_date=None):

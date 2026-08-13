@@ -147,16 +147,15 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
 
     async function loadItemGroups() {
         try {
-            const groups = await frappe.db.get_list("Item Group", {
-                fields: ["name"],
-                order_by: "name asc",
-                limit: 0,
+            const r = await frappe.call({
+                method: methodRoot + "get_stock_item_groups",
             });
-            state.itemGroups = Array.isArray(groups)
-                ? groups
-                : Array.isArray(groups?.message)
-                    ? groups.message
-                    : [];
+            const groups = (r && r.message) || [];
+            // get_stock_item_groups() returns rows shaped {item_group: "..."},
+            // but the rest of this file (getItemGroupOptions, etc.) expects
+            // {name: "..."} - normalize here rather than touching every
+            // downstream usage.
+            state.itemGroups = groups.map(g => ({ name: g.item_group }));
         } catch (e) {
             console.warn("Executive Dashboard: failed to load Item Groups", e);
             state.itemGroups = [];
@@ -837,32 +836,37 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
     }
 
     function renderLeaderboardDonut(items, key) {
-        if (!items || !items.length) return '';
+    if (!items || !items.length) return '';
 
-        const topItems = items.slice(0, 5);
-        const total = topItems.reduce((sum, item) => sum + (item.amount || 0), 0);
-        if (!total) return '';
+    const topItems = items.slice(0, 5);
+    const total = topItems.reduce((sum, item) => sum + (item.amount || 0), 0);
+    if (!total) return '';
 
-        const colors = ["#6366f1", "#f59e0b", "#10b981", "#ec4899", "#14b8a6"];
-        let current = 0;
-        const stops = topItems.map((item, index) => {
-            const pct = ((item.amount || 0) / total) * 100;
-            const start = current;
-            const end = current + pct;
-            current = end;
-            return `${colors[index]} ${start}% ${end}%`;
-        }).join(", ");
+    const totalText = formatCompactInr(total);
+    const totalSizeClass = totalText.length > 8 ? 'is-long' : '';  // NEW
 
-        return `
-            <div class="exd-leaderboard-donut-card">
+    const colors = ["#6366f1", "#f59e0b", "#10b981", "#ec4899", "#14b8a6"];
+    let current = 0;
+    const stops = topItems.map((item, index) => {
+        const pct = ((item.amount || 0) / total) * 100;
+        const start = current;
+        const end = current + pct;
+        current = end;
+        return `${colors[index]} ${start}% ${end}%`;
+    }).join(", ");
+
+    return `
+        <div class="exd-leaderboard-donut-card">
+            <div class="exd-donut-wrapper">
                 <div class="exd-donut" style="background: conic-gradient(${stops});">
                     <div class="exd-donut-center">
-                        <div class="exd-donut-total">${formatCompactInr(total)}</div>
+                        <div class="exd-donut-total ${totalSizeClass}">${totalText}</div>
                         <div class="exd-donut-label">Top ${topItems.length}</div>
                     </div>
                 </div>
-                <div class="exd-donut-legend">
-                    ${topItems.map((item, index) => {
+            </div>
+            <div class="exd-donut-legend">
+                ${topItems.map((item, index) => {
                     const pct = total ? Math.round(((item.amount || 0) / total) * 100) : 0;
                     return `
                         <div class="exd-donut-legend-item" data-tooltip="${item.val || formatCompactInr(item.amount)} · ${pct}%">
@@ -875,10 +879,10 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                         </div>
                     `;
                 }).join('')}
-                </div>
             </div>
-        `;
-    }
+        </div>
+    `;
+}
 
     // Leaderboard sections that carry two ranked metrics (qty + amount) and
     // get a Qty/Amount toggle button + fixed-width columns to match.
@@ -2429,97 +2433,166 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     margin-top:10px;
     height:160px;
 }
+/* Donut Chart - Improved */
+/* Donut Chart - Improved */
 .exd-leaderboard-donut-card {
-    display:grid;
-    grid-template-columns:minmax(128px, 160px) 1fr;
-    gap:14px;
-    align-items:center;
-    padding:14px 0 8px;
-    border-bottom:1px solid var(--exd-border);
-    margin-top:10px;
+    display: grid;
+    grid-template-columns: 240px 1fr;
+    gap: 32px;
+    align-items: center;
+    padding: 24px 16px 16px 16px;
+    margin-top: 12px;
+    border-bottom: 1px solid var(--exd-border);
 }
+
+.exd-donut-wrapper {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 8px;
+}
+
 .exd-donut {
-    width:128px;
-    height:128px;
-    border-radius:50%;
-    position:relative;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    overflow:hidden;
-    box-shadow:0 12px 30px rgba(15, 23, 42, 0.08);
+    width: 200px;
+    height: 200px;
+    border-radius: 50%;
+    position: relative;
+    box-shadow: 
+        0 10px 34px rgba(0, 0, 0, 0.12),
+        0 2px 10px rgba(0, 0, 0, 0.05),
+        inset 0 0 0 1px rgba(0, 0, 0, 0.03);   /* NEW — thin crisp edge, reads less "flat" */
+    transition: transform 0.3s ease;
+    flex-shrink: 0;
 }
+
+.exd-donut:hover {
+    transform: scale(1.02);
+}
+
 .exd-donut::before {
-    content:'';
-    position:absolute;
-    width:72px;
-    height:72px;
-    border-radius:50%;
-    background:var(--exd-surface);
-    z-index:1;
+    content: '';
+    position: absolute;
+    width: 130px;    /* was 110px — bigger hole, real breathing room around the text */
+    height: 130px;
+    border-radius: 50%;
+    background: var(--exd-surface);
+    inset: 0;
+    margin: auto;
+    box-shadow:
+        inset 0 2px 10px rgba(0, 0, 0, 0.05),   /* NEW — soft depth so the hole doesn't look pasted-on flat */
+        0 0 0 1px rgba(0, 0, 0, 0.02);
 }
+
 .exd-donut-center {
-    position:relative;
-    text-align:center;
-    z-index:2;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    z-index: 2;
+    width: 130px;     /* matches new hole size */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0 14px;  /* keeps text a fixed distance from the ring on all sides */
 }
+
 .exd-donut-total {
-    font-size:16px;
-    font-weight:800;
-    color:var(--exd-text);
+    font-size: 19px;      /* was 26px — the main fix; 26px had nowhere to go */
+    font-weight: 800;
+    color: var(--exd-text);
+    line-height: 1.15;
+    letter-spacing: -0.2px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
+
+/* NEW — extra shrink step for longer figures (e.g. "₹ 2.55 Cr", "$ 128.4K")
+   so nothing ever gets clipped or pushed against the ring */
+.exd-donut-total.is-long {
+    font-size: 16px;
+}
+
 .exd-donut-label {
-    font-size:11px;
-    font-weight:700;
-    color:var(--exd-text-3);
-    margin-top:4px;
+    font-size: 10px;      /* was 11px */
+    font-weight: 700;
+    color: var(--exd-text-3);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 3px;
 }
+
 .exd-donut-legend {
-    display:grid;
-    gap:8px;
+    display: grid;
+    gap: 10px;
+    padding: 4px 0;
 }
+
 .exd-donut-legend-item {
-    display:grid;
-    grid-template-columns:auto 1fr auto;
-    gap:8px;
-    align-items:center;
-    padding:6px 0;
-    cursor:default;
+    display: grid;
+    grid-template-columns: 14px 1fr auto;
+    gap: 14px;
+    align-items: center;
+    padding: 6px 8px;
+    border-radius: 8px;
+    transition: background 0.15s ease;
+    cursor: default;
 }
+
+.exd-donut-legend-item:hover {
+    background: var(--exd-bg);
+}
+
 .exd-donut-legend-item:hover .exd-donut-legend-percent {
-    color:var(--exd-primary);
+    transform: scale(1.05);
 }
+
 .exd-donut-swatch {
-    width:10px;
-    height:10px;
-    border-radius:50%;
-    flex-shrink:0;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    border: 1px solid rgba(0, 0, 0, 0.04);
 }
+
 .exd-donut-legend-text {
-    min-width:0;
-    display:flex;
-    flex-direction:column;
-    overflow:hidden;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
+
 .exd-donut-legend-name {
-    font-size:13px;
-    font-weight:600;
-    color:var(--exd-text);
-    overflow:hidden;
-    text-overflow:ellipsis;
-    white-space:nowrap;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--exd-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    letter-spacing: -0.1px;
 }
+
 .exd-donut-legend-amount {
-    font-size:12px;
-    color:var(--exd-text-3);
-    margin-top:2px;
+    font-size: 11px;
+    color: var(--exd-text-3);
+    font-weight: 500;
+    margin-top: 1px;
 }
+
 .exd-donut-legend-percent {
-    font-size:12px;
-    font-weight:700;
-    color:var(--exd-text-3);
-    white-space:nowrap;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--exd-text-3);
+    white-space: nowrap;
+    padding: 2px 10px;
+    border-radius: 12px;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
 }
+
 .exd-bar-chart {
     display:flex;
     align-items:flex-end;
@@ -2835,6 +2908,17 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     .exd-filter-bar { flex-direction:column; align-items:stretch; }
     .exd-filter-right { margin-left:0; }
     .exd-custom-range { flex-wrap:wrap; }
+     .exd-leaderboard-donut-card {
+        grid-template-columns: 1fr;
+        gap: 20px;
+        padding: 16px 12px;
+    }
+    .exd-donut { width: 170px; height: 170px; }
+.exd-donut::before { width: 108px; height: 108px; }
+.exd-donut-center { width: 108px; padding: 0 10px; }
+.exd-donut-total { font-size: 17px; }
+.exd-donut-total.is-long { font-size: 14px; }
+}
 }
 @media (max-width:768px) {
     .exd-shell { padding:8px 12px; }
@@ -2846,6 +2930,15 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     .exd-chart-container { height:120px; }
     .exd-card-value { font-size:22px; }
     .exd-bento { gap:8px; }
+      .exd-leaderboard-donut-card {
+        padding: 12px 8px;
+    }
+    .exd-donut { width: 150px; height: 150px; }
+.exd-donut::before { width: 96px; height: 96px; }
+.exd-donut-center { width: 96px; padding: 0 8px; }
+.exd-donut-total { font-size: 15px; }
+.exd-donut-total.is-long { font-size: 13px; }
+.exd-donut-label { font-size: 9px; }
 }
 </style>`);
     }
