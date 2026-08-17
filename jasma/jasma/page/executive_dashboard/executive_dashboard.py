@@ -1,5 +1,8 @@
 # jasma/jasma/page/executive_dashboard/executive_dashboard.py
 
+import re
+import datetime
+
 """
 Executive Dashboard Backend
 STEP 1: Only Total Sales and Sales Orders are dynamic
@@ -43,7 +46,7 @@ def get_date_range(period_preset, custom_from_date=None, custom_to_date=None):
     today_date = getdate(today())
 
     if period_preset in ("custom", "Custom Range") and custom_from_date and custom_to_date:
-        return getdate(custom_from_date), getdate(custom_to_date)
+        return _parse_custom_date(custom_from_date), _parse_custom_date(custom_to_date)
 
     if period_preset == "weekly":
         return add_days(today_date, -7), today_date
@@ -74,6 +77,29 @@ def get_date_range(period_preset, custom_from_date=None, custom_to_date=None):
 
     # yearly ("This Financial Year") -> the Fiscal Year that contains today
     return get_current_fiscal_year_range(today_date)
+
+def _parse_custom_date(date_value):
+    """
+    Safely parse a custom-range date. Prefers ISO (yyyy-mm-dd), which is
+    what the JS now always sends after ddmmyyyyToIso(); falls back to
+    dd-mm-yyyy so this stays correct even if some other caller sends the
+    display format instead of ISO.
+    """
+    if not date_value:
+        return None
+    if isinstance(date_value, (datetime.date, datetime.datetime)):
+        return getdate(date_value)
+
+    value = str(date_value).strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        return getdate(value)
+
+    m = re.match(r"^(\d{1,2})-(\d{1,2})-(\d{4})$", value)
+    if m:
+        day, month, year = m.groups()
+        return getdate(f"{year}-{int(month):02d}-{int(day):02d}")
+
+    return getdate(value)
 
 def get_previous_date_range(from_date, to_date):
     """
@@ -320,7 +346,7 @@ def get_monthly_sales_order_trend(period_preset="yearly", company=None, from_dat
 # ============================================================
 
 SALES_ORDER_PENDING_STATUSES = ("To Deliver and Bill", "To Bill", "To Deliver")
-
+SALES_ORDER_COMPLETED_STATUSES = ("Completed", "Closed")
 @frappe.whitelist()
 def get_sales_order_stats(period_preset="yearly", company=None, from_date=None, to_date=None):
     """
@@ -360,7 +386,7 @@ def get_sales_order_stats(period_preset="yearly", company=None, from_date=None, 
     for r in rows:
         if r.docstatus == 1:
             count += r.cnt
-            if r.status == "Completed":
+            if r.status in SALES_ORDER_COMPLETED_STATUSES:
                 completed += r.cnt
             elif r.status in SALES_ORDER_PENDING_STATUSES:
                 pending += r.cnt
@@ -957,6 +983,10 @@ def get_receivables_balances(period_preset="yearly", company=None, from_date=Non
                         balance owed in that currency (e.g. real USD owed
                         by a USD customer), not its base-currency
                         equivalent.
+    Only POSITIVE outstanding rows are counted, in both base_total and
+    every per-currency total - negative rows are credit balances /
+    overpayments (money we owe the customer, not money owed to us), so
+    they're excluded rather than netted in, for every currency alike.
     """
     from erpnext.accounts.report.accounts_receivable.accounts_receivable import (
         execute as run_accounts_receivable,
@@ -965,10 +995,6 @@ def get_receivables_balances(period_preset="yearly", company=None, from_date=Non
     from_date, to_date = get_date_range(period_preset, from_date, to_date)
     report_date = getdate(to_date)
 
-    # The report itself requires a single company (it defaults to the
-    # Global Default Company if none is passed) - to honour "All Companies"
-    # the same way every other card on this dashboard does, run it once per
-    # company and sum the results when no company filter is selected.
     companies = [company] if company else frappe.get_all("Company", pluck="name")
 
     base_currency = None
@@ -987,7 +1013,7 @@ def get_receivables_balances(period_preset="yearly", company=None, from_date=Non
             "in_party_currency": 0,
         })
         _, base_rows = run_accounts_receivable(base_filters)[:2]
-        base_total += sum(flt(r.outstanding) for r in base_rows)
+        base_total += sum(flt(r.outstanding) for r in base_rows if flt(r.outstanding) > 0)
 
         party_filters = frappe._dict({
             "company": cmp,
@@ -996,8 +1022,11 @@ def get_receivables_balances(period_preset="yearly", company=None, from_date=Non
         })
         _, party_rows = run_accounts_receivable(party_filters)[:2]
         for r in party_rows:
+            outstanding = flt(r.outstanding)
+            if outstanding <= 0:
+                continue
             cur = r.currency or base_currency
-            currency_totals[cur] = currency_totals.get(cur, 0) + flt(r.outstanding)
+            currency_totals[cur] = currency_totals.get(cur, 0) + outstanding
 
     symbol_cache = {}
     def currency_symbol(cur):
@@ -1742,6 +1771,84 @@ def get_stock_item_groups():
           AND item_group != ''
         ORDER BY item_group
     """, as_dict=True)
+    
+# ============================================================
+# CARD 16: PENDING APPROVALS (DYNAMIC)
+# ============================================================
+
+PENDING_APPROVAL_TYPES = [
+    {"key": "payment_request", "label": "Payment Request", "doctype": "Payment Request", "date_field": "transaction_date"},
+    {"key": "leave_application", "label": "Leave Application", "doctype": "Leave Application", "date_field": "from_date"},
+    {"key": "expense_claim", "label": "Expense Claim", "doctype": "Expense Claim", "date_field": "posting_date"},
+    {"key": "employee_advance", "label": "Employee Advance", "doctype": "Employee Advance", "date_field": "posting_date"},
+]
+
+def _doctype_has_field(doctype, fieldname):
+    try:
+        return bool(frappe.get_meta(doctype).has_field(fieldname))
+    except Exception:
+        return False
+
+
+@frappe.whitelist()
+def get_pending_approvals(period_preset="yearly", company=None, from_date=None, to_date=None):
+    """
+    Count of documents awaiting workflow approval for each of Payment
+    Request, Leave Application, Expense Claim, Employee Advance:
+      - docstatus = 0                          (not yet submitted)
+      - workflow_state is set AND != "Draft"   (already pushed into the
+                                                  approval flow, not still
+                                                  sitting untouched)
+    Scoped to the period + company like every other card. If a site
+    doesn't have a doctype installed (e.g. HR app absent), that item is
+    returned with count 0 instead of erroring. If a doctype has no
+    `company` field, the company filter is simply skipped for it.
+    """
+    from_date, to_date = get_date_range(period_preset, from_date, to_date)
+
+    items = []
+    for cfg in PENDING_APPROVAL_TYPES:
+        doctype = cfg["doctype"]
+
+        if not frappe.db.exists("DocType", doctype):
+            items.append({
+                "key": cfg["key"], "label": cfg["label"], "count": 0,
+                "doctype": doctype, "date_field": None, "has_workflow": False,
+            })
+            continue
+
+        filters = [["docstatus", "=", 0]]
+
+        date_field = cfg["date_field"] if _doctype_has_field(doctype, cfg["date_field"]) else "creation"
+        if date_field == "creation":
+            filters.append(["creation", "between", [from_date, to_date]])
+        else:
+            filters.append([date_field, "between", [from_date, to_date]])
+
+        if company and _doctype_has_field(doctype, "company"):
+            filters.append(["company", "=", company])
+
+        has_workflow = _doctype_has_field(doctype, "workflow_state")
+        if has_workflow:
+            filters.append(["workflow_state", "is", "set"])
+            filters.append(["workflow_state", "!=", "Draft"])
+
+        count = frappe.db.count(doctype, filters=filters)
+
+        items.append({
+            "key": cfg["key"],
+            "label": cfg["label"],
+            "count": count,
+            "doctype": doctype,
+            "date_field": date_field,
+            "has_workflow": has_workflow,
+        })
+
+    return {
+        "items": items,
+        "from_date": str(from_date),
+        "to_date": str(to_date),
+    }
 
 
 @frappe.whitelist()
@@ -1894,6 +2001,7 @@ def get_page_data(period_preset="yearly", company=None, item_groups=None, from_d
     pending_po = get_pending_po_material_requests(period_preset, company, from_date, to_date)
     receipt_pending = get_receipt_pending_purchase_orders(period_preset, company, from_date, to_date)
     pending_delivery = get_pending_delivery_sales_orders(period_preset, company, from_date, to_date)
+    pending_approvals = get_pending_approvals(period_preset, company, from_date, to_date)
     treasury = get_treasury_balances(period_preset, company, from_date, to_date)
     receivables = get_receivables_balances(period_preset, company, from_date, to_date)
     tax_claims = get_tax_claims(period_preset, company, from_date, to_date)
@@ -1933,6 +2041,7 @@ def get_page_data(period_preset="yearly", company=None, item_groups=None, from_d
         "conversion_ratio": conversion_ratio,
         "currency_averages": currency_averages,
         "pipeline": pipeline,
+        "pending_approvals": pending_approvals,
         "treasury": treasury,
         "receivables": receivables,
         "tax_claims": tax_claims,

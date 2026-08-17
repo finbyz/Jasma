@@ -212,17 +212,30 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
         });
 
         $page.on("click", "#exd-apply-range", function () {
-            const from_date = $("#exd-date-from").val();
-            const to_date = $("#exd-date-to").val();
-            if (from_date && to_date) {
+            const from_date_display = $("#exd-date-from").val();
+            const to_date_display = $("#exd-date-to").val();
+            if (from_date_display && to_date_display) {
                 state.filters.period_preset = "custom";
-                state.filters.from_date = from_date;
-                state.filters.to_date = to_date;
+                state.filters.from_date = ddmmyyyyToIso(from_date_display);
+                state.filters.to_date = ddmmyyyyToIso(to_date_display);
                 loadPageData();
             } else {
                 frappe.msgprint("Please select both from and to dates.");
             }
         });
+
+        window.openPendingApprovalList = openPendingApprovalList;
+
+        // Date pickers display dd-mm-yyyy, but the server (and frappe.utils.getdate)
+        // expects yyyy-mm-dd - without this conversion "01-04-2026" gets
+        // misread server-side as 04-Jan-2026 instead of 01-Apr-2026.
+        function ddmmyyyyToIso(value) {
+            if (!value) return null;
+            const parts = value.split("-");
+            if (parts.length !== 3) return value;
+            const [d, m, y] = parts;
+            return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+        }
 
         $page.on("click", "#exd-refresh", () => loadPageData());
         $page.on("click", "#exd-theme-toggle", () => toggleTheme());
@@ -463,11 +476,20 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                     </div>
                 </div>
 
+                
                 <!-- Fulfillment Pipeline (Spans 12) -->
                 <div class="exd-bento-span-12 exd-card exd-anim" style="--delay:5;">
                     <div class="exd-card-label" style="margin-bottom:16px;">${iconSvg("git")} FULFILLMENT PIPELINE</div>
                     <div class="exd-pipeline">
                         ${getPipelineStages(d.pipeline)}
+                    </div>
+                </div>
+
+                <!-- Pending Approvals (Spans 12) -->
+                <div class="exd-bento-span-12 exd-card exd-anim" style="--delay:5.5;">
+                    <div class="exd-card-label" style="margin-bottom:16px;">${iconSvg("check")} PENDING APPROVALS</div>
+                    <div class="exd-approval-grid">
+                        ${getPendingApprovalCards(d.pending_approvals)}
                     </div>
                 </div>
 
@@ -561,6 +583,30 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                 ? `<div class="exd-pipeline-connector">${iconSvg("chevron", 14)}</div>`
                 : '';
             return stage + connector;
+        }).join('');
+    }
+
+    function getPendingApprovalCards(pendingApprovals) {
+        const items = (pendingApprovals && pendingApprovals.items) || [];
+        if (!items.length) return '<div class="exd-approval-card">No data</div>';
+
+        const meta = {
+            payment_request:   { icon: "dollar",   color: "#0891b2", bg: "#ecfeff" },
+            leave_application: { icon: "calendar", color: "#7c3aed", bg: "#f5f3ff" },
+            expense_claim:     { icon: "file",     color: "#d97706", bg: "#fffbeb" },
+            employee_advance:  { icon: "bank",     color: "#10b981", bg: "#ecfdf5" },
+        };
+
+        return items.map(item => {
+            const m = meta[item.key] || { icon: "file", color: "#6366f1", bg: "#eef2ff" };
+            return `
+            <div class="exd-approval-card is-clickable" onclick="openPendingApprovalList('${item.key}')" title="Click to view ${item.label}">
+                <div class="exd-approval-icon" style="background:${m.bg}; color:${m.color};">${iconSvg(m.icon, 18)}</div>
+                <div class="exd-approval-info">
+                    <div class="exd-approval-value">${item.count || 0}</div>
+                    <div class="exd-approval-label">${item.label}</div>
+                </div>
+            </div>`;
         }).join('');
     }
 
@@ -810,12 +856,13 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
     function renderCardItemGroupFilterSelect(key) {
         const selectedGroup = (state.cardItemGroupFilters[key] || [])[0] || "";
         return `
-            <select id="exd-card-item-group-${key}" class="exd-card-item-group-select exd-mini-toggle-select" title="${selectedGroup || 'Select Item Groups'}">
-                ${getItemGroupOptions(selectedGroup)}
-            </select>
+          
         `;
     }
 
+    //   <select id="exd-card-item-group-${key}" class="exd-card-item-group-select exd-mini-toggle-select" title="${selectedGroup || 'Select Item Groups'}">
+    //     ${getItemGroupOptions(selectedGroup)}
+    //   </select>
     function getItemGroupOptions(selectedGroup = "") {
         if (!state.itemGroupsLoaded) {
             return `<option value="">Loading Item Groups...</option>`;
@@ -1086,24 +1133,30 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
     }
 
     function openTreasuryLedger() {
-        const treasury = (state.data && state.data.treasury) || {};
-        const accounts = (treasury.accounts || []).map(a => a.account);
+    const treasury = (state.data && state.data.treasury) || {};
+    const accounts = (treasury.accounts || []).map(a => a.account);
 
-        if (!accounts.length) {
-            frappe.msgprint("No bank accounts found for the selected filters.");
-            return;
-        }
-
-        frappe.route_options = {
-            from_date: state.filters.from_date,
-            to_date: state.filters.to_date,
-            account: accounts,
-        };
-        if (state.filters.company) {
-            frappe.route_options.company = state.filters.company;
-        }
-        frappe.set_route("query-report", "General Ledger");
+    if (!accounts.length) {
+        frappe.msgprint("No bank accounts found for the selected filters.");
+        return;
     }
+
+    // Treasury itself only carries an as_of_date (it's a point-in-time
+    // balance, not a ranged figure) - so for from_date, borrow the
+    // dashboard's own selected period start from total_sales, which is
+    // resolved with the same period_preset/company/dates on every load.
+    const ts = (state.data && state.data.total_sales) || {};
+
+    frappe.route_options = {
+        from_date: ts.from_date,
+        to_date: treasury.as_of_date || state.filters.to_date,
+        account: accounts,
+    };
+    if (state.filters.company) {
+        frappe.route_options.company = state.filters.company;
+    }
+    frappe.set_route("query-report", "General Ledger");
+}
 
     function openSalesInvoiceList() {
         const ts = (state.data && state.data.total_sales) || {};
@@ -1118,21 +1171,24 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
     }
 
     function openSalesOrderList(status, pending) {
-        const so = (state.data && state.data.sales_orders) || {};
-        frappe.route_options = {
-            docstatus: 1,
-            transaction_date: ["between", [so.from_date, so.to_date]],
-        };
-        if (pending) {
-            frappe.route_options.status = ["in", ["To Deliver and Bill", "To Bill", "To Deliver"]];
-        } else if (status) {
-            frappe.route_options.status = status;
-        }
-        if (state.filters.company) {
-            frappe.route_options.company = state.filters.company;
-        }
-        frappe.set_route("List", "Sales Order");
+    const so = (state.data && state.data.sales_orders) || {};
+    frappe.route_options = {
+        docstatus: 1,
+        transaction_date: ["between", [so.from_date, so.to_date]],
+    };
+    if (pending) {
+        frappe.route_options.status = ["in", ["To Deliver and Bill", "To Bill", "To Deliver"]];
+    } else if (status === "Completed") {
+        // Match the card's count, which includes Closed too
+        frappe.route_options.status = ["in", ["Completed", "Closed"]];
+    } else if (status) {
+        frappe.route_options.status = status;
     }
+    if (state.filters.company) {
+        frappe.route_options.company = state.filters.company;
+    }
+    frappe.set_route("List", "Sales Order");
+}
 
     function openQuotationList(status) {
         const q = (state.data && state.data.quotations) || {};
@@ -1150,8 +1206,13 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
     }
 
     function openReceivablesReport() {
+        // Use the as_of_date the card itself was computed with, not
+        // state.filters.to_date - that's only populated for Custom Range and
+        // stays null for presets (This FY, Previous FY, Monthly...), which was
+        // causing the report to ignore the selected period and default to today.
+        const rec = (state.data && state.data.receivables) || {};
         frappe.route_options = {
-            report_date: state.filters.to_date,
+            report_date: rec.as_of_date || state.filters.to_date,
         };
         if (state.filters.company) {
             frappe.route_options.company = state.filters.company;
@@ -1242,6 +1303,17 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
         frappe.set_route("query-report", "General Ledger");
     }
 
+    function getReportCompany() {
+        // Sales Analytics (unlike General Ledger / Accounts Receivable /
+        // Accounts Payable Summary) doesn't support "All Companies" - it
+        // errors if no company filter is passed. Fall back to the user's
+        // default company so clicking through from an "All Companies"
+        // dashboard view doesn't break.
+        return state.filters.company
+            || frappe.defaults.get_user_default("Company")
+            || frappe.defaults.get_global_default("company");
+    }
+
     function openMonthlyRevenueReport() {
         // Same window the Monthly Revenue Trend card itself is plotting
         // (get_total_sales is resolved with the same period_preset/dates).
@@ -1253,10 +1325,8 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
             from_date: ts.from_date,
             to_date: ts.to_date,
             range: "Monthly",
+            company: getReportCompany(),
         };
-        if (state.filters.company) {
-            frappe.route_options.company = state.filters.company;
-        }
         frappe.set_route("query-report", "Sales Analytics");
     }
 
@@ -1269,10 +1339,8 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
             from_date: so.from_date,
             to_date: so.to_date,
             range: "Monthly",
+            company: getReportCompany(),
         };
-        if (state.filters.company) {
-            frappe.route_options.company = state.filters.company;
-        }
         frappe.set_route("query-report", "Sales Analytics");
     }
 
@@ -1348,12 +1416,21 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
     }
 
     function reapplyCardItemGroupFilters() {
-        Object.keys(TOGGLE_SECTIONS).forEach(key => {
-            if ((state.cardItemGroupFilters[key] || []).length) {
-                refreshLeaderboardCard(key);
-            }
-        });
-    }
+    // Re-sync every toggle-enabled leaderboard (Stock Items, Top Selling,
+    // Top Purchase) after a fresh get_page_data load. get_page_data()
+    // always computes these with sort_by="qty" and no item_groups (it has
+    // no way to know per-card selections) - so without this, a chosen
+    // Amount Wise sort (or an Item Group filter) would silently revert
+    // to the unfiltered Qty Wise view on every date/company/period change,
+    // even though the dropdown still showed the previous selection.
+    Object.keys(TOGGLE_SECTIONS).forEach(key => {
+        const hasItemGroupFilter = (state.cardItemGroupFilters[key] || []).length > 0;
+        const hasNonDefaultSort = state[TOGGLE_SECTIONS[key].stateKey] !== "qty";
+        if (hasItemGroupFilter || hasNonDefaultSort) {
+            refreshLeaderboardCard(key);
+        }
+    });
+}
 
     function refreshLeaderboardCard(key) {
         const toggle = TOGGLE_SECTIONS[key];
@@ -1419,6 +1496,33 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                 $table.find("tbody").html(`<tr><td colspan="6" style="text-align:center;">Failed to load data.</td></tr>`);
             }
         });
+    }
+
+    function openPendingApprovalList(key) {
+        const pa = (state.data && state.data.pending_approvals) || {};
+        const item = (pa.items || []).find(i => i.key === key);
+        if (!item) {
+            frappe.msgprint("No data available for this section.");
+            return;
+        }
+
+        const routeOptions = { docstatus: 0 };
+
+        if (item.date_field) {
+            routeOptions[item.date_field] = ["between", [pa.from_date, pa.to_date]];
+        }
+        if (state.filters.company) {
+            routeOptions.company = state.filters.company;
+        }
+        if (item.has_workflow) {
+            routeOptions.workflow_state = ["not in", ["Draft"]];
+        }
+
+        // frappe.set_route("List", doctype, routeOptions) does NOT apply
+        // filters for list views - route_options has to be set separately
+        // beforehand, same pattern as every other card's list link in this file.
+        frappe.route_options = routeOptions;
+        frappe.set_route("List", item.doctype);
     }
 
     function openPendingPOModal() {
@@ -2305,6 +2409,64 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     display: grid;
     grid-template-columns: 1fr 32px 1fr 32px 1fr 32px 1fr;
     align-items: stretch;
+}
+
+/* Pending Approvals - flat stat grid, not a sequential pipeline, so no
+   connector arrows between cards. */
+.exd-approval-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+}
+.exd-approval-card {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    background: var(--exd-bg);
+    border: 1px solid var(--exd-border);
+    border-radius: 12px;
+    transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+}
+.exd-approval-card.is-clickable { cursor: pointer; }
+.exd-approval-card.is-clickable:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 20px rgba(17,24,39,0.10);
+    border-color: var(--exd-primary);
+}
+.exd-approval-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+.exd-approval-info { min-width: 0; }
+.exd-approval-value {
+    font-size: 24px;
+    font-weight: 900;
+    color: var(--exd-text);
+    line-height: 1.1;
+}
+.exd-approval-label {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--exd-text-2);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+@media (max-width:1024px) {
+    .exd-approval-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width:768px) {
+    .exd-approval-grid { grid-template-columns: 1fr; }
 }
 .exd-pipeline-stage {
     text-align: center;
