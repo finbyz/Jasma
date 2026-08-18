@@ -199,7 +199,16 @@ def patched_validate_with_previous_doc(self, ref):
 	Material Request Item + the settings checkbox, so every other
 	doctype/reference keeps the default strict behaviour, and this
 	one can be toggled off without a code change.
+
+	Sales Invoice and Delivery Note are explicitly skipped entirely —
+	validate_with_previous_doc does not run at all for these doctypes,
+	so none of the compare_fields checks (customer, company, project,
+	currency, item_code, uom, etc.) against the previous document are
+	enforced.
 	"""
+	if self.doctype in ("Sales Invoice", "Delivery Note"):
+		return
+
 	if self.doctype == "Purchase Order" and frappe.db.get_single_value(
 		"Buying Settings", "allow_duplicate_material_request_item_row_in_purchase_order"
 	):

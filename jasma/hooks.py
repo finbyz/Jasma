@@ -79,12 +79,15 @@ doctype_js = {
 	"Employee Advance": "public/js/employee_advance.js",
 	"Payment Entry": "public/js/payment_entry.js",
 	"Purchase Invoice": "public/js/purchase_invoice.js",
-	"Payment Request" : "public/js/payemnt_request.js",
-	# "Expense Claim" : "public/js/expanse_claim.js"
+	"Payment Request" : "public/js/payment_request.js",
+	"Expense Claim" : "public/js/expanse_claim.js",
+	"Supplier" : "public/js/supplier.js",
+	"Customer" : "public/js/customer.js"
 }
 
 doctype_list_js = {
-    "Payment Entry": "public/js/list_js/payment_entry_list.js"
+    "Payment Entry": "public/js/list_js/payment_entry_list.js",
+    "Material Request": "public/js/list_js/material_request_list.js"
 }
 # doctype_js = {"doctype" : "public/js/doctype.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
@@ -230,7 +233,8 @@ doc_events = {
         ]
 	},
     "Material Request": {
-		"validate": "jasma.jasma.doc_events.material_request.validate"
+		"validate": "jasma.jasma.doc_events.material_request.validate",
+        "onload": "jasma.jasma.doc_events.material_request.preserve_shipped_status_on_load"
 	},
     # "Payment Entry": {
     #     "on_submit": "jasma.jasma.doc_events.payment_entry.update_employee_advance_balance"
@@ -267,7 +271,11 @@ doc_events = {
     "BOM": {
 		"on_submit": "jasma.jasma.doc_events.bom.deactivate_other_boms",
 		"on_update_after_submit": "jasma.jasma.doc_events.bom.deactivate_other_boms",
-	}
+	},
+    "Bank Account": {
+        "after_insert": "jasma.jasma.doc_events.bank_account.update_supplier_bank_account",
+        "on_update": "jasma.jasma.doc_events.bank_account.update_supplier_bank_account"
+    }
    
 }
 

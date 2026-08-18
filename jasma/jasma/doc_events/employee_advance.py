@@ -50,6 +50,8 @@ def create_payment_entry(doc, method=None):
     # Accounts
     pe.paid_from = bank_account
     pe.paid_to = doc.advance_account
+    pe.reference_no = doc.name
+    pe.reference_date = doc.posting_date
 
     # Amount
     pe.paid_amount = doc.advance_amount
@@ -71,7 +73,7 @@ def create_payment_entry(doc, method=None):
     pe.insert()
 
     # Submit if required
-    # pe.submit()
+    pe.submit()
 
     frappe.msgprint(
         _("Payment Entry {0} created.").format(pe.name)

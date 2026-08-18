@@ -13,6 +13,35 @@ frappe.ui.form.on('Material Request', {
 
     refresh: function (frm) {
 
+
+        // Only a submitted, Stopped MR can be marked Shipped.
+        if (frm.doc.docstatus === 1 && frm.doc.status === 'Stopped') {
+            frm.add_custom_button(__('Shipped'), function () {
+                frappe.confirm(
+                    __('Mark this Material Request as Shipped?'),
+                    function () {
+                        frappe.call({
+                            method: 'jasma.jasma.doc_events.material_request.mark_material_request_shipped',
+                            args: { material_request: frm.doc.name },
+                            freeze: true,
+                            freeze_message: __('Updating status...'),
+                            callback: function (r) {
+                                if (!r.exc) {
+                                    frappe.show_alert({ message: __('Marked as Shipped'), indicator: 'green' });
+                                    frm.reload_doc();
+                                }
+                            }
+                        });
+                    }
+                );
+            }).addClass('btn-primary');
+        }
+
+        
+        if (frm.doc.status === 'Shipped') {
+            frm.page.set_indicator(__('Shipped'), 'blue');
+            watch_and_hide_stop_button(frm);
+        }
         // =========================
         // PRODUCTION PLAN BUTTON
         // =========================
@@ -121,3 +150,26 @@ frappe.ui.form.on('Material Request', {
     }
 
 });
+
+
+// this form stays open on a Shipped MR.
+function watch_and_hide_stop_button(frm) {
+    if (frm.__shipped_stop_observer) return; // already watching this form instance
+
+    const stop_label = __('Stop');
+    const container = frm.page.wrapper.get(0);
+
+    const remove_stop = () => {
+        if (frm.doc.status !== 'Shipped') return;
+        container.querySelectorAll('a, button, .btn, li').forEach(function (el) {
+            if (el.textContent.trim() === stop_label && el.children.length === 0) {
+                (el.closest('li') || el.closest('.btn-group') || el).remove();
+            }
+        });
+    };
+
+    remove_stop();
+    const observer = new MutationObserver(remove_stop);
+    observer.observe(container, { childList: true, subtree: true });
+    frm.__shipped_stop_observer = observer;
+}

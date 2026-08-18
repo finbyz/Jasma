@@ -154,6 +154,19 @@ def export_payment_entries(payment_entries):
         top=Side(style="thin"),
         bottom=Side(style="thin")
     )
+    
+    # Resolve our own default company bank account ONCE, outside the loop
+    default_bank_account_name = frappe.db.get_value(
+        "Bank Account",
+        {"is_default": 1, "is_company_account": 1},
+        "name"
+    )
+
+    default_bank_account_no = ""
+    if default_bank_account_name:
+        default_bank_account_no = frappe.db.get_value(
+            "Bank Account", default_bank_account_name, "bank_account_no"
+        ) or ""
 
     for cell in ws[1]:
         cell.fill = header_fill
@@ -165,40 +178,36 @@ def export_payment_entries(payment_entries):
         pe = frappe.get_doc("Payment Entry", pe_name)
 
         party_name = pe.party_name or ""
-        mode_of_payment =  ""
         amount = pe.paid_amount
-        
-        if amount >= 200000:
-            mode_of_payment = "RTGS"
-        else:
-            mode_of_payment = "NEFT"
-        
 
+        # Our own debit account = default bank account
+        bank_account = default_bank_account_no
+
+        # Beneficiary bank details — reset per entry
         party_bank_account = ""
-        bank_account = ""
         ifsc = ""
         ban_name = ""
-        
-        if pe.bank_account:
-            bank = frappe.get_doc("Bank Account", pe.bank_account)
-            bank_account = bank.bank_account_no or ""
-            ifsc = "" if bank.ifs_code == "ICIC0000011" else (bank.ifs_code or "")
+        is_icici = False   # define BEFORE the if, so it's always set
 
         if pe.party_bank_account:
             bank = frappe.get_doc("Bank Account", pe.party_bank_account)
             party_bank_account = bank.bank_account_no or ""
             ban_name = bank.bank or ""
-            
-        debit_narr = ""
+            is_icici = bool(bank.ifs_code) and bank.ifs_code.upper().startswith("ICIC")
+            ifsc = "" if is_icici else (bank.ifs_code or "")
 
+        # Mode of payment — ICICI always wins, regardless of amount
+        if is_icici:
+            mode_of_payment = "FT"
+        elif amount >= 200000:
+            mode_of_payment = "RTGS"
+        else:
+            mode_of_payment = "NEFT"
+
+        debit_narr = ""
         if pe.references:
             ref = pe.references[0]
-
-            if ref.bill_no:
-                debit_narr = ref.bill_no
-            else:
-                debit_narr = ref.reference_name or ""
-
+            debit_narr = ref.bill_no if ref.bill_no else (ref.reference_name or "")
         debit_narr = debit_narr[:30]
 
         row = [
@@ -210,21 +219,13 @@ def export_payment_entries(payment_entries):
             ifsc,
             amount,
             debit_narr,
-            "",
-            "",
-            "",
-            "",
+            "", "", "", "",
             getdate(nowdate()),
-            "",
-            "",
-            "",
-            "",
-            "",
-            ""
+            "", "", "", "", "", ""
         ]
 
         ws.append(row)
-
+        
     # Apply border and alignment
     for row in ws.iter_rows():
         for cell in row:

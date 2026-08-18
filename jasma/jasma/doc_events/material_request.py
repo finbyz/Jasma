@@ -1,5 +1,7 @@
 import frappe
 from frappe.utils import nowdate, getdate
+from frappe import _
+
 
 @frappe.whitelist()
 def create_manufacture_mr(source_mr):
@@ -174,4 +176,42 @@ def fetch_stock_qty(doc):
 
         item.total_stock_all_warehouses = total_stock_all_warehouses or 0
 
-        
+
+
+@frappe.whitelist()
+def mark_material_request_shipped(material_request):
+    """
+    Set a submitted, Stopped Material Request's status to 'Shipped'.
+    Uses db_set (bypasses the doc's normal status-recompute logic, which
+    is driven off % Ordered/% Received) since Shipped is a custom
+    terminal status layered on top of the standard ones.
+    """
+    doc = frappe.get_doc("Material Request", material_request)
+
+    if doc.docstatus != 1:
+        frappe.throw(_("Only submitted Material Requests can be marked as Shipped."))
+
+    if doc.status != "Stopped":
+        frappe.throw(_("Only Material Requests with status 'Stopped' can be marked as Shipped."))
+
+    doc.db_set("status", "Shipped", update_modified=True)
+    return {"status": "Shipped"}
+
+
+@frappe.whitelist(allow_guest=False)
+def preserve_shipped_status_on_load(doc, method=None):
+    """
+    ERPNext's own MaterialRequest.onload() calls set_status(update=False),
+    which recomputes `status` in-memory from per_ordered/per_received on
+    every single load - silently discarding our custom 'Shipped' status
+    (since 'Shipped' isn't a state that computation knows about), even
+    though it's still correctly saved in the database. This hook runs
+    immediately after that recompute (see hooks.py doc_events) and
+    restores the persisted 'Shipped' value so the form actually shows it.
+    """
+    if doc.docstatus != 1:
+        return
+
+    db_status = frappe.db.get_value("Material Request", doc.name, "status")
+    if db_status == "Shipped":
+        doc.status = "Shipped"

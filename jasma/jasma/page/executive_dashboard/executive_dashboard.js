@@ -517,36 +517,31 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                         </div>
                     </div>
                 </div>
-                    <!-- Monthly Revenue Trend + Tax Claims (side-by-side) -->
-                    <div class="exd-bento-span-7 exd-card exd-anim is-clickable" style="--delay:9; cursor:pointer;" onclick="openMonthlyRevenueReport()" title="Click to view Sales Analytics report">
-                        <div class="exd-card-label">${iconSvg("bar")} MONTHLY REVENUE TREND (SALES INVOICE)</div>
-                        <div class="exd-chart-container" style="height:180px;">
-                            ${renderMonthlyChart(d.monthly_revenue)}
-                        </div>
+                 <!-- Combined Monthly Revenue Trend (Sales Invoice + Sales Order) - full width -->
+                <div class="exd-bento-span-12 exd-card exd-anim is-clickable" style="--delay:9; cursor:pointer;" onclick="openMonthlyRevenueReport()" title="Click a bar for its own report, or anywhere else for Sales Invoice">
+                    <div class="exd-card-label">${iconSvg("bar")} MONTHLY REVENUE TREND</div>
+                    <div class="exd-chart-legend">
+                        <span><i style="background:var(--exd-primary);"></i> Sales Invoice</span>
+                        <span><i style="background:#f59e0b;"></i> Sales Order</span>
                     </div>
-
-                    <div class="exd-bento-span-5 exd-card exd-anim" style="--delay:9;">
-                        <div class="exd-card-label">${iconSvg("shield")} TAX CLAIMS</div>
-                        <div style="margin-top:14px; display:flex; flex-direction:column; gap:16px;">
-                            ${renderTaxClaims(d.tax_claims)}
-                        </div>
+                    <div class="exd-chart-container" style="height:220px;">
+                        ${renderCombinedMonthlyChart(d.monthly_revenue, d.monthly_sales_order)}
                     </div>
+                </div>
 
-                    <!-- Sales Order Trend beside Aging Payables -->
-                    <div class="exd-bento-span-7 exd-card exd-anim is-clickable" style="--delay:10; cursor:pointer;" onclick="openMonthlySalesOrderTrend()" title="Click to view Sales Orders filtered by Sales Order dates">
-                        <div class="exd-card-label">${iconSvg("bar")} MONTHLY REVENUE TREND (SALES ORDER)</div>
-                        <div class="exd-chart-container" style="height:180px;">
-                            ${renderMonthlyChart(d.monthly_sales_order)}
-                        </div>
+                <div class="exd-bento-span-7 exd-card exd-anim is-clickable" style="--delay:10; cursor:pointer;" onclick="openAgingPayablesReport()" title="Click to view Accounts Payable Summary report">
+                    <div class="exd-card-label">${iconSvg("bar")} AGING PAYABLES</div>
+                    <div class="exd-chart-container" style="height:180px;">
+                        ${renderAgingChart(d.aging_payables)}
                     </div>
+                </div>
 
-                    <div class="exd-bento-span-5 exd-card exd-anim is-clickable" style="--delay:11; cursor:pointer;" onclick="openAgingPayablesReport()" title="Click to view Accounts Payable Summary report">
-                        <div class="exd-card-label">${iconSvg("bar")} AGING PAYABLES</div>
-                        <div class="exd-chart-container" style="height:180px;">
-                            ${renderAgingChart(d.aging_payables)}
-                        </div>
+                <div class="exd-bento-span-5 exd-card exd-anim" style="--delay:11;">
+                    <div class="exd-card-label">${iconSvg("shield")} TAX CLAIMS</div>
+                    <div style="margin-top:14px; display:flex; flex-direction:column; gap:16px;">
+                        ${renderTaxClaims(d.tax_claims)}
                     </div>
-
+                </div>
                 <!-- Leaderboards Section -->
                 ${renderLeaderboards(d.leaderboards)}
 
@@ -559,6 +554,46 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
     // ============================================================
     // RENDER HELPERS
     // ============================================================
+
+
+    function renderCombinedMonthlyChart(revenueData, orderData) {
+    revenueData = revenueData || [];
+    orderData = orderData || [];
+    if (!revenueData.length && !orderData.length) {
+        return '<div style="padding:20px;text-align:center;color:#999;">No revenue data available</div>';
+    }
+
+    // Both series come from the same period_preset/from_date/to_date, so
+    // they always resolve to the same month buckets in the same order -
+    // safe to drive labels off whichever one is non-empty.
+    const months = (revenueData.length ? revenueData : orderData).map(m => m.month);
+    const maxVal = Math.max(
+        ...revenueData.map(m => m.val || 0),
+        ...orderData.map(m => m.val || 0),
+        1
+    );
+
+    return `
+        <div class="exd-bar-chart exd-bar-chart-grouped" style="height:100%;">
+            ${months.map((month, i) => {
+                const si = revenueData[i] || { val: 0, revenue_fmt: '₹ 0' };
+                const so = orderData[i] || { val: 0, revenue_fmt: '₹ 0' };
+                return `
+                <div class="exd-bar-item-grouped">
+                    <div class="exd-bar-group">
+                        <div class="exd-bar-si" style="height:${Math.max((si.val / maxVal) * 100, 4)}%;"
+                            data-tooltip="Sales Invoice - ${month}: ${si.revenue_fmt || '₹ 0'}"
+                            onclick="event.stopPropagation(); openMonthlyRevenueReport();"></div>
+                        <div class="exd-bar-so" style="height:${Math.max((so.val / maxVal) * 100, 4)}%;"
+                            data-tooltip="Sales Order - ${month}: ${so.revenue_fmt || '₹ 0'}"
+                            onclick="event.stopPropagation(); openMonthlySalesOrderTrend();"></div>
+                    </div>
+                    <span class="exd-bar-label">${month}</span>
+                </div>`;
+            }).join('')}
+        </div>
+    `;
+}
 
     function getPipelineStages(pipeline) {
         if (!pipeline) return '<div class="exd-pipeline-stage">No data</div>';
@@ -2754,6 +2789,55 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     transition: all 0.2s ease;
     flex-shrink: 0;
 }
+
+.exd-chart-legend {
+    display: flex;
+    gap: 16px;
+    margin: -2px 0 2px;
+}
+.exd-chart-legend span {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--exd-text-3);
+}
+.exd-chart-legend i {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    display: inline-block;
+}
+
+.exd-bar-chart-grouped { align-items: flex-end; }
+.exd-bar-item-grouped {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex: 1;
+    height: 100%;
+    justify-content: flex-end;
+}
+.exd-bar-group {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    width: 100%;
+    height: 100%;
+    justify-content: center;
+}
+.exd-bar-si, .exd-bar-so {
+    width: 100%;
+    max-width: 30px;
+    min-height: 4px;
+    border-radius: 4px 4px 0 0;
+    cursor: pointer;
+    transition: all .3s;
+}
+.exd-bar-si { background: var(--exd-primary); }
+.exd-bar-so { background: #f59e0b; }
+.exd-bar-si:hover, .exd-bar-so:hover { opacity: 0.8; transform: scaleY(1.05); }
 
 .exd-bar-chart {
     display:flex;
