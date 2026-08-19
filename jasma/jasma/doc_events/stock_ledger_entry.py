@@ -43,3 +43,30 @@ def recalculate_last_valuation_rate(item_code):
             weighted_avg_rate,
             update_modified=False
         )
+        
+        
+        
+@frappe.whitelist()
+def recalculate_all_items_last_valuation_rate():
+    items = frappe.get_all("Item", pluck="name")
+    total = len(items)
+    frappe.logger().info(f"Starting last_valuation_rate recalculation for {total} items")
+
+    updated = 0
+    failed = 0
+
+    for idx, item_code in enumerate(items, start=1):
+        try:
+            recalculate_last_valuation_rate(item_code)
+            updated += 1
+        except Exception:
+            failed += 1
+            frappe.log_error(
+                frappe.get_traceback(),
+                f"recalculate_last_valuation_rate failed for {item_code}"
+            )
+
+        if idx % 100 == 0:
+            print(f"Processed {idx}/{total} items...")
+
+    print(f"Done. Updated: {updated}, Failed: {failed}, Total: {total}")
