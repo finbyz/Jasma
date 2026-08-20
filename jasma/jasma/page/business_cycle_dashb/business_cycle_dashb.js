@@ -193,6 +193,27 @@ class MELBusinessCycleDashboard {
 		});
 	}
 
+	open_supplier_po_list(supplier, from_date, to_date) {
+		const route_options = {
+			supplier: supplier,
+			status: ["not in", ["Draft", "Cancelled", "Completed", "Closed", "On Hold"]],
+		};
+
+		// "Required Date" in this drawer is schedule_date — filter on that to match
+		// what the user is actually looking at. Swap to transaction_date if you'd
+		// rather match PO creation date instead.
+		if (from_date && to_date) {
+			route_options.schedule_date = ["between", [from_date, to_date]];
+		} else if (from_date) {
+			route_options.schedule_date = [">=", from_date];
+		} else if (to_date) {
+			route_options.schedule_date = ["<=", to_date];
+		}
+
+		frappe.route_options = route_options;
+		frappe.set_route("List", "Purchase Order");
+	}
+
 	make_control(slot, df) {
 		const parent = this.$main.find(`[data-filter="${slot}"]`).empty();
 		const control = frappe.ui.form.make_control({
@@ -238,6 +259,11 @@ class MELBusinessCycleDashboard {
 			this.render_supplier_table(query);
 		});
 
+		this.$main.on("click", ".mel-open-supplier-po-list", (e) => {
+			const $t = $(e.currentTarget);
+			this.open_supplier_po_list($t.data("supplier"), $t.data("from"), $t.data("to"));
+		});
+
 		this.$main.on("click", ".dash-card", (e) => {
 			const cid = $(e.currentTarget).data("cid");
 			this.open_stage_list_dialog(cid);
@@ -250,11 +276,17 @@ class MELBusinessCycleDashboard {
 			this.open_filtered_desk_list(cid, doctype);
 		});
 
-		// Export Forecast → Quotation dialog
-		this.$main.on("click", ".mel-view-export-forecast", (e) => {
-			const $t = $(e.currentTarget);
-			this.open_export_forecast_modal($t.data("item"), $t.data("item-code"));
-		});
+				// Export Forecast → Quotation dialog
+				this.$main.on("click", ".mel-view-export-forecast", (e) => {
+					const $t = $(e.currentTarget);
+					const filters = this.get_filters();
+					this.open_export_forecast_modal(
+						$t.data("item"),
+						$t.data("item-code"),
+						filters.from_date,
+						filters.to_date
+					);
+				});
 
 		// Export Commitment → SO dialog with date filter
 		this.$main.on("click", ".mel-view-export-commitment", (e) => {
@@ -308,56 +340,30 @@ class MELBusinessCycleDashboard {
 	}
 
 	async refresh() {
-		if (this.loading) return;
-		this.loading = true;
+    if (this.loading) return;
+    this.loading = true;
 
-		try {
-			const filters = this.get_filters();
-			const [dashboard_data, stock, suppliers] = await Promise.all([
-				this.call("get_dashboard", { cycle: "sales", ...filters }),
-				this.call("get_stock_overview", { from_date: filters.from_date, to_date: filters.to_date }),
-				this.call("get_supplier_performance", {}),
-			]);
-			this.data = dashboard_data;
-			this.procurement_cards = dashboard_data?.procurement_cards || [];
-			this.stock_data = stock || [];
-			this.supplier_data = suppliers || [];
+    try {
+        const filters = this.get_filters();
+        const [dashboard_data, stock, suppliers] = await Promise.all([
+            this.call("get_dashboard", { cycle: "sales", ...filters }),
+            this.call("get_stock_overview", { from_date: filters.from_date, to_date: filters.to_date }),
+            this.call("get_supplier_performance", { from_date: filters.from_date, to_date: filters.to_date }),
+        ]);
+        this.data = dashboard_data;
+        this.procurement_cards = dashboard_data?.procurement_cards || [];
+        this.stock_data = stock || [];
+        this.supplier_data = suppliers || [];
 
-			this.render_overview_cards();
-			this.render_stock_table();
-			this.render_supplier_table();
-		} catch (error) {
-			this.toast(error?.message || __("Could not refresh dashboard."));
-		} finally {
-			this.loading = false;
-		}
-	}
-
-	// async refresh() {
-	// 	if (this.loading) return;
-	// 	this.loading = true;
-
-	// 	try {
-	// 		const filters = this.get_filters();
-	// 		const [dashboard_data, stock, suppliers] = await Promise.all([
-	// 			this.call("get_dashboard", { cycle: "sales", ...filters }),
-	// 			this.call("get_stock_overview", {}),
-	// 			this.call("get_supplier_performance", {}),
-	// 		]);
-	// 		this.data = dashboard_data;
-	// 		this.procurement_cards = dashboard_data?.procurement_cards || [];
-	// 		this.stock_data = stock || [];
-	// 		this.supplier_data = suppliers || [];
-
-	// 		this.render_overview_cards();
-	// 		this.render_stock_table();
-	// 		this.render_supplier_table();
-	// 	} catch (error) {
-	// 		this.toast(error?.message || __("Could not refresh dashboard."));
-	// 	} finally {
-	// 		this.loading = false;
-	// 	}
-	// }
+        this.render_overview_cards();
+        this.render_stock_table();
+        this.render_supplier_table();
+    } catch (error) {
+        this.toast(error?.message || __("Could not refresh dashboard."));
+    } finally {
+        this.loading = false;
+    }
+}
 
 	render_overview_cards() {
 		const $grid = this.$main.find("#mel-cardGrid").empty();
@@ -401,7 +407,7 @@ class MELBusinessCycleDashboard {
 					<td style="max-width:350px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${frappe.utils.escape_html(it.item)}"><strong>${frappe.utils.escape_html(it.item)}</strong></td>
 					<td style="white-space:nowrap;font-weight:700;color:#000000;">${frappe.utils.escape_html(it.jpc)}</td>
 					<td style="white-space:nowrap;">${format_currency(it.rate)}</td>
-					<td style="white-space:nowrap;"><span class="bdg ${it.stock > 0 ? "bdg-green" : "bdg-amber"}">${it.stock}</span></td>
+					<td style="white-space:nowrap;"><span class="bdg ${it.stock > 0 ? "bdg-green" : "bdg-amber"}">${(Math.round((it.stock || 0) * 100) / 100).toFixed(2)}</span></td>
 					<td>
 						<button class="btn-s mel-view-pending-po ${pending_po > 0 ? "btn-s-danger" : ""}"
 							data-item="${frappe.utils.escape_html(it.item)}"
@@ -720,11 +726,16 @@ class MELBusinessCycleDashboard {
 	}
 
 	// ─── Export Forecast dialog (Quotations) ─────────────────────────────────
-	async open_export_forecast_modal(item_name, item_code) {
+		// ─── Export Forecast dialog (Quotations) ─────────────────────────────────
+	async open_export_forecast_modal(item_name, item_code, from_date, to_date) {
 		const code = item_code || item_name;
 		let quotes = [];
 		try {
-			quotes = await this.call("get_export_forecast_details", { item_code: code });
+			quotes = await this.call("get_export_forecast_details", {
+				item_code: code,
+				from_date: from_date || "",
+				to_date: to_date || "",
+			});
 		} catch (_e) {}
 
 		let rows_html = "";
@@ -738,15 +749,18 @@ class MELBusinessCycleDashboard {
 							</a>
 							${q.via ? `<div style="font-size:11px;color:#64748b;">via ${frappe.utils.escape_html(q.via)}</div>` : ""}
 						</td>
-						<td>${frappe.utils.escape_html(q.party)}</td>
 						<td><span class="bdg bdg-cyan">${q.qty} ${frappe.utils.escape_html(q.uom)}</span></td>
 						<td>${fmt_date(q.date)}</td>
 					</tr>
 				`;
 			});
 		} else {
-			rows_html = `<tr><td colspan="4" class="text-center text-muted p-4">${__("No export forecast (Quotations) for this item.")}</td></tr>`;
+			rows_html = `<tr><td colspan="4" class="text-center text-muted p-4">${__("No export forecast (Quotations) for this item in the selected date range.")}</td></tr>`;
 		}
+
+		const date_range_label = (from_date || to_date)
+			? `${from_date ? fmt_date(from_date) : "…"} → ${to_date ? fmt_date(to_date) : "…"}`
+			: __("All dates");
 
 		const total_qty = quotes.reduce((s, q) => s + (q.qty || 0), 0);
 
@@ -754,7 +768,7 @@ class MELBusinessCycleDashboard {
 			<div class="modal-head">
 				<div>
 					<div class="modal-head-title">📈 ${__("Export Forecast")}: ${frappe.utils.escape_html(item_name)}</div>
-					<div class="modal-head-sub">${__("Quotations linked to this item")} · ${__("Total")}: <strong>${Math.round(total_qty * 100) / 100}</strong></div>
+					<div class="modal-head-sub">${__("Quotations linked to this item")} · ${__("Date range")}: <strong>${date_range_label}</strong> · ${__("Total")}: <strong>${Math.round(total_qty * 100) / 100}</strong></div>
 				</div>
 				<div style="display:flex;align-items:center;gap:8px;">
 					<button class="btn-b" type="button" onclick="frappe.set_route('List', 'Quotation')">
@@ -768,7 +782,6 @@ class MELBusinessCycleDashboard {
 					<thead>
 						<tr>
 							<th>${__("Quotation")}</th>
-							<th>${__("Party")}</th>
 							<th>${__("Quantity")}</th>
 							<th>${__("Date")}</th>
 						</tr>
@@ -784,7 +797,7 @@ class MELBusinessCycleDashboard {
 	}
 
 	// ─── Export Commitment dialog (with date filter) ─────────────────────────
-	async open_export_commitment_modal(item_name, item_code, from_date, to_date) {
+		async open_export_commitment_modal(item_name, item_code, from_date, to_date) {
 		const code = item_code || item_name;
 		let orders = [];
 		try {
@@ -797,18 +810,15 @@ class MELBusinessCycleDashboard {
 				rows_html += `
 					<tr style="cursor:pointer;" onclick="frappe.set_route('Form', 'Sales Order', '${frappe.utils.escape_html(o.so.split(" ")[0])}')">
 						<td>
-							<a style="font-weight:700;color:#3b82f6;text-decoration:underline;" onclick="event.stopPropagation();frappe.set_route('Form', 'Sales Order', '${frappe.utils.escape_html(o.so.split(" ")[0])}')">
-								${frappe.utils.escape_html(o.so)}
-							</a>
+							${o.project && o.project !== "—" ? `<a style="font-weight:600;color:#4f46e5;text-decoration:underline;" onclick="event.stopPropagation();frappe.set_route('Form', 'Project', '${frappe.utils.escape_html(o.project)}')">${frappe.utils.escape_html(o.project)}</a>` : `<span class="bdg bdg-slate">—</span>`}
 						</td>
-						<td>${frappe.utils.escape_html(o.cust)}</td>
 						<td><span class="bdg bdg-amber">${o.qty}</span></td>
 						<td>${fmt_date(o.due)}</td>
 					</tr>
 				`;
 			});
 		} else {
-			rows_html = `<tr><td colspan="4" class="text-center text-muted p-4">${__("No export commitments for this item in the selected date range.")}</td></tr>`;
+			rows_html = `<tr><td colspan="3" class="text-center text-muted p-4">${__("No export commitments for this item in the selected date range.")}</td></tr>`;
 		}
 
 		const date_range_label = (from_date || to_date)
@@ -834,8 +844,7 @@ class MELBusinessCycleDashboard {
 				<table class="dtable">
 					<thead>
 						<tr>
-							<th>${__("Sales Order")}</th>
-							<th>${__("Customer")}</th>
+							<th>${__("AO Number")}</th>
 							<th>${__("Quantity")}</th>
 							<th>${__("Delivery Date")}</th>
 						</tr>
@@ -852,6 +861,8 @@ class MELBusinessCycleDashboard {
 	// ─── Delayed PO drawer (Supplier Performance row) ───────────────────────
 	async open_delayed_po_drawer(supplier_name, supplier_code) {
 		const supplier_key = supplier_code || supplier_name;
+		const filters = this.get_filters(); // pulls current from_date / to_date
+
 		let details = [];
 		try {
 			details = await this.call("get_delayed_po_details", { supplier: supplier_key });
@@ -884,7 +895,10 @@ class MELBusinessCycleDashboard {
 					<div class="modal-head-sub">${__("Delayed Purchase Orders Breakdown")}</div>
 				</div>
 				<div style="display:flex;align-items:center;gap:8px;">
-					<button class="btn-b" type="button" onclick="frappe.route_options={'supplier':'${frappe.utils.escape_html(supplier_key)}'};frappe.set_route('List', 'Purchase Order')">
+					<button class="btn-b mel-open-supplier-po-list" type="button"
+						data-supplier="${frappe.utils.escape_html(supplier_key)}"
+						data-from="${frappe.utils.escape_html(filters.from_date || "")}"
+						data-to="${frappe.utils.escape_html(filters.to_date || "")}">
 						${__("PO List")}
 					</button>
 					<button class="btn-x" data-close-modal type="button">✕</button>

@@ -488,7 +488,7 @@ _CHILD_TABLE_FIELDS: dict[str, tuple[str, list[str]]] = {
     ),
     "Purchase Order": (
         "Purchase Order Item",
-        ["item_code", "item_name", "qty", "received_qty", "uom", "schedule_date", "rate"],
+        ["item_code", "item_name", "qty", "received_qty", "uom", "schedule_date", "rate","fg_item"],
     ),
     "Purchase Receipt": (
         "Purchase Receipt Item",
@@ -559,6 +559,7 @@ def _fetch_items_for_docs(
             "schedule_date": str(row.get("schedule_date") or ""),
             "rate": flt(row.get("rate")),
             "warehouse": row.get("warehouse") or "",
+            "fg_item": row.get("fg_item") or "",
         }
         result.setdefault(parent, []).append(item_data)
     return result
@@ -699,44 +700,130 @@ def _get_procurement_cards(
         })
 
     # ── 4. PR Pending ────────────────────────────────────────────────────────
-        if _doctype_exists("Purchase Order") and frappe.has_permission("Purchase Order", "read"):
-            filters = {
-                "docstatus": 1,
-                "status": ["not in", ["Closed", "Completed"]],
-                "per_received": ["<", 100],
-            }
-            if company:
-                filters["company"] = company
-            records = frappe.get_list(
-                "Purchase Order",
-                filters=filters,
-                fields=["name", "transaction_date", "supplier", "supplier_name", "owner", "status", "per_received"],
-                order_by="modified desc",
-            )
-            card_recs = [
-                {
-                    "ao": r.name,
-                    "date": str(r.transaction_date or ""),
-                    "item": r.supplier_name or r.supplier or r.name,
-                    "jpc": r.name,
-                    "status": r.status or "To Receive",
-                    "who": r.owner or "—",
-                    "doctype": "Purchase Order",
-                }
-                for r in records
-            ]
-            # Attach child items
-            items_map = _fetch_items_for_docs("Purchase Order", [r.name for r in records])
-            for rec in card_recs:
-                rec["doc_items"] = items_map.get(rec["ao"], [])
-            cards.append({
-                "id": "pr_pending",
-                "title": _("PR Pending"),
+    if _doctype_exists("Purchase Order") and frappe.has_permission("Purchase Order", "read"):
+        filters = {
+            "docstatus": 1,
+            "status": ["not in", ["Closed", "Completed"]],
+            "per_received": ["<", 100],
+        }
+        if company:
+            filters["company"] = company
+
+        po_meta = frappe.get_meta("Purchase Order")
+        po_fields = ["name", "transaction_date", "supplier", "supplier_name", "owner", "status", "per_received"]
+        if po_meta.has_field("is_subcontracted"):
+            po_fields.append("is_subcontracted")
+
+        records = frappe.get_list(
+            "Purchase Order",
+            filters=filters,
+            fields=po_fields,
+            order_by="modified desc",
+        )
+        card_recs = [
+            {
+                "ao": r.name,
+                "date": str(r.transaction_date or ""),
+                "item": r.supplier_name or r.supplier or r.name,
+                "jpc": r.name,
+                "status": r.status or "To Receive",
+                "who": r.owner or "—",
                 "doctype": "Purchase Order",
-                "count": len(card_recs),
-                "urg": False,
-                "items": card_recs,
-            })
+                "_is_subcontracted": cint(r.get("is_subcontracted")),
+            }
+            for r in records
+        ]
+
+        # Attach child items (fg_item comes from Purchase Order Item child table)
+        items_map = _fetch_items_for_docs("Purchase Order", [r.name for r in records])
+
+        # Identify which item codes are Service (non-stock) items
+        all_item_codes = {
+            item.get("item_code")
+            for items in items_map.values()
+            for item in items
+            if item.get("item_code")
+        }
+        service_item_codes: set[str] = set()
+        if all_item_codes and _doctype_exists("Item"):
+            item_rows = frappe.get_all(
+                "Item",
+                filters={"name": ["in", list(all_item_codes)]},
+                fields=["name", "is_stock_item"],
+            )
+            service_item_codes = {
+                row.name for row in item_rows if not cint(row.get("is_stock_item"))
+            }
+
+        # Resolve item_name for every fg_item referenced by a service item,
+        # in one batch query (avoids N+1 lookups).
+        fg_item_codes = {
+            item.get("fg_item")
+            for items in items_map.values()
+            for item in items
+            if item.get("item_code") in service_item_codes and item.get("fg_item")
+        }
+        fg_item_name_by_code: dict[str, str] = {}
+        if fg_item_codes and _doctype_exists("Item"):
+            fg_rows = frappe.get_all(
+                "Item",
+                filters={"name": ["in", list(fg_item_codes)]},
+                fields=["name", "item_name"],
+            )
+            fg_item_name_by_code = {
+                row.name: row.item_name or row.name for row in fg_rows
+            }
+
+        # Rules:
+        #   Subcontracted PO:
+        #       - Keep the PO, show all items.
+        #       - Service items display fg_item's item_code AND fg_item's item_name
+        #         (looked up from the Item master), instead of the service item's own values.
+        #   Not subcontracted PO:
+        #       - If it has at least one Stock item -> keep the PO,
+        #         but drop Service items entirely (not shown at all).
+        #       - If it has ONLY Service items (no stock item) -> exclude
+        #         the entire PO from the card.
+        filtered_card_recs = []
+        for rec in card_recs:
+            is_subcontracted = rec.pop("_is_subcontracted", 0)
+            doc_items = items_map.get(rec["ao"], [])
+
+            has_stock_item = any(
+                item.get("item_code") and item.get("item_code") not in service_item_codes
+                for item in doc_items
+            )
+
+            if is_subcontracted:
+                display_items = []
+                for item in doc_items:
+                    item = dict(item)  # avoid mutating shared items_map cache
+                    if item.get("item_code") in service_item_codes:
+                        fg_code = item.get("fg_item")
+                        if fg_code:
+                            item["item_code"] = fg_code
+                            item["item_name"] = fg_item_name_by_code.get(fg_code, fg_code)
+                    display_items.append(item)
+            else:
+                if not has_stock_item:
+                    continue  # only service items, no stock item -> drop entire PO
+                display_items = [
+                    item for item in doc_items
+                    if item.get("item_code") not in service_item_codes
+                ]
+
+            rec["doc_items"] = display_items
+            filtered_card_recs.append(rec)
+        card_recs = filtered_card_recs
+
+        cards.append({
+            "id": "pr_pending",
+            "title": _("PR Pending"),
+            "doctype": "Purchase Order",
+            "count": len(card_recs),
+            "urg": False,
+            "items": card_recs,
+        })
 
     # ── 5. QC Pending ────────────────────────────────────────────────────────
     # Each record carries its own doctype for correct routing
@@ -1161,38 +1248,90 @@ def get_document_preview(doctype: str, name: str) -> dict[str, Any]:
         },
     }
 
-
 def _get_bom_component_map() -> dict[str, list[dict[str, Any]]]:
-    """Return component_item_code -> list of {parent_item, qty_per_unit} from active default BOMs."""
+    """Return component_item_code -> list of {parent_item, qty_per_unit} from Default+Active BOMs.
+
+    A BOM's OWN is_default flag (the "Default" badge on the BOM form) is the authoritative
+    signal for which BOM to explode — NOT Item.default_bom. The two are supposed to stay in
+    sync (Frappe updates Item.default_bom when a BOM's is_default checkbox is set), but they
+    can drift, e.g. after manually re-defaulting a BOM, leaving Item.default_bom pointing at
+    an older BOM while the BOM doc itself clearly shows "Default"/"Active" on screen. Filtering
+    on b.is_default = 1 directly always matches what's actually visible to the user.
+
+    Primary source is BOM Explosion Item (pre-flattened, recursive), so nested sub-assemblies
+    are included. Explosion Item only regenerates when the BOM is saved, so as a fallback, any
+    Default+Active BOM with zero Explosion Item rows is read straight from BOM Item (the
+    Components table) instead.
+    """
     if not _doctype_exists("BOM"):
         return {}
 
+    # Primary: pre-flattened explosion table.
     bom_items = frappe.db.sql(
         """
         SELECT
+            b.name AS bom_name,
             b.item AS parent_item,
-            bi.item_code AS component_item,
-            (bi.qty / IFNULL(NULLIF(b.quantity, 0), 1)) AS qty_per_unit
-        FROM `tabBOM Item` bi
-        JOIN `tabBOM` b ON bi.parent = b.name
-        WHERE b.docstatus = 1 AND b.is_active = 1
+            bei.item_code AS component_item,
+            SUM(bei.qty_consumed_per_unit) AS qty_per_unit
+        FROM `tabBOM Explosion Item` bei
+        JOIN `tabBOM` b ON bei.parent = b.name
+        WHERE b.docstatus = 1 AND b.is_active = 1 AND b.is_default = 1
+        GROUP BY b.name, b.item, bei.item_code
         """,
         as_dict=True,
     )
+    boms_with_explosion = {row.get("bom_name") for row in bom_items}
+
+    # Fallback: Default+Active BOMs with no Explosion Item rows at all
+    # (stale/never-regenerated explosion table).
+    default_active_boms = frappe.db.sql(
+        """
+        SELECT b.name AS bom_name, b.item AS parent_item
+        FROM `tabBOM` b
+        WHERE b.docstatus = 1 AND b.is_active = 1 AND b.is_default = 1
+        """,
+        as_dict=True,
+    )
+    missing_boms = [
+        row for row in default_active_boms
+        if row.get("bom_name") not in boms_with_explosion
+    ]
+
+    fallback_items: list[dict[str, Any]] = []
+    if missing_boms:
+        missing_names = [row.get("bom_name") for row in missing_boms]
+        parent_item_by_bom = {row.get("bom_name"): row.get("parent_item") for row in missing_boms}
+
+        raw_fallback = frappe.db.sql(
+            """
+            SELECT
+                bi.parent AS bom_name,
+                bi.item_code AS component_item,
+                SUM(bi.qty / IFNULL(NULLIF(b.quantity, 0), 1)) AS qty_per_unit
+            FROM `tabBOM Item` bi
+            JOIN `tabBOM` b ON bi.parent = b.name
+            WHERE bi.parent IN %(bom_names)s
+            GROUP BY bi.parent, bi.item_code
+            """,
+            {"bom_names": tuple(missing_names)},
+            as_dict=True,
+        )
+        for row in raw_fallback:
+            row["parent_item"] = parent_item_by_bom.get(row.get("bom_name"))
+            fallback_items.append(row)
 
     comp_map: dict[str, list[dict[str, Any]]] = {}
-    for row in bom_items:
+    for row in bom_items + fallback_items:
         comp = row.get("component_item")
-        if not comp:
+        parent_item = row.get("parent_item")
+        if not comp or not parent_item:
             continue
-        if comp not in comp_map:
-            comp_map[comp] = []
-        comp_map[comp].append({
-            "parent_item": row.get("parent_item"),
+        comp_map.setdefault(comp, []).append({
+            "parent_item": parent_item,
             "qty_per_unit": flt(row.get("qty_per_unit")),
         })
     return comp_map
-
 
 def _get_overdue_po_qty_by_item() -> dict[str, dict[str, Any]]:
     """Return dict of item_code -> {total_qty, details:[{po, qty, type, required_date}]}
@@ -1220,9 +1359,7 @@ def _get_overdue_po_qty_by_item() -> dict[str, dict[str, Any]]:
             WHERE po.docstatus = 1
               AND po.status NOT IN ('Closed', 'On Hold', 'Completed')
               AND poi.qty > IFNULL(poi.received_qty, 0)
-              AND poi.schedule_date < %s
             """,
-            (today_date,),
             as_dict=True,
         )
         for r in po_items:
@@ -1308,15 +1445,17 @@ def get_stock_overview(
     """Return stock overview with Bin valuation, Sales Order + BOM commitments, Quotation + BOM forecasts,
     and overdue PO qty (not yet received past required date).
 
-    Export Commitment (Sales Order pending qty) is filtered by delivery_date within
-    from_date..to_date when provided, matching the date range shown in the dashboard filters.
+    Export Commitment (Sales Order pending qty) is filtered by delivery date when
+    from_date/to_date are supplied — same delivery_date-based filter used in
+    get_pending_so_details, so the badge total shown here always matches the
+    drill-down modal's total for the same date range.
     """
     if not frappe.has_permission("Item", "read"):
         return []
 
     filters = {}
     if search:
-        filters["item_name"] = ["like", f"%{search}%"]
+        filters["item_code"] = ["like", f"%{search}%"]
 
     items = frappe.get_list(
         "Item",
@@ -1325,57 +1464,98 @@ def get_stock_overview(
             "is_jpc_item": 1,
         },
         fields=["name", "item_code", "item_name", "valuation_rate", "standard_rate"],
-        limit_page_length=50,
+        limit_page_length=500,
         order_by="modified desc",
     )
 
-    # ── Sales Order pending qty, filtered by delivery_date range ─────────────
+    # ── Sales Order pending qty (Export Commitment) — date filter on delivery_date ─
+    # Uses the same "delivery_date on Sales Order Item, falling back to the parent
+    # Sales Order's delivery_date" rule as get_pending_so_details, so the badge total
+    # here and the modal's total always agree for the same from_date/to_date.
     so_pending_by_item: dict[str, float] = {}
     if _doctype_exists("Sales Order Item"):
-        conditions = ["docstatus = 1", "qty > delivered_qty"]
-        params: dict[str, Any] = {}
+        date_conditions: list[str] = []
+        date_params: dict[str, Any] = {}
         if from_date and to_date:
-            conditions.append("delivery_date BETWEEN %(from_date)s AND %(to_date)s")
-            params["from_date"] = from_date
-            params["to_date"] = to_date
+            date_conditions.append(
+                "IFNULL(soi.delivery_date, so.delivery_date) BETWEEN %(from_date)s AND %(to_date)s"
+            )
+            date_params["from_date"] = from_date
+            date_params["to_date"] = to_date
         elif from_date:
-            conditions.append("delivery_date >= %(from_date)s")
-            params["from_date"] = from_date
+            date_conditions.append("IFNULL(soi.delivery_date, so.delivery_date) >= %(from_date)s")
+            date_params["from_date"] = from_date
         elif to_date:
-            conditions.append("delivery_date <= %(to_date)s")
-            params["to_date"] = to_date
+            date_conditions.append("IFNULL(soi.delivery_date, so.delivery_date) <= %(to_date)s")
+            date_params["to_date"] = to_date
+        date_sql = (" AND " + " AND ".join(date_conditions)) if date_conditions else ""
 
         so_rows = frappe.db.sql(
             f"""
-            SELECT item_code, SUM(qty - delivered_qty) AS pending_qty
-            FROM `tabSales Order Item`
-            WHERE {" AND ".join(conditions)}
-            GROUP BY item_code
+            SELECT soi.item_code AS item_code, SUM(soi.qty - soi.delivered_qty) AS pending_qty
+            FROM `tabSales Order Item` soi
+            JOIN `tabSales Order` so ON so.name = soi.parent
+            WHERE soi.docstatus = 1
+              AND soi.qty > soi.delivered_qty
+              {date_sql}
+            GROUP BY soi.item_code
             """,
-            params,
+            date_params,
             as_dict=True,
         )
         for r in so_rows:
             if r.get("item_code"):
                 so_pending_by_item[r.get("item_code")] = flt(r.get("pending_qty"))
 
-    # ── Quotation qty (forecast) — left unfiltered by date on purpose ────────
+        # ── Quotation qty (forecast) ──────────────────────────────────────────
+    # NOTE: `status` and `transaction_date` live on the PARENT Quotation
+    # doctype, not on the Quotation Item child table - querying them
+    # directly off `tabQuotation Item` throws
+    # "Unknown column 'status' in 'WHERE'" (MySQL error 1054). Join to
+    # `tabQuotation` to reach them. `docstatus` is fine to filter on the
+    # child table directly since Frappe copies it down from the parent.
+    #
+    # Only the portion of a Quotation Item NOT yet converted to a Sales Order
+    # counts as "forecast" — qi.ordered_qty is Frappe's standard field that
+    # tracks how much of a Quotation line has already become a Sales Order.
+    # A line fully converted (qty - ordered_qty <= 0) is dropped entirely;
+    # a partially converted line (e.g. qty=5, ordered_qty=2) contributes
+    # only the remaining 3, not the original 5.
     quot_by_item: dict[str, float] = {}
     if _doctype_exists("Quotation Item"):
+        conditions = [
+            "qi.docstatus = 1",
+            'qtn.status != "Lost"',
+            "qi.qty > IFNULL(qi.ordered_qty, 0)",
+        ]
+        params: dict[str, Any] = {}
+        if from_date and to_date:
+            conditions.append("qtn.transaction_date BETWEEN %(from_date)s AND %(to_date)s")
+            params["from_date"] = from_date
+            params["to_date"] = to_date
+        elif from_date:
+            conditions.append("qtn.transaction_date >= %(from_date)s")
+            params["from_date"] = from_date
+        elif to_date:
+            conditions.append("qtn.transaction_date <= %(to_date)s")
+            params["to_date"] = to_date
+
         q_rows = frappe.db.sql(
-            """
-            SELECT item_code, SUM(qty) AS forecast_qty
-            FROM `tabQuotation Item`
-            WHERE docstatus = 1
-            GROUP BY item_code
+            f"""
+            SELECT qi.item_code, SUM(qi.qty - IFNULL(qi.ordered_qty, 0)) AS forecast_qty
+            FROM `tabQuotation Item` qi
+            INNER JOIN `tabQuotation` qtn ON qtn.name = qi.parent
+            WHERE {" AND ".join(conditions)}
+            GROUP BY qi.item_code
             """,
+            params,
             as_dict=True,
         )
         for r in q_rows:
             if r.get("item_code"):
                 quot_by_item[r.get("item_code")] = flt(r.get("forecast_qty"))
-
-    comp_map = _get_bom_component_map()
+    
+    comp_map = _get_bom_component_map()            
     overdue_po_map = _get_overdue_po_qty_by_item()
 
     result = []
@@ -1398,7 +1578,7 @@ def get_stock_overview(
         if val_rate <= 0:
             val_rate = flt(it.get("valuation_rate")) or flt(it.get("standard_rate")) or 0.0
 
-        total_stock = sum(flt(b.get("actual_qty")) for b in bin_records)
+        total_stock = round(sum(flt(b.get("actual_qty")) for b in bin_records), 2)
 
         direct_so_qty = flt(so_pending_by_item.get(code, 0.0))
         indirect_so_qty = 0.0
@@ -1433,128 +1613,12 @@ def get_stock_overview(
             "rate": val_rate,
             "stock": total_stock,
             "pending_po_qty": pending_po_qty,   # overdue PO qty
-            "pending": round(export_commitment, 2),  # kept for backward compat
+            # "pending": round(export_commitment, 2),  # kept for backward compat
             "export": round(export_commitment, 2),
             "export_forecast": round(export_forecast, 2),
         })
 
     return result
-
-# @frappe.whitelist()
-# def get_stock_overview(search: str | None = None) -> list[dict[str, Any]]:
-#     if not frappe.has_permission("Item", "read"):
-#         return []
-
-#     filters = {}
-#     if search:
-#         filters["item_name"] = ["like", f"%{search}%"]
-
-#     items = frappe.get_list(
-#         "Item",
-#         filters={
-#             **filters,
-#             "is_jpc_item": 1,
-#         },
-#         fields=["name", "item_code", "item_name", "valuation_rate", "standard_rate"],
-#         limit_page_length=50,
-#         order_by="modified desc",
-#     )
-
-#     so_pending_by_item: dict[str, float] = {}
-#     if _doctype_exists("Sales Order Item"):
-#         so_rows = frappe.db.sql(
-#             """
-#             SELECT item_code, SUM(qty - delivered_qty) AS pending_qty
-#             FROM `tabSales Order Item`
-#             WHERE docstatus = 1 AND qty > delivered_qty
-#             GROUP BY item_code
-#             """,
-#             as_dict=True,
-#         )
-#         for r in so_rows:
-#             if r.get("item_code"):
-#                 so_pending_by_item[r.get("item_code")] = flt(r.get("pending_qty"))
-
-#     quot_by_item: dict[str, float] = {}
-#     if _doctype_exists("Quotation Item"):
-#         q_rows = frappe.db.sql(
-#             """
-#             SELECT item_code, SUM(qty) AS forecast_qty
-#             FROM `tabQuotation Item`
-#             WHERE docstatus = 1
-#             GROUP BY item_code
-#             """,
-#             as_dict=True,
-#         )
-#         for r in q_rows:
-#             if r.get("item_code"):
-#                 quot_by_item[r.get("item_code")] = flt(r.get("forecast_qty"))
-
-#     comp_map = _get_bom_component_map()
-#     overdue_po_map = _get_overdue_po_qty_by_item()
-
-#     result = []
-#     for it in items:
-#         code = it.get("item_code") or it.get("name")
-
-#         val_rate = 0.0
-#         bin_records = frappe.get_all(
-#             "Bin",
-#             filters={"item_code": code},
-#             fields=["valuation_rate", "actual_qty", "ordered_qty"],
-#             order_by="modified desc",
-#         )
-#         for b in bin_records:
-#             v = flt(b.get("valuation_rate"))
-#             if v > 0:
-#                 val_rate = v
-#                 break
-
-#         if val_rate <= 0:
-#             val_rate = flt(it.get("valuation_rate")) or flt(it.get("standard_rate")) or 0.0
-
-#         total_stock = sum(flt(b.get("actual_qty")) for b in bin_records)
-
-#         direct_so_qty = flt(so_pending_by_item.get(code, 0.0))
-#         indirect_so_qty = 0.0
-#         for p_info in comp_map.get(code, []):
-#             p_item = p_info["parent_item"]
-#             ratio = p_info["qty_per_unit"]
-#             p_so_qty = flt(so_pending_by_item.get(p_item, 0.0))
-#             if p_so_qty > 0 and ratio > 0:
-#                 indirect_so_qty += p_so_qty * ratio
-
-#         export_commitment = direct_so_qty + indirect_so_qty
-
-#         direct_q_qty = flt(quot_by_item.get(code, 0.0))
-#         indirect_q_qty = 0.0
-#         for p_info in comp_map.get(code, []):
-#             p_item = p_info["parent_item"]
-#             ratio = p_info["qty_per_unit"]
-#             p_q_qty = flt(quot_by_item.get(p_item, 0.0))
-#             if p_q_qty > 0 and ratio > 0:
-#                 indirect_q_qty += p_q_qty * ratio
-
-#         export_forecast = direct_q_qty + indirect_q_qty
-
-#         # Overdue PO qty (not yet received past required date)
-#         overdue_info = overdue_po_map.get(code, {})
-#         pending_po_qty = round(flt(overdue_info.get("total_qty", 0.0)), 2)
-
-#         result.append({
-#             "item": it.get("item_name") or code,
-#             "item_code": code,
-#             "jpc": code if len(code) >= 4 else code,
-#             "rate": val_rate,
-#             "stock": total_stock,
-#             "pending_po_qty": pending_po_qty,   # overdue PO qty
-#             "pending": round(export_commitment, 2),  # kept for backward compat
-#             "export": round(export_commitment, 2),
-#             "export_forecast": round(export_forecast, 2),
-#         })
-
-#     return result
-
 
 def _get_contract_expiry_field() -> str | None:
     """Detect which field on the Supplier doctype stores the contract expiry date."""
@@ -1569,17 +1633,25 @@ def _get_contract_expiry_field() -> str | None:
 
 
 @frappe.whitelist()
-def get_supplier_performance(search: str | None = None) -> list[dict[str, Any]]:
+def get_supplier_performance(
+    search: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> list[dict[str, Any]]:
     """Return permission-aware supplier performance analysis with:
     - NC count filtered per supplier
     - PO delay based on receipt date vs required date (for received POs)
       or today vs required date (for open overdue POs)
     - Contract expiry color status
+    Only includes suppliers whose Supplier Group is "Product Supplier".
+    Total Orders, Total Value, NC Count, and PO Delayed are filtered to
+    Purchase Orders whose transaction_date falls within from_date..to_date
+    when provided.
     """
     if not frappe.has_permission("Supplier", "read"):
         return []
 
-    filters = {}
+    filters = {"supplier_group": "Product Supplier"}
     if search:
         filters["supplier_name"] = ["like", f"%{search}%"]
 
@@ -1612,9 +1684,17 @@ def get_supplier_performance(search: str | None = None) -> list[dict[str, Any]]:
         s_name = sup.get("supplier_name") or sup.get("name")
         s_code = sup.get("name")
 
+        po_filters: dict[str, Any] = {"supplier": s_code, "docstatus": 1}
+        if from_date and to_date:
+            po_filters["transaction_date"] = ["between", [from_date, to_date]]
+        elif from_date:
+            po_filters["transaction_date"] = [">=", from_date]
+        elif to_date:
+            po_filters["transaction_date"] = ["<=", to_date]
+
         pos = frappe.get_all(
             "Purchase Order",
-            filters={"supplier": s_code, "docstatus": 1},
+            filters=po_filters,
             fields=["name", "grand_total", "docstatus", "transaction_date", "schedule_date", "status", "per_received"],
         )
         order_count = len(pos)
@@ -1653,14 +1733,12 @@ def get_supplier_performance(search: str | None = None) -> list[dict[str, Any]]:
 
             receipt_date = receipt_date_by_po.get(p.get("name"))
             if receipt_date:
-                # PO received: measure delay as receipt_date - schedule_date
                 receipt_dt = frappe.utils.getdate(receipt_date)
                 diff = (receipt_dt - sched_date).days
                 if diff > 0:
                     delayed_count += 1
                     total_delay_days += diff
             else:
-                # PO not yet received: measure delay as today - schedule_date
                 if sched_date < today_date and flt(p.get("per_received")) < 100:
                     if p.get("status") not in ("Closed", "On Hold", "Completed"):
                         diff = (today_date - sched_date).days
@@ -1671,19 +1749,21 @@ def get_supplier_performance(search: str | None = None) -> list[dict[str, Any]]:
         avg_delay_days = round(total_delay_days / delayed_count, 1) if delayed_count else 0.0
 
         # NC count — linked via reference_name (Purchase Receipt) or reference_type (Purchase Order)
+        # Restricted to the same date-filtered po_names / GRNs so NC Count matches the date range too.
         nc_count = 0
         if nc_doctype and frappe.has_permission(nc_doctype, "read"):
             try:
                 nc_meta = frappe.get_meta(nc_doctype)
                 if nc_has_supplier:
-                    # Direct supplier field on NC
-                    nc_count = frappe.db.count(
-                        nc_doctype,
-                        filters={"supplier": s_code, "docstatus": ["!=", 2]},
-                    )
+                    nc_filters: dict[str, Any] = {"supplier": s_code, "docstatus": ["!=", 2]}
+                    if from_date and to_date:
+                        nc_filters["creation"] = ["between", [from_date, to_date]]
+                    elif from_date:
+                        nc_filters["creation"] = [">=", from_date]
+                    elif to_date:
+                        nc_filters["creation"] = ["<=", to_date]
+                    nc_count = frappe.db.count(nc_doctype, filters=nc_filters)
                 elif nc_meta.has_field("reference_name") and nc_meta.has_field("reference_type"):
-                    # NC links to Purchase Receipt via reference_name / reference_type.
-                    # Step 1: get GRN names for this supplier's POs.
                     grn_names: list[str] = []
                     if po_names and _doctype_exists("Purchase Receipt Item"):
                         grn_rows = frappe.db.sql(
@@ -1699,7 +1779,6 @@ def get_supplier_performance(search: str | None = None) -> list[dict[str, Any]]:
                         )
                         grn_names = [r.get("grn") for r in grn_rows if r.get("grn")]
 
-                    # Step 2: count NCs referencing those GRNs
                     if grn_names:
                         nc_count += frappe.db.count(
                             nc_doctype,
@@ -1710,7 +1789,6 @@ def get_supplier_performance(search: str | None = None) -> list[dict[str, Any]]:
                             },
                         )
 
-                    # Step 3: also count NCs referencing the POs directly
                     if po_names and nc_meta.has_field("reference_name"):
                         nc_count += frappe.db.count(
                             nc_doctype,
@@ -1742,7 +1820,6 @@ def get_supplier_performance(search: str | None = None) -> list[dict[str, Any]]:
                     limit=1,
                 )
                 if not contracts:
-                    # Also try matching by supplier code (name field)
                     contracts = frappe.get_all(
                         "Contract",
                         filters={"party_type": "Supplier", "party_name": s_code, "docstatus": ["!=", 2]},
@@ -1779,123 +1856,349 @@ def get_supplier_performance(search: str | None = None) -> list[dict[str, Any]]:
 
     return result
 
-
 @frappe.whitelist()
 def get_pending_so_details(
     item_code: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return live direct and indirect (BOM) pending Sales Order commitments for an item.
-    Optionally filtered by delivery_date within from_date..to_date.
+    """Return direct and indirect (BOM) pending Sales Order commitments for an item,
+    filtered by delivery date when from_date/to_date are supplied.
+
+    Date filter is applied on the Sales Order's delivery_date, falling back to the
+    Sales Order Item row's own delivery_date when the parent's is blank. Both the
+    direct rows and the BOM-indirect rows respect the same date range, so the total
+    shown in the modal always matches the filtered list beneath it.
+
+    Indirect (via-BOM) rows are matched using the BOM document's OWN is_default /
+    is_active flags — NOT Item.default_bom, which can drift out of sync with what's
+    actually shown as "Default"/"Active" on the BOM form. Explosion Item (recursive,
+    pre-flattened) is the primary source; any Default+Active BOM with zero Explosion
+    Item rows (stale explosion table) falls back to reading BOM Item directly.
     """
     if not item_code or not frappe.has_permission("Sales Order", "read"):
         return []
 
     result = []
 
-    so_filters: dict[str, Any] = {"item_code": item_code, "docstatus": 1}
-    # Apply date range filter on delivery_date of the SO item
+    # ── Build shared date filter clause ───────────────────────────────────
+    date_conditions: list[str] = []
+    date_params: dict[str, Any] = {}
     if from_date and to_date:
-        so_filters["delivery_date"] = ["between", [from_date, to_date]]
+        date_conditions.append(
+            "IFNULL(soi.delivery_date, so.delivery_date) BETWEEN %(from_date)s AND %(to_date)s"
+        )
+        date_params["from_date"] = from_date
+        date_params["to_date"] = to_date
     elif from_date:
-        so_filters["delivery_date"] = [">=", from_date]
+        date_conditions.append("IFNULL(soi.delivery_date, so.delivery_date) >= %(from_date)s")
+        date_params["from_date"] = from_date
     elif to_date:
-        so_filters["delivery_date"] = ["<=", to_date]
+        date_conditions.append("IFNULL(soi.delivery_date, so.delivery_date) <= %(to_date)s")
+        date_params["to_date"] = to_date
+    date_sql = (" AND " + " AND ".join(date_conditions)) if date_conditions else ""
 
-    so_items = frappe.get_all(
-        "Sales Order Item",
-        filters=so_filters,
-        fields=["parent", "qty", "delivered_qty", "delivery_date"],
+    # ── Direct SO rows for this item ──────────────────────────────────────
+    so_rows = frappe.db.sql(
+        f"""
+        SELECT
+            soi.parent AS so_name,
+            soi.qty AS qty,
+            soi.delivered_qty AS delivered_qty,
+            soi.delivery_date AS item_delivery_date,
+            so.customer_name AS customer_name,
+            so.customer AS customer,
+            so.delivery_date AS so_delivery_date,
+            so.project AS project
+        FROM `tabSales Order Item` soi
+        JOIN `tabSales Order` so ON so.name = soi.parent
+        WHERE soi.item_code = %(item_code)s
+          AND soi.docstatus = 1
+          {date_sql}
+        """,
+        {"item_code": item_code, **date_params},
+        as_dict=True,
     )
 
-    for s in so_items:
-        rem_qty = flt(s.qty) - flt(s.delivered_qty)
+    for s in so_rows:
+        rem_qty = flt(s.get("qty")) - flt(s.get("delivered_qty"))
         if rem_qty <= 0:
             continue
-        so_doc = frappe.db.get_value("Sales Order", s.parent, ["customer_name", "customer", "delivery_date"], as_dict=True) or {}
         result.append({
-            "so": s.parent,
-            "cust": so_doc.get("customer_name") or so_doc.get("customer") or "—",
+            "so": s.get("so_name"),
+            "cust": s.get("customer_name") or s.get("customer") or "—",
             "qty": rem_qty,
-            "due": str(so_doc.get("delivery_date") or s.get("delivery_date") or "—"),
+            "due": str(s.get("so_delivery_date") or s.get("item_delivery_date") or "—"),
+            "project": s.get("project") or "—",
         })
 
+    # ── Indirect (via-BOM) rows ────────────────────────────────────────────
     if _doctype_exists("BOM"):
+        # Primary: pre-flattened Explosion Item (handles nested sub-assemblies).
         bom_parents = frappe.db.sql(
             """
-            SELECT b.item AS parent_item, (bi.qty / IFNULL(NULLIF(b.quantity, 0), 1)) AS qty_per_unit
-            FROM `tabBOM Item` bi
-            JOIN `tabBOM` b ON bi.parent = b.name
-            WHERE bi.item_code = %s AND b.docstatus = 1 AND b.is_active = 1
+            SELECT
+                b.name AS bom_name,
+                b.item AS parent_item,
+                SUM(bei.qty_consumed_per_unit) AS qty_per_unit
+            FROM `tabBOM Explosion Item` bei
+            JOIN `tabBOM` b ON bei.parent = b.name
+            WHERE bei.item_code = %s
+              AND b.docstatus = 1
+              AND b.is_active = 1
+              AND b.is_default = 1
+            GROUP BY b.name, b.item
             """,
             (item_code,),
             as_dict=True,
         )
+        boms_with_explosion = {row.get("bom_name") for row in bom_parents}
+
+        # Fallback: Default+Active BOMs where this item sits directly in BOM Item
+        # (Components tab) but Explosion Item has no rows for that BOM at all.
+        candidate_boms = frappe.db.sql(
+            """
+            SELECT DISTINCT b.name AS bom_name, b.item AS parent_item
+            FROM `tabBOM Item` bi
+            JOIN `tabBOM` b ON bi.parent = b.name
+            WHERE bi.item_code = %s
+              AND b.docstatus = 1
+              AND b.is_active = 1
+              AND b.is_default = 1
+            """,
+            (item_code,),
+            as_dict=True,
+        )
+        missing_boms = [
+            row for row in candidate_boms
+            if row.get("bom_name") not in boms_with_explosion
+        ]
+
+        if missing_boms:
+            missing_names = [row.get("bom_name") for row in missing_boms]
+            fallback_parents = frappe.db.sql(
+                """
+                SELECT
+                    b.name AS bom_name,
+                    b.item AS parent_item,
+                    SUM(bi.qty / IFNULL(NULLIF(b.quantity, 0), 1)) AS qty_per_unit
+                FROM `tabBOM Item` bi
+                JOIN `tabBOM` b ON bi.parent = b.name
+                WHERE bi.parent IN %(bom_names)s
+                  AND bi.item_code = %(item_code)s
+                GROUP BY b.name, b.item
+                """,
+                {"bom_names": tuple(missing_names), "item_code": item_code},
+                as_dict=True,
+            )
+            bom_parents = bom_parents + fallback_parents
+
+        # Resolve parent item display names in one batch query.
+        parent_codes = [bp.get("parent_item") for bp in bom_parents if bp.get("parent_item")]
+        parent_name_by_code: dict[str, str] = {}
+        if parent_codes and _doctype_exists("Item"):
+            parent_rows = frappe.get_all(
+                "Item",
+                filters={"name": ["in", parent_codes]},
+                fields=["name", "item_name"],
+            )
+            parent_name_by_code = {row.name: row.item_name or row.name for row in parent_rows}
 
         for bp in bom_parents:
             p_item = bp.get("parent_item")
             ratio = flt(bp.get("qty_per_unit"))
             if not p_item or ratio <= 0:
                 continue
+            p_label = parent_name_by_code.get(p_item, p_item)
 
-            p_filters: dict[str, Any] = {"item_code": p_item, "docstatus": 1}
-            if from_date and to_date:
-                p_filters["delivery_date"] = ["between", [from_date, to_date]]
-            elif from_date:
-                p_filters["delivery_date"] = [">=", from_date]
-            elif to_date:
-                p_filters["delivery_date"] = ["<=", to_date]
-
-            p_so_items = frappe.get_all(
-                "Sales Order Item",
-                filters=p_filters,
-                fields=["parent", "qty", "delivered_qty", "delivery_date"],
+            p_so_rows = frappe.db.sql(
+                f"""
+                SELECT
+                    soi.parent AS so_name,
+                    soi.qty AS qty,
+                    soi.delivered_qty AS delivered_qty,
+                    soi.delivery_date AS item_delivery_date,
+                    so.customer_name AS customer_name,
+                    so.customer AS customer,
+                    so.delivery_date AS so_delivery_date,
+                    so.project AS project
+                FROM `tabSales Order Item` soi
+                JOIN `tabSales Order` so ON so.name = soi.parent
+                WHERE soi.item_code = %(item_code)s
+                  AND soi.docstatus = 1
+                  {date_sql}
+                """,
+                {"item_code": p_item, **date_params},
+                as_dict=True,
             )
 
-            for ps in p_so_items:
-                rem_p_qty = flt(ps.qty) - flt(ps.delivered_qty)
+            for ps in p_so_rows:
+                rem_p_qty = flt(ps.get("qty")) - flt(ps.get("delivered_qty"))
                 if rem_p_qty <= 0:
                     continue
                 needed_component_qty = rem_p_qty * ratio
-                so_doc = frappe.db.get_value("Sales Order", ps.parent, ["customer_name", "customer", "delivery_date"], as_dict=True) or {}
                 result.append({
-                    "so": f"{ps.parent} (via BOM → {p_item})",
-                    "cust": so_doc.get("customer_name") or so_doc.get("customer") or "—",
+                    "so": f"{ps.get('so_name')} (via BOM → {p_label})",
+                    "cust": ps.get("customer_name") or ps.get("customer") or "—",
                     "qty": round(needed_component_qty, 2),
-                    "due": str(so_doc.get("delivery_date") or ps.get("delivery_date") or "—"),
+                    "due": str(ps.get("so_delivery_date") or ps.get("item_delivery_date") or "—"),
+                    "project": ps.get("project") or "—",
                 })
 
     return result
 
 
 @frappe.whitelist()
-def get_export_forecast_details(item_code: str | None = None) -> list[dict[str, Any]]:
-    """Return Quotation line items (direct + BOM-indirect) contributing to export forecast for an item."""
+def get_delayed_po_details(supplier: str | None = None) -> list[dict[str, Any]]:
+    """Return per-PO delayed order details for a supplier (for the drawer)."""
+    if not supplier or not frappe.has_permission("Purchase Order", "read"):
+        return []
+
+    today_date = frappe.utils.getdate(nowdate())
+
+    pos = frappe.get_all(
+        "Purchase Order",
+        filters={"supplier": supplier, "docstatus": 1},
+        fields=["name", "transaction_date", "schedule_date", "status", "per_received"],
+    )
+    po_names = [p.get("name") for p in pos if p.get("name")]
+    if not po_names:
+        return []
+
+    # Item name per PO (first item, for display) — batch fetched
+    item_name_by_po: dict[str, str] = {}
+    if _doctype_exists("Purchase Order Item"):
+        item_rows = frappe.get_all(
+            "Purchase Order Item",
+            filters={"parent": ["in", po_names]},
+            fields=["parent", "item_code", "item_name", "idx"],
+            order_by="parent, idx",
+        )
+        for row in item_rows:
+            parent = row.get("parent")
+            if parent not in item_name_by_po:
+                item_name_by_po[parent] = row.get("item_name") or row.get("item_code") or "—"
+
+    # Receipt date map (earliest receipt per PO)
+    receipt_date_by_po: dict[str, Any] = {}
+    if _doctype_exists("Purchase Receipt Item"):
+        try:
+            receipts = frappe.db.sql(
+                """
+                SELECT pri.purchase_order AS po_name, MIN(pr.posting_date) AS receipt_date
+                FROM `tabPurchase Receipt Item` pri
+                JOIN `tabPurchase Receipt` pr ON pri.parent = pr.name
+                WHERE pr.docstatus = 1
+                  AND pri.purchase_order IN %(po_names)s
+                GROUP BY pri.purchase_order
+                """,
+                {"po_names": po_names},
+                as_dict=True,
+            )
+            for r in receipts:
+                receipt_date_by_po[r.get("po_name")] = r.get("receipt_date")
+        except Exception:
+            pass
+
+    result = []
+    for p in pos:
+        sched = p.get("schedule_date") or p.get("transaction_date")
+        if not sched:
+            continue
+        sched_date = frappe.utils.getdate(sched)
+
+        receipt_date = receipt_date_by_po.get(p.get("name"))
+        delay_days = 0
+        received_display = "—"
+
+        if receipt_date:
+            receipt_dt = frappe.utils.getdate(receipt_date)
+            delay_days = (receipt_dt - sched_date).days
+            received_display = str(receipt_dt)
+        else:
+            if sched_date < today_date and flt(p.get("per_received")) < 100:
+                if p.get("status") not in ("Closed", "On Hold", "Completed"):
+                    delay_days = (today_date - sched_date).days
+
+        if delay_days > 0:
+            result.append({
+                "po": p.get("name"),
+                "item": item_name_by_po.get(p.get("name"), "—"),
+                "due": str(sched_date),
+                "received": received_display,
+                "delay": f"{delay_days} days",
+                "st": p.get("status") or "—",
+            })
+
+    result.sort(key=lambda r: int(r["delay"].split(" ")[0]), reverse=True)
+    return result
+
+
+@frappe.whitelist()
+def get_export_forecast_details(
+    item_code: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return Quotation line items (direct + BOM-indirect) contributing to export forecast for an item.
+
+    Only the portion of each Quotation Item NOT yet converted to a Sales Order is shown
+    (qty - ordered_qty). Date filter is applied on the Quotation's transaction_date — the
+    same field and rule used in get_stock_overview's forecast total — so the badge total
+    and this drill-down list always agree for the same from_date/to_date.
+    """
     if not item_code or not frappe.has_permission("Quotation", "read"):
         return []
 
     result = []
 
+    # ── Build shared date filter clause (on Quotation.transaction_date) ────
+    date_conditions: list[str] = []
+    date_params: dict[str, Any] = {}
+    if from_date and to_date:
+        date_conditions.append("qtn.transaction_date BETWEEN %(from_date)s AND %(to_date)s")
+        date_params["from_date"] = from_date
+        date_params["to_date"] = to_date
+    elif from_date:
+        date_conditions.append("qtn.transaction_date >= %(from_date)s")
+        date_params["from_date"] = from_date
+    elif to_date:
+        date_conditions.append("qtn.transaction_date <= %(to_date)s")
+        date_params["to_date"] = to_date
+    date_sql = (" AND " + " AND ".join(date_conditions)) if date_conditions else ""
+
     # Direct quotation rows for this item
     if _doctype_exists("Quotation Item"):
-        q_items = frappe.get_all(
-            "Quotation Item",
-            filters={"item_code": item_code, "docstatus": 1},
-            fields=["parent", "qty", "uom", "rate"],
+        q_rows = frappe.db.sql(
+            f"""
+            SELECT
+                qi.parent AS quot_name,
+                qi.qty AS qty,
+                qi.ordered_qty AS ordered_qty,
+                qi.uom AS uom,
+                qtn.customer_name AS customer_name,
+                qtn.party_name AS party_name,
+                qtn.transaction_date AS transaction_date
+            FROM `tabQuotation Item` qi
+            JOIN `tabQuotation` qtn ON qtn.name = qi.parent
+            WHERE qi.item_code = %(item_code)s
+              AND qi.docstatus = 1
+              AND qtn.status != "Lost"
+              {date_sql}
+            """,
+            {"item_code": item_code, **date_params},
+            as_dict=True,
         )
-        for q in q_items:
-            quot = frappe.db.get_value(
-                "Quotation", q.parent,
-                ["customer_name", "party_name", "transaction_date", "status"],
-                as_dict=True,
-            ) or {}
+        for q in q_rows:
+            rem_qty = flt(q.get("qty")) - flt(q.get("ordered_qty"))
+            if rem_qty <= 0:
+                continue
             result.append({
-                "quot": q.parent,
-                "party": quot.get("customer_name") or quot.get("party_name") or "—",
-                "qty": round(flt(q.qty), 2),
-                "uom": q.uom or "",
-                "date": str(quot.get("transaction_date") or "—"),
+                "quot": q.get("quot_name"),
+                "party": q.get("customer_name") or q.get("party_name") or "—",
+                "qty": round(rem_qty, 2),
+                "uom": q.get("uom") or "",
+                "date": str(q.get("transaction_date") or "—"),
                 "via": "",
             })
 
@@ -1916,26 +2219,39 @@ def get_export_forecast_details(item_code: str | None = None) -> list[dict[str, 
             ratio = flt(bp.get("qty_per_unit"))
             if not p_item or ratio <= 0:
                 continue
-            p_q_items = frappe.get_all(
-                "Quotation Item",
-                filters={"item_code": p_item, "docstatus": 1},
-                fields=["parent", "qty", "uom", "rate"],
+
+            p_q_rows = frappe.db.sql(
+                f"""
+                SELECT
+                    qi.parent AS quot_name,
+                    qi.qty AS qty,
+                    qi.ordered_qty AS ordered_qty,
+                    qi.uom AS uom,
+                    qtn.customer_name AS customer_name,
+                    qtn.party_name AS party_name,
+                    qtn.transaction_date AS transaction_date
+                FROM `tabQuotation Item` qi
+                JOIN `tabQuotation` qtn ON qtn.name = qi.parent
+                WHERE qi.item_code = %(item_code)s
+                  AND qi.docstatus = 1
+                  AND qtn.status != "Lost"
+                  {date_sql}
+                """,
+                {"item_code": p_item, **date_params},
+                as_dict=True,
             )
-            for q in p_q_items:
-                needed = flt(q.qty) * ratio
-                quot = frappe.db.get_value(
-                    "Quotation", q.parent,
-                    ["customer_name", "party_name", "transaction_date", "status"],
-                    as_dict=True,
-                ) or {}
+            for q in p_q_rows:
+                rem_p_qty = flt(q.get("qty")) - flt(q.get("ordered_qty"))
+                if rem_p_qty <= 0:
+                    continue
+                needed = rem_p_qty * ratio
                 result.append({
-                    "quot": q.parent,
-                    "party": quot.get("customer_name") or quot.get("party_name") or "—",
+                    "quot": q.get("quot_name"),
+                    "party": q.get("customer_name") or q.get("party_name") or "—",
                     "qty": round(needed, 2),
-                    "uom": q.uom or "",
-                    "date": str(quot.get("transaction_date") or "—"),
+                    "uom": q.get("uom") or "",
+                    "date": str(q.get("transaction_date") or "—"),
                     "via": p_item,
                 })
 
     return result
-
