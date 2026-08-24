@@ -136,24 +136,65 @@ from frappe.utils import flt
 
 
 def _get_component_ratio_map(item_code):
-	"""For item_code as a raw material, find all default/active BOMs where it's
-	used as a component, and return {fg_item: qty_per_unit} for each parent
-	finished item (mirrors _get_bom_component_map's per-item lookup)."""
+	"""For item_code as a raw material, find all Default+Active BOMs where it's
+	used as a component (directly or via nested sub-assemblies), and return
+	{fg_item: qty_per_unit}. Uses BOM Explosion Item (recursive, pre-flattened)
+	as the primary source, with a fallback to BOM Item for any Default+Active
+	BOM whose explosion table hasn't been regenerated yet."""
 
+	# Primary: pre-flattened explosion table (handles nested sub-assemblies)
 	rows = frappe.db.sql("""
-		SELECT b.item AS fg_item, b.quantity AS bom_qty, bi.qty AS comp_qty
-		FROM `tabBOM Item` bi
-		INNER JOIN `tabBOM` b ON b.name = bi.parent
-		WHERE bi.item_code = %(item_code)s
-			AND b.is_active = 1
+		SELECT
+			b.name AS bom_name,
+			b.item AS fg_item,
+			SUM(bei.qty_consumed_per_unit) AS comp_qty
+		FROM `tabBOM Explosion Item` bei
+		JOIN `tabBOM` b ON bei.parent = b.name
+		WHERE bei.item_code = %(item_code)s
 			AND b.docstatus = 1
+			AND b.is_active = 1
+			AND b.is_default = 1
+		GROUP BY b.name, b.item
+	""", {"item_code": item_code}, as_dict=True)
+
+	boms_with_explosion = {r.bom_name for r in rows}
+
+	# Fallback: Default+Active BOMs using this item directly, with no
+	# Explosion Item rows at all (stale/never-regenerated explosion table)
+	candidate_boms = frappe.db.sql("""
+		SELECT DISTINCT b.name AS bom_name, b.item AS fg_item, b.quantity AS bom_qty
+		FROM `tabBOM Item` bi
+		JOIN `tabBOM` b ON bi.parent = b.name
+		WHERE bi.item_code = %(item_code)s
+			AND b.docstatus = 1
+			AND b.is_active = 1
 			AND b.is_default = 1
 	""", {"item_code": item_code}, as_dict=True)
 
+	missing_boms = [r for r in candidate_boms if r.bom_name not in boms_with_explosion]
+
+	fallback_rows = []
+	if missing_boms:
+		missing_names = [r.bom_name for r in missing_boms]
+		fallback_rows = frappe.db.sql("""
+			SELECT
+				bi.parent AS bom_name,
+				b.item AS fg_item,
+				SUM(bi.qty / IFNULL(NULLIF(b.quantity, 0), 1)) AS comp_qty
+			FROM `tabBOM Item` bi
+			JOIN `tabBOM` b ON bi.parent = b.name
+			WHERE bi.parent IN %(bom_names)s
+				AND bi.item_code = %(item_code)s
+			GROUP BY bi.parent, b.item
+		""", {"bom_names": tuple(missing_names), "item_code": item_code}, as_dict=True)
+
 	ratio_map = {}
-	for r in rows:
-		if flt(r.bom_qty):
-			ratio_map[r.fg_item] = flt(r.comp_qty) / flt(r.bom_qty)
+	for r in rows + fallback_rows:
+		fg_item = r.get("fg_item")
+		comp_qty = flt(r.get("comp_qty"))
+		if not fg_item or comp_qty <= 0:
+			continue
+		ratio_map[fg_item] = ratio_map.get(fg_item, 0.0) + comp_qty
 
 	return ratio_map
 
@@ -220,7 +261,9 @@ def get_export_forecast_data(item_code):
 
 @frappe.whitelist()
 def get_quotation_forecast_data(item_code):
-	"""Direct (item quoted itself) + indirect (item used as BOM component) Quotation demand."""
+	"""Direct (item quoted itself) + indirect (item used as BOM component) Quotation demand.
+	Only the portion of each Quotation Item NOT yet converted to a Sales Order counts as
+	forecast (qty - ordered_qty). Lost quotations are excluded."""
 	if not frappe.db.get_value("Item", item_code, "is_stock_item"):
 		return {"rows": [], "total_pending_qty": 0, "total_committed_qty": 0}
 
@@ -237,11 +280,13 @@ def get_quotation_forecast_data(item_code):
 			qtn.party_name AS customer,
 			qi.item_code AS fg_item,
 			qi.item_name AS fg_item_name,
-			qi.qty AS pending_qty
+			(qi.qty - IFNULL(qi.ordered_qty, 0)) AS pending_qty
 		FROM `tabQuotation Item` qi
 		INNER JOIN `tabQuotation` qtn ON qtn.name = qi.parent
 		WHERE qtn.docstatus = 1
+			AND qtn.status != 'Lost'
 			AND qi.item_code IN %(fg_items)s
+			AND qi.qty > IFNULL(qi.ordered_qty, 0)
 		ORDER BY qtn.transaction_date DESC
 	""", {"fg_items": fg_items}, as_dict=True)
 
@@ -273,7 +318,6 @@ def get_quotation_forecast_data(item_code):
 		"total_pending_qty": total_pending_qty,
 		"total_committed_qty": round(total_committed_qty, 2)
 	}
- 
  
  
  # jasma/jasma/doc_events/item.py
