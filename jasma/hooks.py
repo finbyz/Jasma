@@ -79,7 +79,7 @@ doctype_js = {
 	"Employee Advance": "public/js/employee_advance.js",
 	"Payment Entry": "public/js/payment_entry.js",
 	"Purchase Invoice": "public/js/purchase_invoice.js",
-	"Payment Request" : "public/js/payment_request.js",
+	"Payment Request" : "public/js/payemnt_request.js",
 	"Expense Claim" : "public/js/expanse_claim.js",
 	"Supplier" : "public/js/supplier.js",
 	"Customer" : "public/js/customer.js"
