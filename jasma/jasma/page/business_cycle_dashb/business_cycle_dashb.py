@@ -1472,21 +1472,23 @@ def get_stock_overview(
     # Uses the same "delivery_date on Sales Order Item, falling back to the parent
     # Sales Order's delivery_date" rule as get_pending_so_details, so the badge total
     # here and the modal's total always agree for the same from_date/to_date.
+        # ── Sales Order pending qty (Export Commitment) — date filter on transaction_date ─
+    # Uses the Sales Order's own transaction_date (order date) rather than
+    # delivery_date, so the badge total matches get_pending_so_details, which
+    # uses the same transaction_date-based rule for the same date range.
     so_pending_by_item: dict[str, float] = {}
     if _doctype_exists("Sales Order Item"):
         date_conditions: list[str] = []
         date_params: dict[str, Any] = {}
         if from_date and to_date:
-            date_conditions.append(
-                "IFNULL(soi.delivery_date, so.delivery_date) BETWEEN %(from_date)s AND %(to_date)s"
-            )
+            date_conditions.append("so.transaction_date BETWEEN %(from_date)s AND %(to_date)s")
             date_params["from_date"] = from_date
             date_params["to_date"] = to_date
         elif from_date:
-            date_conditions.append("IFNULL(soi.delivery_date, so.delivery_date) >= %(from_date)s")
+            date_conditions.append("so.transaction_date >= %(from_date)s")
             date_params["from_date"] = from_date
         elif to_date:
-            date_conditions.append("IFNULL(soi.delivery_date, so.delivery_date) <= %(to_date)s")
+            date_conditions.append("so.transaction_date <= %(to_date)s")
             date_params["to_date"] = to_date
         date_sql = (" AND " + " AND ".join(date_conditions)) if date_conditions else ""
 
@@ -1881,20 +1883,18 @@ def get_pending_so_details(
 
     result = []
 
-    # ── Build shared date filter clause ───────────────────────────────────
+        # ── Build shared date filter clause (on Sales Order.transaction_date) ──
     date_conditions: list[str] = []
     date_params: dict[str, Any] = {}
     if from_date and to_date:
-        date_conditions.append(
-            "IFNULL(soi.delivery_date, so.delivery_date) BETWEEN %(from_date)s AND %(to_date)s"
-        )
+        date_conditions.append("so.transaction_date BETWEEN %(from_date)s AND %(to_date)s")
         date_params["from_date"] = from_date
         date_params["to_date"] = to_date
     elif from_date:
-        date_conditions.append("IFNULL(soi.delivery_date, so.delivery_date) >= %(from_date)s")
+        date_conditions.append("so.transaction_date >= %(from_date)s")
         date_params["from_date"] = from_date
     elif to_date:
-        date_conditions.append("IFNULL(soi.delivery_date, so.delivery_date) <= %(to_date)s")
+        date_conditions.append("so.transaction_date <= %(to_date)s")
         date_params["to_date"] = to_date
     date_sql = (" AND " + " AND ".join(date_conditions)) if date_conditions else ""
 
@@ -1909,6 +1909,7 @@ def get_pending_so_details(
             so.customer_name AS customer_name,
             so.customer AS customer,
             so.delivery_date AS so_delivery_date,
+            so.transaction_date AS so_transaction_date,
             so.project AS project
         FROM `tabSales Order Item` soi
         JOIN `tabSales Order` so ON so.name = soi.parent
