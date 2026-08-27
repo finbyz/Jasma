@@ -192,7 +192,7 @@ def export_payment_entries(payment_entries):
         if pe.party_bank_account:
             bank = frappe.get_doc("Bank Account", pe.party_bank_account)
             party_bank_account = bank.bank_account_no or ""
-            ban_name = bank.bank or ""
+            ban_name = bank.account_name or ""
             is_icici = bool(bank.ifs_code) and bank.ifs_code.upper().startswith("ICIC")
             ifsc = "" if is_icici else (bank.ifs_code or "")
 
