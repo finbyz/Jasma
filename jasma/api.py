@@ -180,7 +180,6 @@ def export_payment_entries(payment_entries):
         party_name = pe.party_name or ""
         amount = pe.paid_amount
 
-        # Our own debit account = default bank account
         bank_account = default_bank_account_no
 
         # Beneficiary bank details — reset per entry
