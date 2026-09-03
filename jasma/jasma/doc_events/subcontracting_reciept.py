@@ -2,34 +2,48 @@ import frappe
 import json
 from frappe import _
 from frappe.utils import get_link_to_form
-# import flt
 from erpnext.subcontracting.doctype.subcontracting_receipt.subcontracting_receipt import SubcontractingReceipt
-
-def validate_qc_report(self, method=None):
-    SubcontractingReceipt.validate_available_qty_for_consumption(self)
-
-
 
 
 @frappe.whitelist()
 def make_qc_report(docname, items):
 	if isinstance(items, str):
 		items = json.loads(items)
+
 	reports = []
-	skipped_items = []
+
+	# Same fix as Purchase Receipt: pull existing QC Reports for this SR
+	# once, and flatten reference_item (which may itself already be a
+	# comma-separated list of SR-item row names) into a single set, so a
+	# merged-item row never gets double-flagged as missing.
+	existing_reports = frappe.get_all(
+		"QC Report",
+		filters={
+			"reference_type": "Subcontracting Receipt",
+			"reference_name": docname
+		},
+		fields=["name", "reference_item"]
+	)
+
+	used_sr_items = set()
+	for rep in existing_reports:
+		for part in (rep.reference_item or "").split(","):
+			part = part.strip()
+			if part:
+				used_sr_items.add(part)
 
 	for item in items:
+		# item.get("docname") may itself be "row1, row2" when the frontend
+		# has already merged multiple SR-item rows of the same item code.
+		row_names = [d.strip() for d in (item.get("docname") or "").split(",") if d.strip()]
 
-		existing = frappe.db.exists(
-			"QC Report",
-			{
-				"reference_type": "Subcontracting Receipt",
-				"reference_name": docname,
-				"reference_item": item.get("docname")
-			}
-		)
-
-		
+		clash = used_sr_items.intersection(row_names)
+		if clash:
+			frappe.throw(
+				_("QC Report already created for Item {0} (SR row(s): {1})").format(
+					item.get("item_code"), ", ".join(clash)
+				)
+			)
 
 		item_doc = frappe.get_doc("Item", item.get("item_code"))
 
@@ -37,41 +51,46 @@ def make_qc_report(docname, items):
 			"doctype": "QC Report",
 			"reference_type": "Subcontracting Receipt",
 			"reference_name": docname,
-			"reference_item": item.get("docname"),
+			"reference_item": ", ".join(row_names),  # comma-separated SR rows
 			"item_group": item_doc.item_group,
 			"item": item.get("item_code"),
-			"received_quantity":item.get("received_quantity"),
-			"po_no":item.get("purchase_order"),
-			"so_no":item.get("subcontracting_order"),
-			"project":item.get("project")
+			"received_quantity": item.get("received_quantity"),
+			"po_no": item.get("purchase_order"),
+			"so_no": item.get("subcontracting_order"),
+			"project": item.get("project"),
 		})
-
-		if existing:
-			skipped_items.append(qc_report.get("item"))
-			frappe.throw(f"QC Report already created for Item {skipped_items}")
 
 		for row in item_doc.qc_report_parameter:
 			qc_report.append("qc_report_parameter", {
 				"description": row.description,
-				# "status": row.status,
-				"jasma_report_check":row.jasma_report_check,
-				"vendor_report_check":row.vendor_report_check,
-				"third_party_report_check":row.third_party_report_check
+				"jasma_report_check": row.jasma_report_check,
+				"vendor_report_check": row.vendor_report_check,
+				"third_party_report_check": row.third_party_report_check
 			})
 
 		qc_report.insert(ignore_permissions=True)
 		reports.append(qc_report.name)
 
+		used_sr_items.update(row_names)
+
 	return reports
 
 
 def validate_qc_report(self, method=None):
+	# NOTE: this replaces the earlier duplicate `validate_qc_report` def
+	# that called SubcontractingReceipt.validate_available_qty_for_consumption
+	# — that definition was dead code (Python only keeps the last def with
+	# the same name in a module). If you actually need that qty-consumption
+	# check to run too, call it explicitly here instead of relying on a
+	# separate function of the same name:
+	# SubcontractingReceipt.validate_available_qty_for_consumption(self)
+
 	missing_items = frappe.db.sql("""
 		SELECT pri.item_code
 		FROM `tabSubcontracting Receipt Item` pri
 		INNER JOIN `tabItem` i ON i.name = pri.item_code
 		LEFT JOIN `tabQC Report` qr
-			ON qr.reference_item = pri.name
+			ON FIND_IN_SET(pri.name, REPLACE(REPLACE(qr.reference_item, ', ', ','), ' ', ',')) > 0
 			AND qr.reference_name = pri.parent
 			AND qr.reference_type = 'Subcontracting Receipt'
 			AND qr.docstatus = 1
@@ -241,3 +260,120 @@ def auto_submit_purchase_receipt(doc, method):
                 title="Auto-Submit Failed",
                 indicator="orange"
             )
+            
+# jasma/jasma/doc_events/subcontracting_receipt.py
+
+import frappe
+from frappe.utils import flt
+
+
+def fix_supplied_qty_before_submit(doc, method=None):
+	"""
+	Guard against the core supplied_qty clamp silently zeroing consumed_qty:
+	set_consumed_qty_in_subcontract_order() does
+	`if row.supplied_qty < consumed_qty: consumed_qty = row.supplied_qty`.
+
+	For each supplied_items row on this receipt:
+	1. If supplied_qty on the linked Subcontracting Order Supplied Item is
+	   less than (or equal to) this receipt's consumed_qty, bump supplied_qty
+	   up so the core clamp doesn't truncate it on submit.
+	2. Also increments consumed_qty on that same Order Supplied Item row,
+	   so it reflects this receipt's consumption immediately.
+
+	Matches the Order Supplied Item row via (rm_item_code, main_item_code,
+	subcontracting_order) — same composite key the core controller uses in
+	__update_consumed_qty_in_subcontract_order, since Subcontracting Receipt
+	Supplied Item rows have no direct link field to the order's row.
+
+	hooks.py:
+	doc_events = {
+		"Subcontracting Receipt": {
+			"before_submit": "jasma.jasma.doc_events.subcontracting_receipt.fix_supplied_qty_before_submit",
+			"on_cancel": "jasma.jasma.doc_events.subcontracting_receipt.revert_supplied_qty_on_cancel",
+		}
+	}
+	"""
+	for row in doc.get("supplied_items", []):
+		if not row.get("subcontracting_order") or not row.get("consumed_qty"):
+			continue
+
+		order_row = frappe.db.get_value(
+			"Subcontracting Order Supplied Item",
+			{
+				"parent": row.subcontracting_order,
+				"rm_item_code": row.rm_item_code,
+				"main_item_code": row.main_item_code,
+			},
+			["name", "supplied_qty", "consumed_qty"],
+			as_dict=True,
+		)
+
+		if not order_row:
+			continue
+
+		supplied_qty = flt(order_row.supplied_qty)
+		consumed_qty = flt(order_row.consumed_qty)
+		row_consumed_qty = flt(row.consumed_qty)
+
+		if supplied_qty <= row_consumed_qty:
+			frappe.db.set_value(
+				"Subcontracting Order Supplied Item",
+				order_row.name,
+				"supplied_qty",
+				supplied_qty + row_consumed_qty,
+				update_modified=False,
+			)
+
+		frappe.db.set_value(
+			"Subcontracting Order Supplied Item",
+			order_row.name,
+			"consumed_qty",
+			consumed_qty + row_consumed_qty,
+			update_modified=False,
+		)
+
+
+def revert_supplied_qty_on_cancel(doc, method=None):
+	"""
+	Mirror of fix_supplied_qty_before_submit — when this receipt is
+	cancelled, subtract back what it had added to consumed_qty and
+	supplied_qty on the linked Subcontracting Order Supplied Item,
+	floored at 0 so it never goes negative.
+	"""
+	for row in doc.get("supplied_items", []):
+		if not row.get("subcontracting_order") or not row.get("consumed_qty"):
+			continue
+
+		order_row = frappe.db.get_value(
+			"Subcontracting Order Supplied Item",
+			{
+				"parent": row.subcontracting_order,
+				"rm_item_code": row.rm_item_code,
+				"main_item_code": row.main_item_code,
+			},
+			["name", "supplied_qty", "consumed_qty"],
+			as_dict=True,
+		)
+
+		if not order_row:
+			continue
+
+		supplied_qty = flt(order_row.supplied_qty)
+		consumed_qty = flt(order_row.consumed_qty)
+		row_consumed_qty = flt(row.consumed_qty)
+
+		frappe.db.set_value(
+			"Subcontracting Order Supplied Item",
+			order_row.name,
+			"supplied_qty",
+			max(supplied_qty - row_consumed_qty, 0),
+			update_modified=False,
+		)
+
+		frappe.db.set_value(
+			"Subcontracting Order Supplied Item",
+			order_row.name,
+			"consumed_qty",
+			max(consumed_qty - row_consumed_qty, 0),
+			update_modified=False,
+		)

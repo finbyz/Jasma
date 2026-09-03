@@ -83,6 +83,67 @@ frappe.ui.form.on("Purchase Order", {
         });
     },
 
+    refresh: function(frm) {
+
+        if (frm.doc.is_subcontracted) {
+            frm.remove_custom_button("Purchase Receipt", "Create");
+        }
+        
+        if (!frm.doc.is_subcontracted || frm.doc.docstatus !== 1) return;
+
+        frappe.db.get_list("Subcontracting Order", {
+            filters: {
+                purchase_order: frm.doc.name,
+                docstatus: 1
+            },
+            fields: ["name", "status"],
+            limit: 20
+        }).then(sco_list => {
+            if (!sco_list.length) return;
+
+            // Only show the button if at least one SO can still generate a receipt
+            let open_scos = sco_list.filter(
+                so => !["Completed", "Closed", "Cancelled"].includes(so.status)
+            );
+            if (!open_scos.length) return;
+
+            frm.add_custom_button(__("Subcontracting Receipt"), function() {
+
+                const create_scr_from_so = (so_name) => {
+                    frappe.model.open_mapped_doc({
+                        method: "erpnext.subcontracting.doctype.subcontracting_order.subcontracting_order.make_subcontracting_receipt",
+                        source_name: so_name,   // <-- key part: override, don't use frm.doc.name (PO)
+                        frm: frm
+                    });
+                };
+
+                if (open_scos.length === 1) {
+                    create_scr_from_so(open_scos[0].name);
+                } else {
+                    // Multiple SOs against this PO — let user pick which one
+                    let d = new frappe.ui.Dialog({
+                        title: __("Select Subcontracting Order"),
+                        fields: [
+                            {
+                                fieldname: "sco",
+                                fieldtype: "Select",
+                                label: __("Subcontracting Order"),
+                                options: open_scos.map(so => so.name),
+                                reqd: 1
+                            }
+                        ],
+                        primary_action_label: __("Create"),
+                        primary_action: function(values) {
+                            d.hide();
+                            create_scr_from_so(values.sco);
+                        }
+                    });
+                    d.show();
+                }
+            }, __("Create"));
+        });
+    },
+
     is_subcontracted: function(frm) {
 
         if (!frm.doc.is_subcontracted) return;
@@ -155,8 +216,11 @@ frappe.ui.form.on("Purchase Order", {
                     is_subcontracted: frm.doc.is_subcontracted
                 },
                 callback: function (r) {
-                    if (r.message && r.message.length) {
-                        show_manufacturing_notes_popup(r.message, frm.doc.is_subcontracted);
+                    let notes_data = (r.message || []).filter(
+                        d => d.manufacturing_notes && d.manufacturing_notes.trim()
+                    );
+                    if (notes_data.length) {
+                        show_manufacturing_notes_popup(notes_data, frm.doc.is_subcontracted);
                     }
                     resolve();
                 }

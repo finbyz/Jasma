@@ -166,6 +166,10 @@ def get_manufacturing_notes_summary(items, is_subcontracted=0):
 
         manufacturing_notes = frappe.db.get_value("Item", lookup_item, "manufacturing_notes")
 
+        # Skip items with no manufacturing notes — don't include empty entries
+        if not manufacturing_notes or not manufacturing_notes.strip():
+            continue
+
         notes_summary.append({
             "item_code": lookup_item,
             "manufacturing_notes": manufacturing_notes

@@ -429,7 +429,7 @@ def get_dashboard_data(reference_doctype, reference_name, pr_name=None, pr_amoun
     pi = frappe.db.get_value(
         "Purchase Invoice",
         reference_name,
-        ["grand_total", "outstanding_amount", "supplier", "company", "due_date"],
+        ["grand_total", "outstanding_amount", "supplier", "company", "due_date", "bill_date", "posting_date"],
         as_dict=True
     )
 
@@ -448,6 +448,8 @@ def get_dashboard_data(reference_doctype, reference_name, pr_name=None, pr_amoun
         "debit_note_against_invoice": get_debit_note_against_invoice(reference_name),
         "debit_note_without_reference": get_debit_note_without_reference(pi.supplier, reference_name),
         "purchase_receipt_returns": get_purchase_receipt_returns(reference_name),
+        "posting_date": pi.posting_date,          # <-- added
+        "supplier_invoice_date": pi.bill_date,    # <-- added (bill_date only, no fallback)
         "supplier": pi.supplier,
         "company": pi.company,
         "fiscal_year": get_current_fiscal_year(),

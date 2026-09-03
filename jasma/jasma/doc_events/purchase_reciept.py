@@ -1,6 +1,7 @@
 import frappe
 from frappe.model.mapper import get_mapped_doc
 import json
+from frappe import _
 from erpnext.stock.doctype.purchase_receipt.purchase_receipt import make_purchase_invoice
 
 
@@ -39,22 +40,39 @@ def make_stock_entry_from_purchase_receipt(source_name, target_doc=None, args=No
 def make_qc_report(docname, items):
 	if isinstance(items, str):
 		items = json.loads(items)
-	# frappe.throw(str(items))
+
 	reports = []
-	skipped_items = []
+
+	# Pull all existing QC Reports for this PR once, and build a flat set
+	# of every individual PR-item row name that's already been used —
+	# since reference_item itself may already be a comma-separated list.
+	existing_reports = frappe.get_all(
+		"QC Report",
+		filters={
+			"reference_type": "Purchase Receipt",
+			"reference_name": docname
+		},
+		fields=["name", "reference_item"]
+	)
+
+	used_pr_items = set()
+	for rep in existing_reports:
+		for part in (rep.reference_item or "").split(","):
+			part = part.strip()
+			if part:
+				used_pr_items.add(part)
 
 	for item in items:
+		# item.get("docname") may itself be "row1, row2" from a merged item
+		row_names = [d.strip() for d in (item.get("docname") or "").split(",") if d.strip()]
 
-		existing = frappe.db.exists(
-			"QC Report",
-			{
-				"reference_type": "Purchase Receipt",
-				"reference_name": docname,
-				"reference_item": item.get("docname")
-			}
-		)
-
-		
+		clash = used_pr_items.intersection(row_names)
+		if clash:
+			frappe.throw(
+				_("QC Report already created for Item {0} (PR row(s): {1})").format(
+					item.get("item_code"), ", ".join(clash)
+				)
+			)
 
 		item_doc = frappe.get_doc("Item", item.get("item_code"))
 
@@ -62,30 +80,28 @@ def make_qc_report(docname, items):
 			"doctype": "QC Report",
 			"reference_type": "Purchase Receipt",
 			"reference_name": docname,
-			"reference_item": item.get("docname"),
+			"reference_item": ", ".join(row_names),  # comma-separated PR rows
 			"item_group": item_doc.item_group,
 			"item": item.get("item_code"),
-			"received_quantity":item.get("received_quantity"),
-			"po_no":item.get("purchase_order"),
-			"project":item.get("project"),
-
+			"received_quantity": item.get("received_quantity"),
+			"po_no": item.get("purchase_order"),
+			"project": item.get("project"),
 		})
-
-		if existing:
-			skipped_items.append(qc_report.get("item"))
-			frappe.throw(f"QC Report already created for Item {skipped_items}")
 
 		for row in item_doc.qc_report_parameter:
 			qc_report.append("qc_report_parameter", {
 				"description": row.description,
-				# "status": row.status,
-				"jasma_report_check":row.jasma_report_check,
-				"vendor_report_check":row.vendor_report_check,
-				"third_party_report_check":row.third_party_report_check
+				"jasma_report_check": row.jasma_report_check,
+				"vendor_report_check": row.vendor_report_check,
+				"third_party_report_check": row.third_party_report_check
 			})
 
 		qc_report.insert(ignore_permissions=True)
 		reports.append(qc_report.name)
+
+		# mark these rows as used so a later item in the same request
+		# can't also claim them
+		used_pr_items.update(row_names)
 
 	return reports
 
@@ -96,7 +112,7 @@ def validate_qc_report(self, method=None):
 		FROM `tabPurchase Receipt Item` pri
 		INNER JOIN `tabItem` i ON i.name = pri.item_code
 		LEFT JOIN `tabQC Report` qr
-			ON qr.reference_item = pri.name
+			ON FIND_IN_SET(pri.name, REPLACE(REPLACE(qr.reference_item, ', ', ','), ' ', ',')) > 0
 			AND qr.reference_name = pri.parent
 			AND qr.reference_type = 'Purchase Receipt'
 			AND qr.docstatus = 1

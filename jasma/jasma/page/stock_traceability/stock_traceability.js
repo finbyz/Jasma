@@ -96,6 +96,55 @@
 //   See node_doctype() for the title -> doctype map used to route each
 //   click, and node_html() / render_diagram() for where the st-doc-link
 //   class + data-name/data-doctype attributes get attached.
+//
+// IMPORTANT — untraced-quantity diagnostics + subcontracting RM metadata:
+//   1. Untraced branches (build_branches() / trace_delivery_note_item()
+//      shortfalls in the .py) now come back with `item_name`, `hint_entry`,
+//      `hint_entry_type` and `hint_sle` alongside `note` — the backend has
+//      already worked out WHY nothing was traced (nearest inward entry
+//      exists but is dated after the delivery, or exists in a different
+//      warehouse, or genuinely doesn't exist anywhere) and, where an entry
+//      DOES exist, gives us its name/doctype/SLE so we can link straight to
+//      it instead of dead-ending on a flat "Opening Stock" box. See the
+//      untraced branch of render_subtree() and the b.untraced branch of
+//      render_report().
+//   2. Subcontracting Receipt "Raw Material Consumed" nodes carry a `meta`
+//      block (source SLE, RM item code, RM qty consumed, and the
+//      finished-good qty it covers) — see node_html(), which renders it as
+//      a small panel under the node.
+//
+// IMPORTANT — RM meta panel simplification (this revision):
+//   - The node's own headline Qty and the meta panel's "RM Qty Consumed"
+//     now always show the SAME number (the backend guarantees this — see
+//     resolve_subcontracting_receipt() in the .py) so there's never a
+//     mismatched pair like "Qty: 532.57" next to "RM Qty Consumed: 9450".
+//   - "RM Item" in the meta panel now shows just the plain Item Code (no
+//     item name, not a link) — kept short and scannable.
+//   - The "Ref" (Subcontracting Receipt Item reference row) line has been
+//     removed entirely — it didn't add anything useful to the reader.
+//
+// IMPORTANT — visible tree connector lines (this revision):
+//   Previously the only visual "connection" between nodes was a 1px line
+//   in the theme's --st-border colour (very light grey — effectively
+//   invisible against the canvas background), and there was NO line at
+//   all between the root Delivery Note node and the branches below it, or
+//   between sibling branches at a fork. The diagram now draws a proper,
+//   clearly-visible tree: a dedicated --st-line-color (a darker slate
+//   tone, tuned separately for light/dark mode) is used for every
+//   connector, a vertical stem now drops from the root node down into the
+//   branch row, and forking branches get a classic org-chart elbow
+//   (horizontal bar + vertical stems into each sibling) instead of just
+//   floating next to each other with no visible link at all.
+//
+// IMPORTANT — Report View restructure:
+//   The Consumption Report table no longer has a "Type" (FG/Direct) column.
+//   In its place is a "Delivered Qty" column. The Delivery Note / Delivered
+//   Item / Delivered Qty cells are now rendered with rowspan across every
+//   branch (source document) belonging to that item, instead of being
+//   blanked out on "continuation" rows. The "Component / RM Consumed"
+//   column always shows the component's own Item Code (as a clickable
+//   link) AND its resolved Item Name — for a Direct item (no RM) this
+//   mirrors the delivered item's own code/name.
 
 frappe.pages['stock-traceability'].on_page_load = function (wrapper) {
 	var page = frappe.ui.make_app_page({
@@ -791,13 +840,13 @@ class StockTraceability {
 					<table class="st-table st-report-table">
 						<thead>
 							<tr>
-								<th style="width:16%;">${__('Delivery Note')}</th>
+								<th style="width:14%;">${__('Delivery Note')}</th>
 								<th style="width:18%;">${__('Delivered Item')}</th>
-								<th style="width:10%;">${__('Type')}</th>
-								<th style="width:20%;">${__('Component / RM Consumed')}</th>
+								<th style="width:9%;">${__('Delivered Qty')}</th>
+								<th style="width:21%;">${__('Component / Raw Material')}</th>
 								<th style="width:8%;">${__('Qty')}</th>
-								<th style="width:14%;">${__('Source Document')}</th>
-								<th style="width:14%;">${__('Purchase / Sub. Order')}</th>
+								<th style="width:15%;">${__('Source Document')}</th>
+								<th style="width:15%;">${__('Purchase / Sub. Order')}</th>
 							</tr>
 						</thead>
 						<tbody class="st-report-body"></tbody>
@@ -827,7 +876,8 @@ class StockTraceability {
 			const name = $t.data('name');
 			// Explicit data-doctype (e.g. Item links from the Items Summary
 			// table, or Project links from the AO Number chip, or the
-			// title -> doctype map used by diagram nodes via node_doctype())
+			// title -> doctype map used by diagram nodes via node_doctype(),
+			// or the SLE / hint-entry links from the untraced diagnostics)
 			// wins; otherwise fall back to the naming-series guess.
 			const doctype = $t.data('doctype') || this.guess_doctype(name);
 			if (doctype) {
@@ -965,17 +1015,77 @@ class StockTraceability {
 		return null;
 	}
 
-	node_html(n) {
-		const doctype = this.node_doctype(n);
-		const clickable = !!(doctype && n.sub);
-		const cls = `st-node st-node-${n.t}${clickable ? ' st-node-clickable st-doc-link' : ''}`;
-		const attrs = clickable
-			? ` href="#" data-name="${frappe.utils.escape_html(n.sub)}" data-doctype="${frappe.utils.escape_html(doctype)}"`
-			: '';
-		const tag = clickable ? 'a' : 'div';
-		return `<${tag} class="${cls}"${attrs}>${clickable ? `<span class="st-node-open">${this.icon('link', 10)}</span>` : ''}<div class="st-node-t">${frappe.utils.escape_html(n.title)}</div>
-			<div class="st-node-s">${frappe.utils.escape_html(n.sub)}</div>
-			<div class="st-node-s" style="font-weight:700;">${frappe.utils.escape_html(n.qty)}</div></${tag}>`;
+	// Renders one diagram node. Nodes with a `meta` block (currently only
+	// the "Raw Material Consumed" node built in resolve_subcontracting_receipt())
+	// get a small panel underneath showing the source SLE, the RM item code,
+	// and the RM qty consumed vs. the finished-good qty it covers.
+	//
+	// Kept deliberately compact per updated requirements:
+	//   - "RM Item" shows just the plain Item Code — no item name, not a
+	//     link — so the panel reads as a quick label rather than a wall of
+	//     text.
+	//   - The reference-row ("Ref: ...") line has been removed entirely.
+	//   - The node's own headline Qty (n.qty) is guaranteed by the backend
+	//     to equal "RM Qty Consumed" below, so the two numbers always agree.
+		node_html(n) {
+			const doctype = this.node_doctype(n);
+			const clickable = !!(doctype && n.sub);
+			const innerAttrs = clickable
+				? ` href="#" class="st-node-inner st-node-clickable st-doc-link" data-name="${frappe.utils.escape_html(n.sub)}" data-doctype="${frappe.utils.escape_html(doctype)}"`
+				: ` class="st-node-inner"`;
+			const innerTag = clickable ? 'a' : 'div';
+
+			let metaHTML = '';
+			if (n.meta) {
+				const m = n.meta;
+				const sleLink = m.sle
+					? `<a class="st-node-meta-link st-doc-link" href="#" data-name="${frappe.utils.escape_html(m.sle)}" data-doctype="Stock Ledger Entry">${frappe.utils.escape_html(m.sle)}</a>`
+					: '';
+				metaHTML = `<div class="st-node-meta">
+					${m.rm_item_code ? `<div>${__('RM Item')}: <span class="st-node-meta-code">${frappe.utils.escape_html(m.rm_item_code)}</span></div>` : ''}
+					${m.rm_qty_consumed !== undefined ? `<div>${__('RM Qty Consumed')}: ${m.rm_qty_consumed}</div>` : ''}
+					${m.fg_qty_covered !== undefined ? `<div>${__('Main Item Qty')}: ${m.fg_qty_covered}</div>` : ''}
+					${sleLink ? `<div>${__('Source SLE')}: ${sleLink}</div>` : ''}
+				</div>`;
+			}
+
+			const mainHTML = `<div class="st-node st-node-${n.t}">
+				<${innerTag}${innerAttrs}>
+					${clickable ? `<span class="st-node-open">${this.icon('link', 10)}</span>` : ''}
+					<div class="st-node-t">${frappe.utils.escape_html(n.title)}</div>
+					<div class="st-node-s">${frappe.utils.escape_html(n.sub)}</div>
+					<div class="st-node-s" style="font-weight:700;">${frappe.utils.escape_html(n.qty)}</div>
+				</${innerTag}>
+				${metaHTML}
+			</div>`;
+
+			if (!n.side) return mainHTML;
+
+			// Side branch: currently only Subcontracting Receipt -> its own
+			// Subcontracting Order. Rendered to the RIGHT of the main box —
+			// completely separate from the vertical Raw Material -> Purchase
+			// Receipt -> Purchase Order chain that continues below the SR node.
+			const s = n.side;
+			const sideDoctype = this.node_doctype(s);
+			const sideClickable = !!(sideDoctype && s.sub);
+			const sideInnerAttrs = sideClickable
+				? ` href="#" class="st-node-inner st-node-clickable st-doc-link" data-name="${frappe.utils.escape_html(s.sub)}" data-doctype="${frappe.utils.escape_html(sideDoctype)}"`
+				: ` class="st-node-inner"`;
+			const sideInnerTag = sideClickable ? 'a' : 'div';
+			const sideHTML = `<div class="st-node st-node-${s.t} st-node-side">
+				<${sideInnerTag}${sideInnerAttrs}>
+					${sideClickable ? `<span class="st-node-open">${this.icon('link', 10)}</span>` : ''}
+					<div class="st-node-t">${frappe.utils.escape_html(s.title)}</div>
+					<div class="st-node-s">${frappe.utils.escape_html(s.sub)}</div>
+					<div class="st-node-s" style="font-weight:700;">${frappe.utils.escape_html(s.qty)}</div>
+				</${sideInnerTag}>
+			</div>`;
+
+			return `<div class="st-node-with-side">
+				${mainHTML}
+				<div class="st-node-side-connector"></div>
+				${sideHTML}
+			</div>`;
 	}
 
 	render_diagram() {
@@ -1018,17 +1128,82 @@ class StockTraceability {
 			? this.render_branch_row(topNodes)
 			: `<div class="st-empty-state st-empty-state--untraced">${this.icon('inbox', 22)}<p>${__('No source documents found — this quantity could not be traced (e.g. opening stock, a stock reconciliation, or negative stock).')}</p></div>`;
 
-		canvas.html(`
-			<a href="#" class="st-root-node st-doc-link" data-name="${frappe.utils.escape_html(it.dn || '')}" data-doctype="Delivery Note">
-				<span class="st-node-open st-node-open-root">${this.icon('link', 10)}</span>
-				<div class="st-node-t">${__('Delivery Note')}</div>
-				<div class="st-node-s">${frappe.utils.escape_html(it.dn || '')}</div>
-				<div class="st-node-s">${__('Item')}: ${frappe.utils.escape_html(it.code)} | ${__('Qty')}: ${it.delivered}</div>
-			</a>
-			${branchesHTML}
+		// A visible vertical stem always connects the root Delivery Note
+		// node down into the branch row below it (see .st-root-stem CSS) —
+		// previously there was no line here at all.
+				canvas.html(`
+			<div class="st-tree-wrap">
+				<a href="#" class="st-root-node st-doc-link" data-name="${frappe.utils.escape_html(it.dn || '')}" data-doctype="Delivery Note">
+					<span class="st-node-open st-node-open-root">${this.icon('link', 10)}</span>
+					<div class="st-node-t">${__('Delivery Note')}</div>
+					<div class="st-node-s">${frappe.utils.escape_html(it.dn || '')}</div>
+					<div class="st-node-s">${__('Item')}: ${frappe.utils.escape_html(it.code)} | ${__('Qty')}: ${it.delivered}</div>
+				</a>
+				${topNodes.length ? '<div class="st-root-stem"></div>' : ''}
+				${branchesHTML}
+			</div>
 		`);
 
 		this.apply_legend_filter();
+		// Layout must be committed before we can measure real positions.
+		requestAnimationFrame(() => this.align_tree_centers());
+	}
+
+	// Every parent that sits ABOVE a fork (the root Delivery Note node,
+	// or a .st-branch-chain sitting above a nested fork) is centered by
+	// CSS relative to ITS OWN column width — which only matches the
+	// fork's true visual center (midpoint between its first and last
+	// sibling) when both siblings are equally wide. When a fork has one
+	// short branch and one wide/further-forked branch (the common case),
+	// those two points diverge and the parent renders visibly off-center.
+	// This measures the ACTUAL rendered positions and nudges each such
+	// parent (via transform) onto the fork's real midpoint.
+	align_tree_centers() {
+		const canvasEl = this.page.main.find('.st-flow-canvas').get(0);
+		if (!canvasEl) return;
+
+		// Root Delivery Note node + its stem, over the top-level fork.
+		const topRow = canvasEl.querySelector('.st-tree-wrap > .st-branch-row');
+		this._align_over_row(
+			canvasEl.querySelector('.st-root-node'),
+			canvasEl.querySelector('.st-root-stem'),
+			topRow,
+			canvasEl.querySelector('.st-tree-wrap')
+		);
+
+		// Every branch whose chain sits directly above its own nested fork.
+		canvasEl.querySelectorAll('.st-branch').forEach(branchEl => {
+			const nestedRow = branchEl.querySelector(':scope > .st-branch-row');
+			if (!nestedRow) return;
+			this._align_over_row(
+				branchEl.querySelector(':scope > .st-branch-chain'),
+				branchEl.querySelector(':scope > .st-connector-into-fork'),
+				nestedRow,
+				branchEl
+			);
+		});
+	}
+
+	// Shifts topEl + stemEl (via transform) so they sit exactly above the
+	// midpoint between rowEl's first and last direct .st-branch child —
+	// the fork's true visual center — instead of containerEl's own center.
+	_align_over_row(topEl, stemEl, rowEl, containerEl) {
+		if (!rowEl || !containerEl) return;
+		const siblings = Array.from(rowEl.children).filter(c => c.classList.contains('st-branch'));
+		if (siblings.length < 2) {
+			// Not a fork (single branch) — natural centering is already correct.
+			if (topEl) topEl.style.transform = '';
+			if (stemEl) stemEl.style.transform = '';
+			return;
+		}
+		const first = siblings[0].getBoundingClientRect();
+		const last = siblings[siblings.length - 1].getBoundingClientRect();
+		const trueCenter = ((first.left + first.width / 2) + (last.left + last.width / 2)) / 2;
+		const containerCenter = containerEl.getBoundingClientRect().left + containerEl.getBoundingClientRect().width / 2;
+		const delta = trueCenter - containerCenter;
+
+		if (topEl) topEl.style.transform = delta ? `translateX(${delta}px)` : '';
+		if (stemEl) stemEl.style.transform = delta ? `translateX(${delta}px)` : '';
 	}
 
 	// Builds a merge tree from a flat list of {qty, chain:[node,...]} branches.
@@ -1056,33 +1231,93 @@ class StockTraceability {
 	}
 
 	// Renders a row of sibling subtrees (a branch point, or the single
-	// unbranched trunk when there's only one).
+	// unbranched trunk when there's only one). The CSS on .st-branch-row /
+	// .st-branch draws the actual connector lines (horizontal bar + vertical
+	// stems) — see the "visible tree connector lines" header note.
 	render_branch_row(nodes) {
 		if (!nodes || !nodes.length) return '';
-		return `<div class="st-branch-row">${nodes.map(tn => this.render_subtree(tn)).join('')}</div>`;
+		const single = nodes.length === 1 ? ' is-single' : '';
+		return `<div class="st-branch-row${single}">${nodes.map(tn => this.render_subtree(tn)).join('')}</div>`;
 	}
 
 	// Renders one column: walks straight down through however many
 	// unbranched (single-child) steps come next, drawing one node per step,
 	// then — only if the chain genuinely forks — opens a nested branch row.
+	//
+	// Untraced branches render the DIAGNOSED reason from the backend
+	// (_diagnose_shortfall() in the .py) instead of a flat "Opening Stock"
+	// label: the resolved item name, and — when the backend found a nearby
+	// entry that just couldn't be used (wrong date / wrong warehouse) — a
+	// clickable link straight to that entry and its Stock Ledger Entry.
 	render_subtree(tn) {
 		if (tn.untraced) {
 			const b = tn.untraced;
+
+			// Short form: Stock Reconciliation / genuine Opening Stock —
+			// just the label + item code, no paragraph, no nearest-entry
+			// or SLE links.
+						// Short form: Stock Reconciliation / genuine Opening Stock —
+			// label + entry number (clickable, when one exists) + item
+			// code, no paragraph, no extra meta panel.
+			if (b.short && !b.skipped_valuation) {
+				const title = b.hint_entry ? __('Stock Reconciliation Entry') : __('Opening Stock');
+				const entryLine = b.hint_entry
+					? `<div class="st-node-s"><a class="st-node-meta-link st-doc-link" href="#" data-name="${frappe.utils.escape_html(b.hint_entry)}" data-doctype="${frappe.utils.escape_html(b.hint_entry_type || 'Stock Reconciliation')}">${frappe.utils.escape_html(b.hint_entry)}</a></div>`
+					: '';
+				return `
+					<div class="st-branch">
+						<div class="st-qty-label">${__('Qty')}: ${b.qty}</div>
+						<div class="st-node st-node-request" style="border-style:dashed; opacity:.85;">
+							<div class="st-node-inner">
+								<div class="st-node-t">${title}</div>
+								${entryLine}
+								<div class="st-node-s">${__('Item')}: ${frappe.utils.escape_html(b.item_name || '')}</div>
+							</div>
+						</div>
+					</div>`;
+			}
+
+			const hasHint = !b.skipped_valuation && b.hint_entry;
+			const title = b.skipped_valuation
+				? __('Non-FIFO Item — Skipped')
+				: (hasHint ? __('Nearby Entry Found — Not Usable') : __('Opening Stock'));
+
+			const lines = [];
+			if (!b.skipped_valuation && b.item_name) {
+				lines.push(`<div>${__('Item')}: ${frappe.utils.escape_html(b.item_name)}</div>`);
+			}
+			if (hasHint) {
+				lines.push(`<div>${__('Nearest Entry')}: <a class="st-node-meta-link st-doc-link" href="#" data-name="${frappe.utils.escape_html(b.hint_entry)}" data-doctype="${frappe.utils.escape_html(b.hint_entry_type || '')}">${frappe.utils.escape_html(b.hint_entry)}</a></div>`);
+				if (b.hint_sle) {
+					lines.push(`<div>${__('SLE')}: <a class="st-node-meta-link st-doc-link" href="#" data-name="${frappe.utils.escape_html(b.hint_sle)}" data-doctype="Stock Ledger Entry">${frappe.utils.escape_html(b.hint_sle)}</a></div>`);
+				}
+			}
+			const hintHTML = lines.length ? `<div class="st-node-meta">${lines.join('')}</div>` : '';
+
 			return `
 				<div class="st-branch">
 					<div class="st-qty-label">${__('Qty')}: ${b.qty} (${__('untraced')})</div>
-					<div class="st-node st-node-request" style="border-style:dashed; opacity:.7;">
-						<div class="st-node-t">${b.skipped_valuation ? __('Non-FIFO Item — Skipped') : __('Opening Stock')}</div>
-						<div class="st-node-s">${frappe.utils.escape_html(b.note || __('Untraced quantity'))}</div>
+					<div class="st-node st-node-request" style="border-style:dashed; opacity:.85;">
+						<div class="st-node-inner">
+							<div class="st-node-t">${title}</div>
+							<div class="st-node-s">${frappe.utils.escape_html(b.note || __('Untraced quantity'))}</div>
+						</div>
+						${hintHTML}
 					</div>
 				</div>`;
 		}
 
-		let chainHTML = '';
+				let chainHTML = '';
 		let cursor = tn;
 		let first = true;
 		while (cursor) {
 			if (!first) chainHTML += `<div class="st-connector"></div>`;
+			// Every node in the chain now gets its own "Qty: X" pill
+			// directly above its box — not just the first node in the
+			// branch. cursor.node.qty is already the pre-formatted
+			// "Qty: N" string from _node() in the .py, same source the
+			// old branch-level label used.
+			chainHTML += `<div class="st-qty-label">${frappe.utils.escape_html(cursor.node.qty)}</div>`;
 			chainHTML += this.node_html(cursor.node);
 			first = false;
 			if (cursor.children.length === 1) {
@@ -1092,15 +1327,26 @@ class StockTraceability {
 			}
 		}
 
-		let nestedHTML = '';
+				let nestedHTML = '';
 		if (cursor && cursor.children.length > 1) {
-			nestedHTML = `<div class="st-connector"></div>${this.render_branch_row(cursor.children)}`;
+			// Tagged separately from a plain .st-connector so
+			// align_tree_centers() can find and nudge exactly the
+			// connector that leads INTO a fork (not every connector).
+			nestedHTML = `<div class="st-connector st-connector-into-fork"></div>${this.render_branch_row(cursor.children)}`;
 		}
 
+		// Everything ABOVE a fork (qty label + stacked chain nodes) is
+		// wrapped in .st-branch-chain so it can be shifted as one rigid
+		// unit — see align_tree_centers(): when the fork below has
+		// unevenly-sized siblings, the fork's true visual center isn't
+		// the same as this column's own center, so the chain above it
+		// (and its connector) get nudged sideways after render to land
+		// exactly over the fork's real midpoint.
 		return `
 			<div class="st-branch">
-				<div class="st-qty-label">${frappe.utils.escape_html(tn.node.qty)}</div>
-				${chainHTML}
+				<div class="st-branch-chain">
+					${chainHTML}
+				</div>
 				${nestedHTML}
 			</div>`;
 	}
@@ -1108,34 +1354,54 @@ class StockTraceability {
 	render_report() {
 		const body = this.page.main.find('.st-report-body');
 		let rows = '';
-		let prevDN = null;
 
 		this.state.items.forEach(it => {
-			let firstRowOfItem = true;
-			(it.branches || []).forEach(b => {
-				// Only render the Delivery Note link on the FIRST row of a
-				// run of rows that share the same DN — every following row
-				// in that run gets a genuinely empty cell (not just a
-				// visually-hidden duplicate), so it can't overflow/wrap and
-				// clutter the column.
-				const isNewDN = prevDN !== it.dn;
-				prevDN = it.dn;
-				const dnCellHTML = isNewDN ? this.chip_link(it.dn, 'Delivery Note', 'dn') : '';
-				const dnCellClass = `st-dn-cell${isNewDN ? '' : ' st-dn-cell--continued'}`;
+			const branches = it.branches || [];
+			const leadItemCell = `${this.doc_link(it.code, 'Item')}<br><span class="st-muted">${frappe.utils.escape_html(it.name || '')}</span>`;
 
-				const itemCell = firstRowOfItem
-					? `${this.doc_link(it.code, 'Item')}<br><span class="st-muted">${frappe.utils.escape_html(it.name || '')}</span>`
+			if (!branches.length) {
+				rows += `<tr>
+					<td class="st-dn-cell">${this.chip_link(it.dn, 'Delivery Note', 'dn')}</td>
+					<td class="st-item-cell">${leadItemCell}</td>
+					<td>${it.delivered}</td>
+					<td class="st-muted" colspan="4">${__('No source data.')}</td>
+				</tr>`;
+				return;
+			}
+
+			// One row per branch (= per source document) exactly as before —
+			// so an item genuinely fed by 3, 4, or more separate source
+			// documents still gets that many rows. The DN / Item / Delivered
+			// Qty cells now span ALL of that item's rows via rowspan instead
+			// of being blanked out on continuation rows, so it's immediately
+			// visible that every row underneath belongs to the same item.
+			const rowspan = branches.length;
+
+			branches.forEach((b, i) => {
+				const leadCells = i === 0
+					? `<td class="st-dn-cell" rowspan="${rowspan}" style="vertical-align:middle;">${this.chip_link(it.dn, 'Delivery Note', 'dn')}</td>
+					   <td class="st-item-cell" rowspan="${rowspan}" style="vertical-align:middle;">${leadItemCell}</td>
+					   <td rowspan="${rowspan}" style="vertical-align:middle;"><b>${it.delivered}</b></td>`
 					: '';
-				firstRowOfItem = false;
 
 				if (b.untraced) {
-					const reason = b.skipped_valuation
-						? __('— {0}, not FIFO —', [it.valuationMethod || __('Non-FIFO')])
-						: __('— not traced —');
+					// Same diagnostic hint as the diagram (see render_subtree()):
+					// prefer a clickable link to the nearby-but-unusable entry
+					// over a flat "not traced" label whenever the backend found one.
+					let reason;
+					if (b.skipped_valuation) {
+						reason = __('— {0}, not FIFO —', [it.valuationMethod || __('Non-FIFO')]);
+					} else if (b.short) {
+						reason = b.hint_entry
+							? `${__('Stock Reconciliation')}: ${this.chip_link(b.hint_entry, b.hint_entry_type || 'Stock Reconciliation', 'src')}`
+							: __('Opening Stock');
+					} else if (b.hint_entry) {
+						reason = `${__('— nearest entry')}: ${this.chip_link(b.hint_entry, b.hint_entry_type, 'src')}`;
+					} else {
+						reason = __('— not traced (opening stock) —');
+					}
 					rows += `<tr>
-						<td class="${dnCellClass}">${dnCellHTML}</td>
-						<td class="st-item-cell">${itemCell}</td>
-						<td><span class="st-tag ${it.isFG ? 'st-tag-rm' : 'st-tag-direct'}">${it.isFG ? 'FG' : 'Direct'}</span></td>
+						${leadCells}
 						<td class="st-muted">${reason}</td>
 						<td>${b.qty}</td>
 						<td class="st-muted">—</td>
@@ -1144,12 +1410,19 @@ class StockTraceability {
 					return;
 				}
 
-				const component = it.isFG ? (b.rm || __('(Direct — same item)')) : __('(Direct — same item)');
+				// Component / Raw Material cell — always shows the component's
+				// OWN Item Code (clickable) + resolved Item Name. For a Direct
+				// item (delivered stock item consumed as-is, no RM breakdown)
+				// this mirrors the delivered item's own code/name rather than
+				// a flat "(Direct — same item)" string, per requirements.
+				const isRM = it.isFG && b.rm;
+				const componentCode = isRM ? b.rm : it.code;
+				const componentName = isRM ? (b.rm_name || '') : (it.name || '');
+				const componentCell = `${this.doc_link(componentCode, 'Item')}${componentName ? `<br><span class="st-muted">${frappe.utils.escape_html(componentName)}</span>` : ''}`;
+
 				rows += `<tr>
-					<td class="${dnCellClass}">${dnCellHTML}</td>
-					<td class="st-item-cell">${itemCell}</td>
-					<td><span class="st-tag ${it.isFG ? 'st-tag-rm' : 'st-tag-direct'}">${it.isFG ? 'FG' : 'Direct'}</span></td>
-					<td>${frappe.utils.escape_html(component)}</td>
+					${leadCells}
+					<td class="st-item-cell">${componentCell}</td>
 					<td>${b.qty}</td>
 					<td>${this.chip_link(b.src, null, 'src')}${b.via ? `<span class="st-via">${frappe.utils.escape_html(b.via)}</span>` : ''}</td>
 					<td>${this.chip_link(b.po, null, 'po')}</td>
@@ -1210,13 +1483,13 @@ class StockTraceability {
 			frappe.msgprint(__('Nothing to export yet.'));
 			return;
 		}
-		const header = ['AO Number', 'Delivery Note', 'Delivered Item', 'Type', 'Component/RM', 'Qty', 'Source Document', 'Purchase Order'];
+		const header = ['AO Number', 'Delivery Note', 'Delivered Item', 'Delivered Qty', 'Component/RM', 'Qty', 'Source Document', 'Purchase Order'];
 		const rows = [header];
 		this.state.items.forEach(it => {
 			(it.branches || []).forEach(b => {
 				rows.push([
-					it.ao || '', it.dn, it.code, it.isFG ? 'FG' : 'Direct',
-					b.untraced ? '' : (it.isFG ? (b.rm || 'Direct') : 'Direct'),
+					it.ao || '', it.dn, it.code, it.delivered,
+					b.untraced ? '' : (it.isFG ? (b.rm || it.code) : it.code),
 					b.qty, b.untraced ? '' : (b.src || ''), b.untraced ? '' : (b.po || '')
 				]);
 			});
@@ -1290,6 +1563,13 @@ const STOCK_TRACEABILITY_CSS = `
 	--st-primary: #6366f1;
 	--st-primary-dark: #4f46e5;
 
+	/* Dedicated connector-line colour — deliberately darker/higher-contrast
+	   than --st-border (which is far too light to read as a "line" against
+	   the canvas background). Used by every tree connector: root stem,
+	   fork elbow, and the vertical stack line inside a single branch. */
+	--st-line-color: #94a3b8;
+	--st-line-color-strong: #64748b;
+
 	--st-blue-bg: #eef1ff; --st-blue-border: #B9D0FF; --st-blue-text: #3B54DE;
 	--st-green-bg: #e3fbee; --st-green-border: #A9EFC7; --st-green-text: #1A9A5C;
 	--st-purple-bg: #f1ebfe; --st-purple-border: #D9C9FB; --st-purple-text: #7C3AED;
@@ -1335,6 +1615,10 @@ const STOCK_TRACEABILITY_CSS = `
 	--st-text: #f3f4f6;
 	--st-text-2: #cbd0dc;
 	--st-text-3: #8b8fa3;
+
+	/* Lighter, still clearly visible against the dark canvas. */
+	--st-line-color: #6b7280;
+	--st-line-color-strong: #9ca3af;
 
 	--st-blue-bg: #1c2340; --st-blue-border: #33407a; --st-blue-text: #93a5ff;
 	--st-green-bg: #103322; --st-green-border: #1f5c3c; --st-green-text: #4fd394;
@@ -1772,9 +2056,9 @@ const STOCK_TRACEABILITY_CSS = `
 .st-page[data-theme="dark"] .st-empty-state--untraced svg { color: #ff8f87; }
 .st-page[data-theme="dark"] .st-empty-state--untraced p { color: #ff9d95; }
 
-/* Diagram card — now a fully "boxed" card like the other panels (border +
-   background + shadow), instead of bare padding, so the whole flow
-   diagram + info bar + legend reads as one clearly framed unit. */
+/* Diagram card — a fully "boxed" card like the other panels (border +
+   background + shadow), so the whole flow diagram + info bar + legend
+   reads as one clearly framed unit. */
 .st-diagram-card {
 	position: relative;
 	min-height: 400px;
@@ -1820,10 +2104,10 @@ const STOCK_TRACEABILITY_CSS = `
 .st-pct-pill.zero { background: #fde3e3; color: #c0362c; }
 .st-page[data-theme="dark"] .st-pct-pill.zero { background: #4a1f1f; color: #ff8f87; }
 
-/* The flow chart itself now sits inside its own clearly bounded box —
-   a dashed frame with a faint tint — nested inside the outer diagram
-   card, so the node chain and the untraced/opening-stock callout both
-   read as "contained" rather than floating loose on white space. */
+/* The flow chart itself sits inside its own clearly bounded box — a
+   dashed frame with a faint tint — nested inside the outer diagram card,
+   so the node chain and the untraced/opening-stock callout both read as
+   "contained" rather than floating loose on white space. */
 .st-flow-canvas {
 	padding: 30px 16px 26px;
 	overflow-x: auto;
@@ -1846,19 +2130,140 @@ const STOCK_TRACEABILITY_CSS = `
 .st-root-node:hover { transform: translateY(-2px); box-shadow: 0 10px 22px rgba(36,144,239,.45); text-decoration: none; }
 .st-root-node .st-node-t { font-family: var(--st-font-display); font-weight: 800; font-size: 13.5px; letter-spacing: .1px; }
 .st-root-node .st-node-s { font-size: 11px; color: rgba(255,255,255,.85); margin-top: 2px; }
-.st-branch-row { display: flex; justify-content: center; gap: 60px; margin-top: 26px; flex-wrap: wrap; width: 100%; }
-.st-branch-row .st-branch-row { margin-top: 20px; gap: 40px; } /* nested branch point (a real fork deeper in the chain) */
-.st-branch { display: flex; flex-direction: column; align-items: center; } /* width comes from .st-node itself, so a branch that later re-forks can grow past 200px */
-.st-qty-label { font-size: 11px; color: var(--st-primary); font-weight: 700; margin: 4px 0 8px; background: var(--st-surface); padding: 0 4px; }
+
+/* Vertical stem connecting the root Delivery Note node down into the
+   branch row below it. Previously there was NO line at all here. */
+.st-root-stem {
+	width: 2px;
+	height: 26px;
+	margin: 0 auto;
+	background: var(--st-line-color-strong);
+}
+
+/* ------------------------------------------------------------------ */
+/* Tree connector lines (branch row + fork elbow)                      */
+/* ------------------------------------------------------------------ */
+/* .st-branch-row lays out one or more sibling columns (.st-branch). When
+   there's more than one sibling (a genuine fork — e.g. two Subcontracting
+   Receipts feeding the same item), each sibling gets:
+	 - a horizontal bar across the TOP half of its own column, clipped so
+	   the combined bars of every sibling in the row form one continuous
+	   line spanning from the center of the first sibling to the center
+	   of the last (the classic "org chart" elbow technique — pure CSS,
+	   no JS measurement needed);
+	 - a short vertical stem dropping from that bar down into its own
+	   node.
+   A single (unforked) branch skips the horizontal bar entirely (see
+   .is-single) and only keeps a short vertical lead-in stem, since there's
+   nothing to fork from. */
+.st-branch-row {
+	display: flex; justify-content: center; gap: 0; margin-top: 0; flex-wrap: nowrap; width: 100%;
+}
+
+.st-branch {
+	display: flex; flex-direction: column; align-items: center;
+	position: relative;
+	padding-top: 22px;
+	padding-left: 30px; padding-right: 30px;
+	flex: 0 0 auto;   /* never shrink below content+padding — spacing stays constant at every nesting depth */
+}
+
+.st-branch-chain {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+}
+
+/* Vertical stem — every branch gets one, dropping from the fork line (or,
+   for a single branch, standing in as the lead-in line from the row
+   above) down to the top of its own qty label / node. */
+.st-branch::before {
+	content: '';
+	position: absolute;
+	top: 0; left: 50%;
+	width: 2px; height: 22px;
+	background: var(--st-line-color-strong);
+	transform: translateX(-50%);
+}
+/* Horizontal fork bar — full width by default, then clipped per position
+   so the visible line only spans first-sibling-center to last-sibling-
+   center, never running off past the outer edges of the row. */
+.st-branch-row:not(.is-single) > .st-branch::after {
+	content: '';
+	position: absolute;
+	top: 0; left: 0; right: 0;
+	height: 2px;
+	background: var(--st-line-color);
+}
+.st-branch-row:not(.is-single) > .st-branch:first-child::after { left: 50%; }
+.st-branch-row:not(.is-single) > .st-branch:last-child::after { right: 50%; }
+.st-branch-row.is-single > .st-branch::after { display: none; }
+
+.st-qty-label {
+	font-size: 11px; color: var(--st-primary); font-weight: 700; margin: 0 0 8px;
+	background: var(--st-surface); padding: 0 6px; position: relative; z-index: 1;
+}
 .st-node {
 	display: block;
-	width: 200px; text-align: center; border-radius: 9px; padding: 9px 10px; font-size: 12px; border: 1px solid; margin-bottom: 6px; box-shadow: 0 1px 2px rgba(16,24,40,.05);
+	width: 200px; text-align: center; border-radius: 9px; padding: 0; font-size: 12px; border: 1px solid; margin-bottom: 6px; box-shadow: 0 1px 2px rgba(16,24,40,.05);
 	position: relative;
-	text-decoration: none;
+	overflow: hidden;
 }
+
+/* Real flex row (not absolute) so the browser actually reserves space for
+   the side box — this is what makes .st-branch's natural width grow to
+   include it, which (combined with flex:0 0 auto on .st-branch) pushes
+   the NEXT sibling column further right automatically. No more overlap. */
+.st-node-with-side {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	margin: 0 auto 6px;
+	width: fit-content;
+}
+.st-node-with-side .st-node { margin-bottom: 0; flex: 0 0 200px; }
+
+.st-node-side-connector {
+	position: relative;
+	flex: 0 0 30px;
+	height: 2px;
+	background: var(--st-line-color-strong);
+}
+.st-node-side-connector::after {
+	content: '';
+	position: absolute;
+	right: -1px; top: 50%;
+	width: 0; height: 0;
+	border-top: 4px solid transparent;
+	border-bottom: 4px solid transparent;
+	border-left: 6px solid var(--st-line-color-strong);
+	transform: translateY(-50%);
+}
+
+.st-node-side { margin-bottom: 0 !important; flex: 0 0 200px; }
+
+
+.st-node-inner { display: block; padding: 9px 10px; text-decoration: none; color: inherit; }
 .st-node-t { font-family: var(--st-font-display); font-weight: 700; font-size: 12.5px; letter-spacing: -.05px; }
 .st-node-s { font-size: 11px; color: var(--st-text-3); margin-top: 2px; }
-.st-connector { width: 1px; height: 16px; background: var(--st-border); margin: 0 auto 6px; }
+
+/* Connector line between stacked nodes WITHIN one branch (e.g. Purchase
+   Receipt -> Purchase Order). Made a clearly-visible solid line — darker
+   and thicker than the old 1px --st-border line, with a small filled
+   circle where it meets the node above it so the join reads as
+   deliberate rather than a stray hairline. */
+.st-connector {
+	width: 2px; height: 18px; margin: 0 auto 6px;
+	background: var(--st-line-color-strong);
+	position: relative;
+}
+.st-connector::before {
+	content: '';
+	position: absolute; top: -3px; left: 50%; transform: translateX(-50%);
+	width: 6px; height: 6px; border-radius: 50%;
+	background: var(--st-line-color-strong);
+}
+
 .st-node-doc { background: var(--st-fp-green-bg); border-color: var(--st-fp-green-border); color: var(--st-fp-green-text); }
 .st-node-order { background: var(--st-fp-purple-bg); border-color: var(--st-fp-purple-border); color: var(--st-fp-purple-text); }
 .st-node-request { background: var(--st-fp-orange-bg); border-color: var(--st-fp-orange-border); color: var(--st-fp-orange-text); }
@@ -1869,10 +2274,12 @@ const STOCK_TRACEABILITY_CSS = `
    obvious the node is a real, openable document and not just a label. */
 .st-node-clickable { cursor: pointer; }
 .st-node-clickable:hover {
-	transform: translateY(-2px);
-	box-shadow: 0 8px 18px rgba(16,24,40,.16);
 	text-decoration: none;
 	filter: brightness(0.98);
+}
+.st-node:has(.st-node-clickable:hover) {
+	transform: translateY(-2px);
+	box-shadow: 0 8px 18px rgba(16,24,40,.16);
 }
 .st-node-open {
 	position: absolute; top: 6px; right: 7px;
@@ -1882,6 +2289,26 @@ const STOCK_TRACEABILITY_CSS = `
 .st-node-clickable:hover .st-node-open,
 .st-root-node:hover .st-node-open-root { opacity: .65; }
 .st-node-open-root { color: #fff; }
+
+/* Meta panel — attached under a node (the "Raw Material Consumed"
+   subcontracting node, and the diagnostic hint on untraced nodes) showing
+   extra detail: source SLE, RM item code, RM qty vs main item qty. Kept
+   compact and plain-text where a link doesn't add real value (RM Item is
+   now a plain code label, not a link — see node_html()). Sits INSIDE the
+   same .st-node box, below the clickable inner surface, so it never
+   becomes part of the node's own click target. */
+.st-node-meta {
+	margin-top: 0; padding: 7px 10px 8px;
+	border-top: 1px dashed var(--st-line-color);
+	font-size: 10.5px; color: var(--st-text-3); text-align: left;
+	background: rgba(0,0,0,.015);
+}
+.st-page[data-theme="dark"] .st-node-meta { background: rgba(255,255,255,.03); }
+.st-node-meta > div { margin-bottom: 2px; }
+.st-node-meta > div:last-child { margin-bottom: 0; }
+.st-node-meta-link { color: var(--st-primary); font-weight: 700; text-decoration: none; }
+.st-node-meta-link:hover { text-decoration: underline; }
+.st-node-meta-code { color: var(--st-text-2); font-weight: 700; }
 
 /* Legend — boxed + centered, and each chip is a real clickable button that
    highlights matching nodes in the diagram (see apply_legend_filter()).
@@ -1919,6 +2346,20 @@ const STOCK_TRACEABILITY_CSS = `
 	border-color: rgba(36,144,239,.35);
 	color: var(--st-fp-blue-text);
 }
+
+.st-tree-wrap {
+	display: flex;
+	flex-direction: column;
+	align-items: center;   /* guarantees root node, stem, and branch row share one true center */
+	width: fit-content;
+	margin: 0 auto;
+}
+.st-tree-wrap .st-root-node { margin: 0; }      /* centering now comes from the wrap, not margin:auto */
+.st-tree-wrap .st-root-stem { margin: 0; }
+.st-tree-wrap .st-branch-row {
+	width: fit-content;   /* shrink to its actual columns so the fork bar's 50%/50% clip lines up exactly */
+}
+	
 .st-legend-all { font-weight: 800; border-color: var(--st-border) !important; }
 .st-legend-all.is-active { background: rgba(99,102,241,.12); border-color: rgba(99,102,241,.35) !important; color: var(--st-primary-dark); }
 .st-dot { width: 11px; height: 11px; border-radius: 3px; display: inline-block; flex-shrink: 0; }
@@ -1949,9 +2390,6 @@ const STOCK_TRACEABILITY_CSS = `
 .st-report-table { min-width: 900px; }
 .st-report-table td.st-item-cell { font-weight: 700; white-space: nowrap; }
 .st-report-table td.st-dim { color: transparent; user-select: none; }
-.st-tag { font-size: 11px; padding: 3px 9px; border-radius: 20px; font-weight: 700; white-space: nowrap; }
-.st-tag-direct { background: var(--st-bg); color: var(--st-text-3); }
-.st-tag-rm { background: rgba(99,102,241,.12); color: var(--st-primary-dark); }
 .st-src-link { color: var(--st-primary); font-weight: 700; text-decoration: none; }
 .st-src-link:hover { text-decoration: underline; }
 .st-via { font-size: 11px; color: var(--st-text-3); display: block; margin-top: 1px; }

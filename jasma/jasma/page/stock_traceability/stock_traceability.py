@@ -36,6 +36,76 @@
 #   (and the Period preset that used to gate it) has been removed entirely per
 #   requirements — the page now requires an explicit AO Number, Sales Order,
 #   or Delivery Note before it will trace anything.
+#
+# NOTE ON UNTRACED-QUANTITY DIAGNOSTICS:
+#   Previously, any shortfall in the backward scan was labelled generically
+#   as "Opening Stock, stock reconciliation, or negative stock" — even when
+#   an inward Stock Ledger Entry for that exact item/warehouse DID exist
+#   somewhere (just too late, or in a different warehouse). That was
+#   misleading: the UI would show "0% traced / Opening Stock" for an item
+#   that actually has a perfectly good source document, just one that
+#   couldn't be used for THIS particular delivery's timing/location.
+#
+#   _diagnose_shortfall() runs whenever a shortfall can't be covered by the
+#   bounded backward scan (and, as of this revision, also can't be covered
+#   by the cross-warehouse fallback below), and distinguishes three cases:
+#     1. An inward SLE for this item+warehouse exists, but it's dated AFTER
+#        the delivery being traced (so it legitimately can't be the source
+#        — most likely a data-entry / posting-date issue worth reviewing).
+#     2. An inward SLE for this item exists, but in a DIFFERENT warehouse
+#        (likely a missing/broken Material Transfer leg into the warehouse
+#        the delivery actually shipped from).
+#     3. Neither — genuine opening stock / stock reconciliation / negative
+#        stock, nothing to find anywhere.
+#   Every case now also carries the resolved Item name, and — for cases 1
+#   and 2 — the specific voucher (type + name) and SLE name that IS out
+#   there, so the frontend can render a clickable link straight to it
+#   instead of a dead end.
+#
+# NOTE ON THE "Case 0" SAME-WAREHOUSE EXCLUSION CHECK (this revision):
+#   A real case surfaced where an inward SLE existed for the EXACT same
+#   item_code + warehouse as the delivery, strictly before the delivery
+#   date (e.g. a Subcontracting Receipt posting 500 units into the same
+#   warehouse a Delivery Note later shipped 500 units from) — and the
+#   trace STILL reported it as untraced "Opening Stock". That is not a
+#   cross-warehouse problem (a same-warehouse, same-item match should
+#   always be found by stage1_backward_scan's own query), so an earlier
+#   "cross-warehouse fallback" fix here was reverted — it was solving a
+#   different, hypothetical scenario and did nothing for this actual bug.
+#
+#   _diagnose_shortfall() now runs a "Case 0" check FIRST: it re-queries the
+#   exact same item_code + warehouse, before the same date, with NO
+#   actual_qty/is_cancelled filter. If a row comes back:
+#     - and it fails actual_qty > 0 or is_cancelled = 0, the note says so
+#       explicitly — that pinpoints a data problem on that specific SLE
+#       (e.g. it's an outward move, or it's a cancelled entry) as the real
+#       cause, not a genuine untraced quantity.
+#     - and it looks otherwise valid (passes both filters), the note flags
+#       that stage1_backward_scan's own query SHOULD have matched it and
+#       didn't — meaning the mismatch is happening in the SQL comparison
+#       itself (most likely the warehouse value or the before-datetime
+#       cast), which needs investigating directly rather than guessed at
+#       here. Either way, this is surfaced distinctly from genuine Case 1 /
+#       Case 2 / Case 3 diagnoses so it's never confused with real opening
+#       stock or a real cross-warehouse gap.
+#
+# NOTE ON SUBCONTRACTING RM METADATA (this revision):
+#   resolve_subcontracting_receipt() attaches a `meta` block to the
+#   "Raw Material Consumed" node it builds for each Subcontracting Receipt
+#   Supplied Item row: the source SLE name, the RM item code, the RM qty
+#   actually consumed, and the equivalent finished-good qty it covers.
+#   Per updated requirements:
+#     - The node's own headline Qty (n.qty, e.g. "Qty: 3150.0") now shows
+#       the ACTUAL RM QTY CONSUMED — the same number as "RM Qty Consumed"
+#       in the meta panel below it — instead of a finished-good-equivalent
+#       number that could drift out of sync when a lot got traced across
+#       multiple downstream source documents (this used to show a
+#       leftover/partial number like 532.57 instead of the real 9450).
+#     - The meta panel's "RM Item" line now shows just the Item Code (no
+#       Item Name) — the frontend renders it as a plain, non-clickable
+#       label per updated requirements.
+#     - The "Ref" (Subcontracting Receipt Item reference row) line has
+#       been removed entirely — it added no value to the reader.
 
 import frappe
 from frappe.utils import flt, cstr
@@ -52,6 +122,13 @@ DEFAULT_FETCH_LIMIT = 20  # safety cap on how many DNs get traced in one go,
 # --------------------------------------------------------------------------- #
 
 def stage1_backward_scan(item_code, warehouse, target_qty, before_datetime):
+	"""Scan inward SLEs (actual_qty > 0) for item+warehouse, going backward from
+	before_datetime, accumulating lots until `target_qty` is covered. Bounded:
+	stops as soon as covered >= target_qty (never reads full history).
+
+	Returns (lots, covered) where lots is newest-first:
+	[{sle, qty, rate, voucher_type, voucher_no, posting_datetime}, ...]
+	"""
 	if flt(target_qty) <= EPSILON:
 		return [], 0.0
 
@@ -75,11 +152,12 @@ def stage1_backward_scan(item_code, warehouse, target_qty, before_datetime):
 	for r in rows:
 		remaining_needed = target_qty - covered
 		if remaining_needed <= EPSILON:
-			break
+			break  # bounded scan — stop early, matches Section 4 / Section 8 pseudocode
 		take = min(flt(r.actual_qty), remaining_needed)
 		lots.append(
 			{
-				"sle": r.name,                      # NEW — needed for clickable SLE refs
+				"sle": r.name,
+				"warehouse": warehouse,
 				"qty": take,
 				"rate": r.incoming_rate,
 				"voucher_type": r.voucher_type,
@@ -90,78 +168,6 @@ def stage1_backward_scan(item_code, warehouse, target_qty, before_datetime):
 		covered += take
 	return lots, covered
 
-def _diagnose_shortfall(item_code, warehouse, before_datetime):
-	"""When the backward scan can't cover the needed qty, work out WHY
-	instead of just labelling it "Opening Stock". Read-only — never changes
-	what's traced, only what's reported for the untraced remainder."""
-	item_name = frappe.db.get_value("Item", item_code, "item_name") or item_code
-
-	# Is there an inward SLE for this exact item+warehouse that's simply
-	# dated AFTER this delivery? (stock arrived, just too late to be the
-	# source — the most common cause of a "false" Opening Stock label.)
-	future_row = frappe.db.sql(
-		"""
-		select name, voucher_type, voucher_no,
-		       timestamp(posting_date, posting_time) as posting_datetime
-		from `tabStock Ledger Entry`
-		where item_code = %(item_code)s and warehouse = %(warehouse)s
-		  and actual_qty > 0 and is_cancelled = 0
-		  and timestamp(posting_date, posting_time) >= %(before)s
-		order by posting_date asc, posting_time asc limit 1
-		""",
-		{"item_code": item_code, "warehouse": warehouse, "before": before_datetime},
-		as_dict=True,
-	)
-	if future_row:
-		f = future_row[0]
-		return {
-			"item_name": item_name,
-			"hint_entry": f.voucher_no, "hint_entry_type": f.voucher_type, "hint_sle": f.name,
-			"note": (
-				f"No inward stock found before this date for {item_name} ({item_code}) in "
-				f"{warehouse}. Nearest inward entry is {f.voucher_type} {f.voucher_no} "
-				f"({f.posting_datetime}) — but it's dated AFTER this delivery, so it can't "
-				f"be the source. Check the posting dates."
-			),
-		}
-
-	# Is there an inward SLE for this item in a DIFFERENT warehouse before
-	# this date? (likely a missing/broken Material Transfer leg.)
-	other_wh_row = frappe.db.sql(
-		"""
-		select name, warehouse, voucher_type, voucher_no,
-		       timestamp(posting_date, posting_time) as posting_datetime
-		from `tabStock Ledger Entry`
-		where item_code = %(item_code)s and warehouse != %(warehouse)s
-		  and actual_qty > 0 and is_cancelled = 0
-		  and timestamp(posting_date, posting_time) < %(before)s
-		order by posting_date desc, posting_time desc limit 1
-		""",
-		{"item_code": item_code, "warehouse": warehouse, "before": before_datetime},
-		as_dict=True,
-	)
-	if other_wh_row:
-		o = other_wh_row[0]
-		return {
-			"item_name": item_name,
-			"hint_entry": o.voucher_no, "hint_entry_type": o.voucher_type, "hint_sle": o.name,
-			"note": (
-				f"No inward stock for {item_name} ({item_code}) in {warehouse} before this "
-				f"date. It WAS received into a different warehouse ({o.warehouse}) via "
-				f"{o.voucher_type} {o.voucher_no} — likely a missing Material Transfer "
-				f"into {warehouse}."
-			),
-		}
-
-	# Genuinely nothing anywhere — real opening stock / reconciliation.
-	return {
-		"item_name": item_name, "hint_entry": None, "hint_entry_type": None, "hint_sle": None,
-		"note": (
-			f"No inward Stock Ledger Entry exists anywhere for {item_name} ({item_code}) "
-			f"before this date — genuine opening stock, a stock reconciliation, or "
-			f"negative stock."
-		),
-	}
 
 def split_front(lots, front_qty):
 	"""Given newest-first lots, split off the most recent `front_qty` worth
@@ -184,13 +190,193 @@ def split_front(lots, front_qty):
 
 
 # --------------------------------------------------------------------------- #
+# Untraced-shortfall diagnostics (see module docstring note above)
+# --------------------------------------------------------------------------- #
+
+def _diagnose_shortfall(item_code, warehouse, before_datetime):
+	"""When the backward scan can't cover the needed qty, work out WHY
+	instead of just labelling it "Opening Stock". Read-only — never changes
+	what's traced, only what's reported for the untraced remainder.
+
+	Returns a dict:
+	{item_name, hint_entry, hint_entry_type, hint_sle, note, short}
+	`short` is True whenever the underlying entry is a Stock Reconciliation
+	(the standard way Opening Stock is recorded) or when no entry was found
+	anywhere — in both cases the frontend renders a minimal two-line note
+	("Opening Stock / Stock Reconciliation Entry" + item code) instead of
+	the full diagnostic paragraph, since there's nothing actionable to
+	investigate in either scenario.
+	"""
+	item_name = frappe.db.get_value("Item", item_code, "item_name") or item_code
+
+	def _short(hint_entry=None, hint_entry_type=None, hint_sle=None):
+		return {
+			"item_name": item_name,
+			"hint_entry": hint_entry,
+			"hint_entry_type": hint_entry_type,
+			"hint_sle": hint_sle,
+			"note": "Opening Stock / Stock Reconciliation Entry",
+			"short": True,
+		}
+
+	# Case 0: an inward SLE for this EXACT item + warehouse, before this
+	# date, DOES exist — but stage1_backward_scan() still didn't pick it up
+	# as a source (excluded by actual_qty<=0 / is_cancelled, or a query-
+	# level mismatch). Kept as the FULL diagnostic UNLESS the entry itself
+	# is a Stock Reconciliation — that's Opening Stock by definition, so it
+	# gets the short note instead.
+	exact_row = frappe.db.sql(
+		"""
+		select name, actual_qty, is_cancelled, voucher_type, voucher_no,
+		       timestamp(posting_date, posting_time) as posting_datetime
+		from `tabStock Ledger Entry`
+		where item_code = %(item_code)s and warehouse = %(warehouse)s
+		  and timestamp(posting_date, posting_time) < %(before)s
+		order by posting_date desc, posting_time desc
+		limit 1
+		""",
+		{"item_code": item_code, "warehouse": warehouse, "before": before_datetime},
+		as_dict=True,
+	)
+	if exact_row:
+		e = exact_row[0]
+		if e.voucher_type == "Stock Reconciliation":
+			return _short(e.voucher_no, e.voucher_type, e.name)
+
+		reasons = []
+		if flt(e.actual_qty) <= 0:
+			reasons.append(f"actual_qty is {e.actual_qty} (not > 0, so it isn't an inward entry)")
+		if e.is_cancelled:
+			reasons.append("is_cancelled = 1 on this entry")
+		if reasons:
+			return {
+				"item_name": item_name,
+				"hint_entry": e.voucher_no,
+				"hint_entry_type": e.voucher_type,
+				"hint_sle": e.name,
+				"note": (
+					f"An SLE for {item_name} ({item_code}) in {warehouse} before this date "
+					f"DOES exist — {e.voucher_type} {e.voucher_no} ({e.name}) — but it was "
+					f"excluded from tracing because: {'; '.join(reasons)}. This is a data "
+					f"issue on that specific entry, not a genuine untraced quantity — "
+					f"check it directly."
+				),
+				"short": False,
+			}
+		return {
+			"item_name": item_name,
+			"hint_entry": e.voucher_no,
+			"hint_entry_type": e.voucher_type,
+			"hint_sle": e.name,
+			"note": (
+				f"An SLE for {item_name} ({item_code}) in {warehouse} before this date "
+				f"DOES exist and looks valid ({e.voucher_type} {e.voucher_no}, {e.name}), "
+				f"but the backward scan still didn't pick it up. This points to a query- "
+				f"level mismatch (e.g. warehouse value formatting, or the before-datetime "
+				f"comparison) rather than a real untraced quantity — please report this "
+				f"exact case for investigation."
+			),
+			"short": False,
+		}
+
+	# Case 1: an inward SLE for this exact item+warehouse exists, but it's
+	# dated AFTER this delivery. Short-circuited to the short note if it's
+	# a Stock Reconciliation entry too.
+	future_row = frappe.db.sql(
+		"""
+		select name, voucher_type, voucher_no,
+		       timestamp(posting_date, posting_time) as posting_datetime
+		from `tabStock Ledger Entry`
+		where item_code = %(item_code)s and warehouse = %(warehouse)s
+		  and actual_qty > 0 and is_cancelled = 0
+		  and timestamp(posting_date, posting_time) >= %(before)s
+		order by posting_date asc, posting_time asc
+		limit 1
+		""",
+		{"item_code": item_code, "warehouse": warehouse, "before": before_datetime},
+		as_dict=True,
+	)
+	if future_row:
+		f = future_row[0]
+		if f.voucher_type == "Stock Reconciliation":
+			return _short(f.voucher_no, f.voucher_type, f.name)
+		return {
+			"item_name": item_name,
+			"hint_entry": f.voucher_no,
+			"hint_entry_type": f.voucher_type,
+			"hint_sle": f.name,
+			"note": (
+				f"No inward stock found before this date for {item_name} ({item_code}) in "
+				f"{warehouse}. Nearest inward entry is {f.voucher_type} {f.voucher_no} "
+				f"({f.posting_datetime}) — but it's dated AFTER this delivery, so it can't "
+				f"be the source. Check the posting dates."
+			),
+			"short": False,
+		}
+
+	# Case 2: an inward SLE for this item exists, but in a DIFFERENT
+	# warehouse before this date. Same Stock Reconciliation short-circuit.
+	other_wh_row = frappe.db.sql(
+		"""
+		select name, warehouse, voucher_type, voucher_no,
+		       timestamp(posting_date, posting_time) as posting_datetime
+		from `tabStock Ledger Entry`
+		where item_code = %(item_code)s and warehouse != %(warehouse)s
+		  and actual_qty > 0 and is_cancelled = 0
+		  and timestamp(posting_date, posting_time) < %(before)s
+		order by posting_date desc, posting_time desc
+		limit 1
+		""",
+		{"item_code": item_code, "warehouse": warehouse, "before": before_datetime},
+		as_dict=True,
+	)
+	if other_wh_row:
+		o = other_wh_row[0]
+		if o.voucher_type == "Stock Reconciliation":
+			return _short(o.voucher_no, o.voucher_type, o.name)
+		return {
+			"item_name": item_name,
+			"hint_entry": o.voucher_no,
+			"hint_entry_type": o.voucher_type,
+			"hint_sle": o.name,
+			"note": (
+				f"No inward stock for {item_name} ({item_code}) in {warehouse} before this "
+				f"date. It WAS received into a different warehouse ({o.warehouse}) via "
+				f"{o.voucher_type} {o.voucher_no} — likely a missing Material Transfer "
+				f"into {warehouse}."
+			),
+			"short": False,
+		}
+
+	# Case 3: genuinely nothing anywhere — this IS opening stock by
+	# definition, so it's always the short note.
+	return _short()
+
+
+def _untraced_branch(qty, item_code, warehouse, before_datetime):
+	"""Builds one untraced branch dict, populated with the diagnostic hint
+	from _diagnose_shortfall()."""
+	diag = _diagnose_shortfall(item_code, warehouse, before_datetime)
+	return {
+		"qty": qty,
+		"untraced": True,
+		"note": diag["note"],
+		"item_name": diag["item_name"],
+		"hint_entry": diag["hint_entry"],
+		"hint_entry_type": diag["hint_entry_type"],
+		"hint_sle": diag["hint_sle"],
+		"short": diag.get("short", False),
+	}
+
+
+# --------------------------------------------------------------------------- #
 # Stage 2 — Resolve each consumed lot to its source (Section 5)
 # --------------------------------------------------------------------------- #
 
 def build_branches(item_code, warehouse, qty, before_datetime, depth=0):
 	"""Full recursive trace for `qty` of `item_code` in `warehouse` as of
 	before_datetime. Returns a flat list of branch dicts:
-	{qty, chain:[{t,title,sub,qty}], src, po, rm?, via?, untraced?}
+	{qty, chain:[{t,title,sub,qty}], src, po, rm?, via?, untraced?, assumed?}
 	"""
 	if depth > MAX_DEPTH:
 		return [{"qty": qty, "untraced": True, "note": "Max trace depth reached"}]
@@ -202,15 +388,12 @@ def build_branches(item_code, warehouse, qty, before_datetime, depth=0):
 
 	shortfall = qty - covered
 	if shortfall > EPSILON:
-		# No earlier inward SLE found (opening stock / stock reconciliation /
-		# negative stock) — nothing further to trace for this portion.
-		branches.append({
-			"qty": shortfall,
-			"untraced": True,
-			"note": (
-				"Opening stock, stock reconciliation, or negative stock  no inward SLE found for this portion"
-			),
-		})
+		# No earlier inward SLE found in this exact warehouse (opening
+		# stock / stock reconciliation / negative stock) — or one exists
+		# but couldn't be used (see _diagnose_shortfall() for the exact
+		# reason surfaced to the UI, including the Case 0 same-warehouse
+		# exclusion check).
+		branches.append(_untraced_branch(shortfall, item_code, warehouse, before_datetime))
 	return branches
 
 
@@ -270,37 +453,128 @@ def resolve_purchase_receipt(lot, item_code, warehouse):
 _scr_order_field_cache = {}
 
 
+_scr_order_field_cache = {}
+
+
 def _scr_order_fieldname():
-	"""Different Frappe/ERPNext versions have used different fieldnames on
-	Subcontracting Receipt for the order it references (subcontracting_order
-	vs purchase_order, depending on version/flow). Resolve whichever one
-	actually exists on THIS site's doctype metadata instead of hard-coding
-	it, so this doesn't break again on a version bump."""
-	if "field" not in _scr_order_field_cache:
-		meta = frappe.get_meta("Subcontracting Receipt")
-		field = next(
-			(f for f in ("subcontracting_order", "purchase_order") if meta.has_field(f)),
+	"""Detects which fieldname(s) actually exist on this site for the
+	Subcontracting Order reference — checked on BOTH the parent
+	Subcontracting Receipt doctype and the child Subcontracting Receipt
+	Item doctype, since different Frappe/ERPNext versions (and different
+	subcontracting flows — with vs without an explicit Subcontracting
+	Order) put this reference in different places. Cached per-process."""
+	if "resolved" not in _scr_order_field_cache:
+		parent_meta = frappe.get_meta("Subcontracting Receipt")
+		child_meta = frappe.get_meta("Subcontracting Receipt Item")
+
+		parent_field = next(
+			(f for f in ("subcontracting_order", "purchase_order") if parent_meta.has_field(f)),
 			None,
 		)
-		_scr_order_field_cache["field"] = field
-	return _scr_order_field_cache["field"]
+		child_field = next(
+			(f for f in ("subcontracting_order", "purchase_order", "subcontracting_order_item")
+			 if child_meta.has_field(f)),
+			None,
+		)
+		_scr_order_field_cache["resolved"] = {"parent": parent_field, "child": child_field}
+	return _scr_order_field_cache["resolved"]
+
+
+def _get_scr_order_no(scr_name, item_code, parent_value):
+	"""Resolves the Subcontracting/Purchase Order linked to a specific
+	Subcontracting Receipt. Tries, in order:
+	  1. The value already fetched off the PARENT doc (if that field
+	     exists there and is populated).
+	  2. The same fieldname on the CHILD Subcontracting Receipt Item row
+	     for this specific item (covers sites/flows where the order
+	     reference is only stored per-line, not on the parent).
+	Returns None if neither location has a value — meaning this receipt
+	genuinely has no linked order, not a lookup bug."""
+	if parent_value:
+		return parent_value
+
+	fields = _scr_order_fieldname()
+	child_field = fields["child"]
+	if not child_field:
+		return None
+
+	return frappe.db.get_value(
+		"Subcontracting Receipt Item",
+		{"parent": scr_name, "item_code": item_code},
+		child_field,
+	)
 
 
 def resolve_subcontracting_receipt(lot, item_code, warehouse, depth):
 	"""Section 5.2 — FG side is terminal (resolve SO/PO); RM side continues
-	one level deeper via the supplied_items child table."""
-	order_field = _scr_order_fieldname()
-	fields = ["posting_date", "posting_time", "supplier_warehouse"]
-	if order_field:
-		fields.append(order_field)
+	one level deeper via the supplied_items child table.
 
-	scr = frappe.db.get_value("Subcontracting Receipt", lot["voucher_no"], fields, as_dict=True)
-	so_no = (scr and order_field and scr.get(order_field)) or None
+	Each RM branch carries a `meta` block on its "Raw Material Consumed"
+	node — the source SLE name, RM item code, the RM qty actually consumed,
+	and the equivalent finished-good qty it covers — so the frontend can
+	render a clickable, self-explanatory node instead of a bare label.
 
-	base_chain = [_node("doc", "Subcontracting Receipt", lot["voucher_no"], lot["qty"])]
+	The Subcontracting Receipt's own order reference (SR -> SO/PO) is now
+	rendered as a horizontal SIDE branch on the frontend (n.side), separate
+	from the vertical RM chain below it. Confirmed on this site that the
+	order reference lives on the CHILD Subcontracting Receipt Item row
+	(subcontracting_order / purchase_order) — NOT on the parent
+	Subcontracting Receipt doctype at all — so it's fetched per item_code
+	from the child table, same pattern as resolve_purchase_receipt() uses
+	for Purchase Receipt Item.purchase_order.
+
+	IMPORTANT: the node's own headline Qty (n.qty) is set to the ACTUAL RM
+	QTY CONSUMED (`rm_qty`) — the same number shown as "RM Qty Consumed" in
+	the meta panel — instead of a finished-good equivalent recomputed per
+	downstream branch. That FG-equivalent number used to drift (e.g.
+	showing 532.57 instead of the real 9450) whenever a single RM
+	consumption got traced across more than one downstream source
+	document, because each downstream branch recomputed its own partial
+	share. The RM Qty Consumed is a single, fixed fact about this
+	Subcontracting Receipt row and is the same for every downstream branch,
+	so it's now what both the headline Qty and the meta line show — no
+	inconsistency between the two.
+	"""
+	scr = frappe.db.get_value(
+		"Subcontracting Receipt",
+		lot["voucher_no"],
+		["posting_date", "posting_time", "supplier_warehouse"],
+		as_dict=True,
+	)
+
+	# The order reference lives on the CHILD Subcontracting Receipt Item
+	# row (subcontracting_order), NOT on the parent Subcontracting Receipt
+	# doctype — confirmed against this site's actual doctype fields.
+	# Falls back to purchase_order on the same child row for the older
+	# (pre-Subcontracting-Order) flow, if subcontracting_order is empty.
+	scr_item_order = frappe.db.get_value(
+		"Subcontracting Receipt Item",
+		{"parent": lot["voucher_no"], "item_code": item_code},
+		["subcontracting_order", "purchase_order"],
+		as_dict=True,
+	)
+
+	# Prefer the Purchase Order over the Subcontracting Order when both
+	# are populated — the side box should show "SR -> PO", not "SR -> SO",
+	# per requirements. so_label tracks which one was actually used so the
+	# node title/doctype match the real linked document.
+	so_no, so_label = None, None
+	if scr_item_order:
+		if scr_item_order.purchase_order:
+			so_no, so_label = scr_item_order.purchase_order, "Purchase Order"
+		elif scr_item_order.subcontracting_order:
+			so_no, so_label = scr_item_order.subcontracting_order, "Subcontracting Order"
+
+	scr_node = _node("doc", "Subcontracting Receipt", lot["voucher_no"], lot["qty"])
 	if so_no:
-		base_chain.append(_node("order", "Subcontracting Order", so_no, lot["qty"]))
-
+		# Rendered as a horizontal side-branch to the RIGHT of the
+		# Subcontracting Receipt box (SR -> its own PO) instead of
+		# stacked into the vertical chain — this is the SR's OWN order,
+		# not the Raw Material's Purchase Order that appears further
+		# down the chain (those are two different documents).
+		scr_node["side"] = _node("order", so_label, so_no, lot["qty"])
+	base_chain = [scr_node]
+ 
 	scr_item_row = frappe.db.get_value(
 		"Subcontracting Receipt Item",
 		{"parent": lot["voucher_no"], "item_code": item_code},
@@ -327,18 +601,25 @@ def resolve_subcontracting_receipt(lot, item_code, warehouse, depth):
 		rm_qty = flt(s.consumed_qty) * ratio
 		if rm_qty <= EPSILON or not subcontractor_wh:
 			continue
+
 		for rb in build_branches(s.rm_item_code, subcontractor_wh, rm_qty, before_dt, depth + 1):
-			rb_rm_qty = rb["qty"]
-			fg_qty = (rb_rm_qty / rm_qty) * lot["qty"] if rm_qty else 0
-			rb["qty"] = fg_qty
-			rb["chain"] = base_chain + [_node("warehouse", "Raw Material Consumed", s.rm_item_code, fg_qty)] + rb.get("chain", [])
+			# Headline Qty (n.qty) AND meta.rm_qty_consumed both show the
+			# same, fixed RM Qty Consumed figure — see docstring above.
+			rm_node = _node("warehouse", "Raw Material Consumed", s.rm_item_code, rm_qty)
+			rm_node["meta"] = {
+				"sle": lot.get("sle"),
+				"rm_item_code": s.rm_item_code,
+				"rm_qty_consumed": flt(rm_qty, 4),
+				"fg_qty_covered": flt(lot["qty"], 4),
+			}
+
+			rb["chain"] = base_chain + [rm_node] + rb.get("chain", [])
 			rb.setdefault("rm", s.rm_item_code)
 			branches.append(rb)
 
 	if not branches:
 		branches = [{"qty": lot["qty"], "chain": base_chain, "src": lot["voucher_no"], "po": so_no}]
 	return branches
-
 
 def resolve_stock_entry(lot, item_code, warehouse, depth):
 	"""Sections 5.3 / 5.4 / 5.5 — Stock Entry is a pass-through point."""
@@ -450,13 +731,10 @@ def trace_delivery_note_item(dn_name, item_code, warehouse):
 	consumed_sum = sum(b["qty"] for b in branches)
 	untraced_qty = consumed_qty - consumed_sum
 	if untraced_qty > EPSILON:
-		branches.append({
-			"qty": untraced_qty,
-			"untraced": True,
-			"note": (
-				"Opening stock"
-			),
-		})
+		# See module docstring note — this now carries the real reason
+		# (nearby-but-unusable entry / same-warehouse exclusion / genuine
+		# opening stock) instead of a flat "Opening Stock" label.
+		branches.append(_untraced_branch(untraced_qty, item_code, warehouse, before_dt))
 
 	return branches
 
@@ -702,8 +980,8 @@ def dn_query_for_project(doctype, txt, searchfield, start, page_len, filters):
 			"page_len": frappe.utils.cint(page_len) or 20,
 		},
 	)
- 
- 
+
+
 @frappe.whitelist()
 def dn_multiselect_query(txt=None, project=None, company=None, limit=20):
 	"""Powers the Delivery Note MultiSelectList's get_data() on the client.

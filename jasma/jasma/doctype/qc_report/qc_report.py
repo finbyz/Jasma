@@ -93,14 +93,26 @@ def get_nc_data(docname):
 				break
 
 	return data
-
-
 class QCReport(Document):
-        
+
 	def on_submit(self):
-		if flt(self.received_quantity) != (flt(self.accepted_quantity) + flt(self.rejected_quantity)):
-			frappe.throw("Received Quantity must be equal to Accepted Quantity + Rejected Quantity.")
-		if self.reference_item:
+		is_merged = self.reference_item and "," in self.reference_item
+
+		if not self.reference_item:
+			frappe.throw("Item Ref not found")
+
+		if is_merged:
+			frappe.msgprint(
+				"This QC Report covers multiple merged Purchase Receipt rows. "
+				"Please manually update the Accepted/Rejected quantities on the "
+				"relevant Purchase Receipt row(s).",
+				title="Manual PR Update Required",
+				indicator="orange"
+			)
+		else:
+			if flt(self.received_quantity) != (flt(self.accepted_quantity) + flt(self.rejected_quantity)):
+				frappe.throw("Received Quantity must be equal to Accepted Quantity + Rejected Quantity.")
+
 			doc = frappe.get_doc(self.reference_type, self.reference_name)
 
 			for row in doc.items:
@@ -109,10 +121,7 @@ class QCReport(Document):
 					row.qty = self.accepted_quantity
 
 			doc.save(ignore_permissions=True)
-		else:
-			frappe.throw("Item Ref not found")
-   
-   
+
 		if not self.qc_report_parameter:
 			return
 
@@ -125,7 +134,7 @@ class QCReport(Document):
 				frappe.throw(
 					f"Row #{row.idx}: Please select at least one checkbox (Jasma / Vendor / Third Party Report)."
 				)
-    
+
 		self.create_non_conformance()
 
 

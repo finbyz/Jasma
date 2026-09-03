@@ -2153,6 +2153,11 @@ def get_export_forecast_details(
 
     result = []
 
+    # UOM comes from the Item master for item_code, not from the Quotation Item row,
+    # so every row in the drill-down (direct or BOM-indirect) is shown in a single
+    # consistent unit.
+    item_uom = frappe.db.get_value("Item", item_code, "stock_uom") or ""
+
     # ── Build shared date filter clause (on Quotation.transaction_date) ────
     date_conditions: list[str] = []
     date_params: dict[str, Any] = {}
@@ -2176,7 +2181,6 @@ def get_export_forecast_details(
                 qi.parent AS quot_name,
                 qi.qty AS qty,
                 qi.ordered_qty AS ordered_qty,
-                qi.uom AS uom,
                 qtn.customer_name AS customer_name,
                 qtn.party_name AS party_name,
                 qtn.transaction_date AS transaction_date
@@ -2198,7 +2202,7 @@ def get_export_forecast_details(
                 "quot": q.get("quot_name"),
                 "party": q.get("customer_name") or q.get("party_name") or "—",
                 "qty": round(rem_qty, 2),
-                "uom": q.get("uom") or "",
+                "uom": item_uom,
                 "date": str(q.get("transaction_date") or "—"),
                 "via": "",
             })
@@ -2227,7 +2231,6 @@ def get_export_forecast_details(
                     qi.parent AS quot_name,
                     qi.qty AS qty,
                     qi.ordered_qty AS ordered_qty,
-                    qi.uom AS uom,
                     qtn.customer_name AS customer_name,
                     qtn.party_name AS party_name,
                     qtn.transaction_date AS transaction_date
@@ -2250,7 +2253,7 @@ def get_export_forecast_details(
                     "quot": q.get("quot_name"),
                     "party": q.get("customer_name") or q.get("party_name") or "—",
                     "qty": round(needed, 2),
-                    "uom": q.get("uom") or "",
+                    "uom": item_uom,
                     "date": str(q.get("transaction_date") or "—"),
                     "via": p_item,
                 })

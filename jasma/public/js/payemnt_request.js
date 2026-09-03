@@ -127,6 +127,14 @@ function build_dashboard_html(d) {
         ? frappe.datetime.str_to_user(d.outstanding_date)
         : '<span style="color:#98a2b3;font-weight:500;font-size:15px;">Not Set</span>';
 
+    const posting_date_html = d.posting_date
+    ? frappe.datetime.str_to_user(d.posting_date)
+    : '<span style="color:#98a2b3;font-weight:500;font-size:15px;">Not Set</span>';
+
+    const supplier_invoice_date_html = d.supplier_invoice_date
+        ? frappe.datetime.str_to_user(d.supplier_invoice_date)
+        : '<span style="color:#98a2b3;font-weight:500;font-size:15px;">Not Set</span>';
+
     const outstanding_days_html = d.outstanding_date
         ? `<span style="color:${outstanding_days_color};">${outstanding_days_label}</span>`
         : '<span style="color:#98a2b3;font-weight:500;font-size:15px;">—</span>';
@@ -257,8 +265,13 @@ function build_dashboard_html(d) {
             ${card(`General Ledger (${fy_label})`, "View Ledger →", PR_ICONS.ledger, "#0891b2", "pr-gl-card", gl_attrs)}
         </div>
         <div class="pr-info-dashboard pr-info-dashboard-row4">
+           
             ${card("Outstanding Date", outstanding_date_html, PR_ICONS.clock, "#64748b")}
             ${card("Outstanding Days", outstanding_days_html, PR_ICONS.alert, outstanding_days_color)}
+        </div>
+        <div class="pr-info-dashboard pr-info-dashboard-row4">
+            ${card("Posting Date", posting_date_html, PR_ICONS.invoice, "#6366f1")}
+            ${card("Supplier Invoice Date", supplier_invoice_date_html, PR_ICONS.invoice, "#0891b2")}
         </div>
     `;
 }

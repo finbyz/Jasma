@@ -52,6 +52,7 @@ function make_qc_report(frm) {
 
 	const dialog = new frappe.ui.Dialog({
 		title: __("Select Items for QC Report"),
+		size: "extra-large",
 		fields: [
 			{
 				label: "Items",
@@ -90,6 +91,22 @@ function make_qc_report(frm) {
 						fieldname: "received_quantity",
 						label: __("Received Quantity"),
 						in_list_view: true
+					},
+										{
+						// Editable - user can override, especially important
+						// when two rows for the same item_code were merged
+						fieldtype: "Float",
+						fieldname: "accepted_quantity",
+						label: __("Accepted Quantity"),
+						in_list_view: true
+					},
+					{
+						// Editable - user can override, especially important
+						// when two rows for the same item_code were merged
+						fieldtype: "Float",
+						fieldname: "rejected_quantity",
+						label: __("Rejected Quantity"),
+						in_list_view: true
 					}
 				]
 			}
@@ -100,6 +117,28 @@ function make_qc_report(frm) {
 			if (!selected.length) {
 				selected = dialog.get_values().items;
 			}
+
+			// Validate that accepted + rejected = received for every row
+			// the user is submitting, so merged-row splits are always consistent.
+			let mismatched = selected.filter((row) => {
+				let accepted = flt(row.accepted_quantity);
+				let rejected = flt(row.rejected_quantity);
+				let received = flt(row.received_quantity);
+				return Math.abs(accepted + rejected - received) > 0.0001;
+			});
+
+			if (mismatched.length) {
+				frappe.msgprint({
+					title: __("Quantity Mismatch"),
+					indicator: "red",
+					message: __(
+						"Accepted Quantity + Rejected Quantity must equal Received Quantity for: {0}",
+						[mismatched.map((d) => d.item_code).join(", ")]
+					)
+				});
+				return;
+			}
+
 
 			frappe.call({
 				method: "jasma.jasma.doc_events.subcontracting_reciept.make_qc_report",
@@ -126,31 +165,50 @@ function make_qc_report(frm) {
 		args: {
 			doctype: "QC Report",
 			filters: {
-				reference_type: frm.doc.name
+				reference_type: "Subcontracting Receipt",
+				reference_name: frm.doc.name
 			},
 			fields: ["item"]
 		},
 		callback: function (r) {
 			let existing_items = r.message.map(d => d.item);
+			let item_map = {};
 
 			frm.doc.items.forEach(item => {
-				if (!existing_items.includes(item.item_code)) {
-					dialog.fields_dict.items.df.data.push({
+				if (existing_items.includes(item.item_code)) {
+					return;
+				}
+
+				if (item_map[item.item_code]) {
+					item_map[item.item_code].received_quantity += item.received_qty;
+					item_map[item.item_code].accepted_quantity += item.received_qty;
+					item_map[item.item_code]._docnames.push(item.name);
+					item_map[item.item_code].docname = item_map[item.item_code]._docnames.join(", ");
+				} else {
+					item_map[item.item_code] = {
 						docname: item.name,
+						_docnames: [item.name],
 						item_code: item.item_code,
 						item_name: item.item_name,
 						item_group: item.item_group,
-						received_quantity : item.received_qty,
-						purchase_order : item.purchase_order,
-						subcontracting_order : item.subcontracting_order,
-						project : frm.doc.project
-					});
+						received_quantity: item.received_qty,
+						accepted_quantity: item.received_qty,
+						rejected_quantity: 0,
+						purchase_order: item.purchase_order,
+						subcontracting_order: frm.doc.subcontracting_order,
+						project: frm.doc.project
+					};
 				}
 			});
 
+			// ← the missing step: push the aggregated rows into `data`,
+			// which is what the dialog's grid actually reads from.
+			data.length = 0;
+			data.push(...Object.values(item_map));
+
 			dialog.fields_dict.items.grid.refresh();
 
-			if (!dialog.fields_dict.items.df.data.length) {
+			if (!data.length) {
 				frappe.msgprint(__("QC Report already generated for all items."));
 			} else {
 				dialog.show();
