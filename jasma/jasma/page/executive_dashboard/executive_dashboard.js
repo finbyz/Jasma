@@ -274,6 +274,7 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
         window.openReceiptPendingModal = openReceiptPendingModal;
         window.openPendingDeliveryModal = openPendingDeliveryModal;
         window.openTreasuryLedger = openTreasuryLedger;
+        window.openSalesFromGLLedger = openSalesFromGLLedger;
         window.openReceivablesReport = openReceivablesReport;
         window.openSalesInvoiceList = openSalesInvoiceList;
         window.openSalesOrderList = openSalesOrderList;
@@ -410,8 +411,12 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                 <div class="exd-bento-span-6 exd-card exd-card-sales exd-card-blob exd-anim" style="--delay:1;">
                     <div class="exd-card-sales-dual">
                         <div class="exd-card-sales-half">
-                            <div class="exd-card-label">${iconSvg("cart")} TOTAL SALES</div>
+                            <div class="exd-card-label">${iconSvg("cart")} TOTAL INVOICES SALES </div>
                             <div class="exd-card-value-large is-clickable" style="cursor:pointer; display:inline-block;" onclick="openSalesInvoiceList()" title="Click to view Sales Invoices">${getVal(d.total_sales, "net_total_fmt", "₹ 0")}</div>
+                        </div>
+                        <div class="exd-card-sales-half">
+                            <div class="exd-card-label">${iconSvg("bank")} TOTAL SALES FROM GL</div>
+                            <div class="exd-card-value-large is-clickable" style="cursor:pointer; display:inline-block;" onclick="openSalesFromGLLedger()" title="Click to view General Ledger (Sales accounts)">${getVal(d.total_sales_from_gl, "closing_balance_fmt", "₹ 0")}</div>
                         </div>
                         <div class="exd-card-sales-half">
                             <div class="exd-card-label">${iconSvg("box")} TOTAL ORDER</div>
@@ -653,14 +658,19 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
         return items.map(item => {
             const pct = Math.max(0, Math.min(100, item.percentage || 0));
             const color = taxClaimColor(pct, item.claimed);
-            const tooltip = `Debit: ${item.total_fmt || '₹ 0'} | Credit: ${item.received_fmt || '₹ 0'} | Balance: ${item.balance_fmt || '₹ 0'} | Pending: ${item.pending_fmt || '₹ 0'}`;
+            // Same wording, same order, in both the header and the tooltip -
+            // Claimed/Received (business terms) instead of Debit/Credit
+            // (accounting terms), and Balance+Pending merged into one
+            // "Total Pending" figure since they're the same amount whenever
+            // anything is still outstanding.
+            const nums = `Claimed ${item.total_fmt || '₹ 0'} / Received ${item.received_fmt || '₹ 0'} / Total Pending ${item.pending_fmt || '₹ 0'}`;
             return `
                 <div class="exd-tax-item is-clickable" onclick="openTaxClaimsReport('${item.key}')" title="Click to view General Ledger for ${item.label}">
                     <div class="exd-tax-head">
                         <span class="exd-tax-title">${item.label} (${pct}%)</span>
-                        <span class="exd-tax-nums">Credit ${item.received_fmt || '₹ 0'} / Debit ${item.total_fmt || '₹ 0'}</span>
+                        <span class="exd-tax-nums">${nums}</span>
                     </div>
-                    <div class="exd-tax-track" data-tooltip="${tooltip}">
+                    <div class="exd-tax-track" data-tooltip="${nums}">
                         <div class="exd-tax-fill" style="width:${pct}%; background:${color};"></div>
                     </div>
                 </div>
@@ -858,9 +868,9 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
                 <div class="exd-leaderboard-list">
                     ${hasItems
                         ? items.map((item, i) => `
-                            <div class="exd-leaderboard-item">
+                            <div class="exd-leaderboard-item${fullWidth ? ' exd-leaderboard-item-wide' : ''}">
                                 <div class="exd-leaderboard-rank">${i + 1}</div>
-                                <div class="exd-leaderboard-info">
+                                <div class="exd-leaderboard-info${fullWidth ? ' exd-leaderboard-info-wide' : ''}">
                                     ${renderLeaderboardItem(item, config.key, toggle ? state[toggle.stateKey] : null)}
                                 </div>
                             </div>
@@ -1192,6 +1202,31 @@ frappe.pages["executive-dashboard"].on_page_load = function (wrapper) {
     }
     frappe.set_route("query-report", "General Ledger");
 }
+
+    // Opens the General Ledger report filtered to the Sales/Income
+    // account(s) used by get_total_sales_from_gl(), with the same
+    // date range and company filter currently applied on the dashboard -
+    // so the report's own "Closing (Opening + Total)" row for those
+    // accounts matches the "TOTAL SALES FROM GL" figure on the card.
+    function openSalesFromGLLedger() {
+        const glData = (state.data && state.data.total_sales_from_gl) || {};
+        const accounts = glData.accounts || [];
+
+        if (!accounts.length) {
+            frappe.msgprint("No Sales/Income accounts found for the selected filters.");
+            return;
+        }
+
+        frappe.route_options = {
+            from_date: glData.from_date,
+            to_date: glData.to_date,
+            account: accounts,
+        };
+        if (state.filters.company) {
+            frappe.route_options.company = state.filters.company;
+        }
+        frappe.set_route("query-report", "General Ledger");
+    }
 
     function openSalesInvoiceList() {
         const ts = (state.data && state.data.total_sales) || {};
@@ -2091,7 +2126,7 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
 
 /* Item Group select: same height as Qty Wise/Amount Wise, but a bit wider
    since Item Group names tend to run longer - keeps them readable instead
-   of being ellipsis-truncated into something unrecognisable. */
+   of being ellipsis-truncated. */
 .exd-card-item-group-select {
     width: 172px;
 }
@@ -2099,29 +2134,83 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
 /* CODE / ITEM / QTY / AMOUNT column layout for Top Selling & Top Purchase -
    Item Code is shown, so the Item name column is narrowed and the Qty and
    Amount columns are widened to compensate. */
+/* Wide leaderboard rows (Top Selling / Top Purchase): CODE / ITEM / QTY / AMOUNT
+   all use fixed flex-basis columns with a shared gap, so the header row and
+   every data row line up column-for-column no matter how long the code or
+   item name is. Code and Item are allowed to wrap to 2 lines instead of
+   being ellipsis-truncated. */
+.exd-leaderboard-item-wide {
+    gap: 12px;
+    align-items: flex-start;
+}
+.exd-leaderboard-item-wide .exd-leaderboard-rank {
+    margin-top: 2px;
+}
+.exd-leaderboard-info-wide {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    width: 100%;
+}
+
 .exd-col-code {
-    min-width: 200px;
+    flex: 0 0 190px;
     max-width: 200px;
-     flex-shrink: 0;
     font-weight: 700;
     color: var(--exd-text-3);
-    font-size: 12.5px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    font-size: 12px;
+    line-height: 1.35;
+    white-space: normal;
+    word-break: break-word;
 }
+    
 .exd-col-name-narrow {
-    flex: 0 1 28%;
+    flex: 1 1 auto;
     min-width: 0;
+    font-weight: 600;
+    color: var(--exd-text);
+    font-size: 14px;
+    line-height: 1.35;
+    white-space: normal;
     overflow: hidden;
-    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+}
+.exd-col-qty-wide {
+    flex: 0 0 90px;
+    text-align: right;
     white-space: nowrap;
 }
-.exd-col-wide {
-    min-width: 96px;
+.exd-col-amount-wide {
+    flex: 0 0 108px;
+    text-align: right;
+    white-space: nowrap;
 }
-.exd-leaderboard-value.exd-col-wide {
-    margin-left: 18px;
+
+.exd-leaderboard-colhead-wide {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0 2px;
+    margin-top: 4px;
+}
+.exd-leaderboard-colhead-wide > span:first-child {
+    width: 20px;
+    flex-shrink: 0;
+}
+.exd-leaderboard-colhead-wide .exd-col-code,
+.exd-leaderboard-colhead-wide .exd-col-name-narrow,
+.exd-leaderboard-colhead-wide .exd-col-qty-wide,
+.exd-leaderboard-colhead-wide .exd-col-amount-wide {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--exd-text-3);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+    -webkit-line-clamp: unset;
+    display: block;
 }
 
 /* Column header row above a leaderboard list (e.g. Stock Items) */
@@ -2193,8 +2282,8 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
 }
 .exd-card-sales-dual {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 18px;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 16px;
 }
 .exd-card-sales-half {
     display: flex;
@@ -2202,7 +2291,7 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     min-width: 0;
 }
 .exd-card-value-large {
-    font-size: 44px;
+    font-size: 36px;
     font-weight: 900;
     line-height: 1.05;
     letter-spacing: -0.5px;
@@ -2211,6 +2300,9 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
     background-clip: text;
     -webkit-text-fill-color: transparent;
     color: var(--exd-text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .exd-card-sales-sub {
     display: inline-flex;
@@ -2401,10 +2493,17 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
 /* TAX CLAIMS progress bars */
 .exd-tax-head {
     display: flex;
-    justify-content: space-between;
-    align-items: baseline;
+    flex-direction: column;
+    gap: 3px;
     margin-bottom: 7px;
 }
+.exd-tax-nums {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
 .exd-tax-title {
     font-size: 13px;
     font-weight: 800;
@@ -3164,12 +3263,12 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
 .exd-donut-center { width: 108px; padding: 0 10px; }
 .exd-donut-total { font-size: 17px; }
 .exd-donut-total.is-long { font-size: 14px; }
-}
+    .exd-card-sales-dual { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width:768px) {
     .exd-shell { padding:8px 12px; }
     .exd-card { padding:12px 14px; }
-    .exd-card-value-large { font-size:27px; }
+    .exd-card-value-large { font-size:24px; }
     .exd-card-stats { grid-template-columns:1fr 1fr; }
     .exd-pipeline { grid-template-columns:1fr; gap:12px; }
     .exd-pipeline-connector { display:none; }
@@ -3185,6 +3284,7 @@ body.exd-calendar-dark .datepicker--button:hover { background: #262a45; }
 .exd-donut-total { font-size: 15px; }
 .exd-donut-total.is-long { font-size: 13px; }
 .exd-donut-label { font-size: 9px; }
+    .exd-card-sales-dual { grid-template-columns: 1fr; gap: 12px; }
 }
 </style>`);
     }

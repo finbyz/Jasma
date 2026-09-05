@@ -145,6 +145,16 @@
 //   column always shows the component's own Item Code (as a clickable
 //   link) AND its resolved Item Name — for a Direct item (no RM) this
 //   mirrors the delivered item's own code/name.
+//
+// IMPORTANT — Traced Qty column removed (this revision):
+//   The "Traced Qty" column has been removed from the Items Summary table
+//   (and the pct badge dropped from the item list cards and the diagram
+//   toolbar). The Items Summary table now has 8 columns instead of 9, and
+//   all colspans referencing it have been updated to match. The diagram
+//   toolbar no longer shows a separate DN / Item / Traced breakdown —
+//   Delivery Note, Item Code and Item Name are combined onto one line
+//   (name wraps to a second line if long), with Delivered Qty kept on its
+//   own line to the right, top-aligned with that first line.
 
 frappe.pages['stock-traceability'].on_page_load = function (wrapper) {
 	var page = frappe.ui.make_app_page({
@@ -695,7 +705,7 @@ class StockTraceability {
 	render_selection_required() {
 		const msg = __('Select an AO Number, Sales Order, or Delivery Note to view traceability.');
 		this.page.main.find('.st-summary-body').html(
-			`<tr><td colspan="9"><div class="st-select-prompt">${this.icon('info', 15)} ${msg}</div></td></tr>`
+			`<tr><td colspan="8"><div class="st-select-prompt">${this.icon('info', 15)} ${msg}</div></td></tr>`
 		);
 		this.page.main.find('.st-item-list').html(
 			`<div class="st-empty-state st-empty-state--prompt">${this.icon('filter', 26)}<p>${msg}</p></div>`
@@ -703,7 +713,7 @@ class StockTraceability {
 		this.page.main.find('.st-flow-canvas').html(
 			`<div class="st-empty-state st-empty-state--prompt">${this.icon('filter', 26)}<p>${msg}</p></div>`
 		);
-		this.page.main.find('.st-diag-dn, .st-diag-item, .st-diag-delivered, .st-diag-traced').text('-');
+		this.page.main.find('.st-diag-dn-item, .st-diag-delivered').text('-');
 		this.page.main.find('.st-report-body').html(
 			`<tr><td colspan="7"><div class="st-select-prompt">${this.icon('info', 15)} ${msg}</div></td></tr>`
 		);
@@ -773,11 +783,11 @@ class StockTraceability {
 							<tr>
 								<th>#</th><th>${__('AO Number')}</th><th>${__('Delivery Note')}</th><th>${__('Item Code')}</th><th>${__('Item Name')}</th>
 								<th>${__('Item Group')}</th><th>${__('UOM')}</th>
-								<th>${__('Delivered Qty')}</th><th>${__('Traced Qty')}</th>
+								<th class="st-col-end">${__('Delivered Qty')}</th>
 							</tr>
 						</thead>
 						<tbody class="st-summary-body">
-							<tr><td colspan="9" class="st-muted">${__('Loading...')}</td></tr>
+							<tr><td colspan="8" class="st-muted">${__('Loading...')}</td></tr>
 						</tbody>
 					</table>
 					</div>
@@ -794,11 +804,9 @@ class StockTraceability {
 
 					<div class="st-diagram-card st-anim" style="--delay:3;">
 						<div class="st-diagram-toolbar">
-							<div class="st-diagram-info">
-								<span><span class="st-info-label">${__('DN')}</span><b class="st-diag-dn">-</b></span>
-								<span><span class="st-info-label">${__('Item')}</span><b class="st-diag-item">-</b></span>
-								<span><span class="st-info-label">${__('Delivered')}</span><b class="st-diag-delivered">-</b></span>
-								<span><span class="st-info-label">${__('Traced')}</span><b class="st-diag-traced">-</b></span>
+							<div class="st-diagram-info-row">
+								<div class="st-diag-dn-item">-</div>
+								<div class="st-diag-delivered-inline"><span class="st-info-label">${__('Delivered')}</span> <b class="st-diag-delivered">-</b></div>
 							</div>
 						</div>
 						<div class="st-flow-canvas"></div>
@@ -843,7 +851,7 @@ class StockTraceability {
 								<th style="width:14%;">${__('Delivery Note')}</th>
 								<th style="width:18%;">${__('Delivered Item')}</th>
 								<th style="width:9%;">${__('Delivered Qty')}</th>
-								<th style="width:21%;">${__('Component / Raw Material')}</th>
+								<th style="width:21%;">${__('Component /<br> Raw Material')}</th>
 								<th style="width:8%;">${__('Qty')}</th>
 								<th style="width:15%;">${__('Source Document')}</th>
 								<th style="width:15%;">${__('Purchase / Sub. Order')}</th>
@@ -938,15 +946,6 @@ class StockTraceability {
 	/* rendering                                                          */
 	/* ---------------------------------------------------------------- */
 
-	pct_badge(it) {
-		if (it.isFifo === false) {
-			return { pct: null, cls: 'skipped', label: __('{0} (not traced)', [it.valuationMethod || __('Non-FIFO')]) };
-		}
-		const pct = it.delivered ? (it.traced / it.delivered * 100) : 0;
-		const cls = pct >= 99.995 ? 'full' : (pct <= 0.005 ? 'zero' : 'partial');
-		return { pct: pct.toFixed(2), cls, label: `${it.traced} (${pct.toFixed(2)}%)` };
-	}
-
 	render_summary_and_list() {
 		const body = this.page.main.find('.st-summary-body');
 		const list = this.page.main.find('.st-item-list');
@@ -954,13 +953,12 @@ class StockTraceability {
 		list.empty();
 
 		if (!this.state.items.length) {
-			body.html(`<tr><td colspan="9" class="st-muted">${__('No delivered items found.')}</td></tr>`);
+			body.html(`<tr><td colspan="8" class="st-muted">${__('No delivered items found.')}</td></tr>`);
 			list.html(`<div class="st-empty-state">${this.icon('inbox', 22)}<p>${__('No delivered items found for the selected filters.')}</p></div>`);
 			return;
 		}
 
 		this.state.items.forEach((it, i) => {
-			const { cls, label } = this.pct_badge(it);
 			body.append(`
 				<tr class="st-selectable-row ${i === this.state.activeIdx ? 'is-active' : ''}" data-idx="${i}">
 					<td>${i + 1}</td>
@@ -970,22 +968,19 @@ class StockTraceability {
 					<td>${frappe.utils.escape_html(it.name || '')}</td>
 					<td>${frappe.utils.escape_html(it.group || '')}</td>
 					<td>${frappe.utils.escape_html(it.uom || '')}</td>
-					<td>${it.delivered}</td>
-					<td><span class="st-pct-pill ${cls}">${label}</span></td>
+					<td class="st-col-end">${it.delivered}</td>
 				</tr>`);
 
-			const untraced = flt(it.delivered - it.traced, 2);
 			const row2 = it.isFifo === false
 				? `<span class="st-muted">${__('Valuation')}: ${frappe.utils.escape_html(it.valuationMethod || '')} — ${__('tracing not applicable')}</span>`
-				: `<span>${__('Traced')}: ${it.traced} &nbsp;|&nbsp; ${__('Untraced')}: ${untraced}</span>`;
+				: '';
 			list.append(`
 				<div class="st-item-card ${i === this.state.activeIdx ? 'is-active' : ''}" data-idx="${i}">
 					<div class="st-item-row1"><span class="st-item-code">${frappe.utils.escape_html(it.code)}</span>
 						<span class="st-item-delivered">${__('Delivered')}&nbsp;<b>${it.delivered}</b></span></div>
 					<div class="st-item-name">${frappe.utils.escape_html(it.name || '')} <span class="st-muted">(${frappe.utils.escape_html(it.dn)})</span></div>
 					${it.ao ? `<div class="st-item-ao">${this.chip_link(it.ao, 'Project', 'ao')}</div>` : ''}
-					<div class="st-item-row2">${row2}
-						<span class="st-badge-pct ${cls}">${cls === 'skipped' ? __('N/A') : label.split(' ').pop()}</span></div>
+					${row2 ? `<div class="st-item-row2">${row2}</div>` : ''}
 				</div>`);
 		});
 	}
@@ -1093,22 +1088,20 @@ class StockTraceability {
 		const it = this.state.items[this.state.activeIdx];
 		if (!it) {
 			canvas.html(`<div class="st-empty-state">${this.icon('inbox', 22)}<p>${__('No item selected.')}</p></div>`);
-			this.page.main.find('.st-diag-dn, .st-diag-item, .st-diag-delivered, .st-diag-traced').text('-');
+			this.page.main.find('.st-diag-dn-item, .st-diag-delivered').text('-');
 			return;
 		}
 
-		const { cls, label } = this.pct_badge(it);
-		// DN + Item are now real document links (same st-doc-link mechanism
-		// as everywhere else), and Traced is a colored pill — green when
-		// fully traced, amber when partial, red when 0%/untraced — so the
-		// header reads at a glance instead of being flat black text.
-		this.page.main.find('.st-diag-dn').html(this.chip_link(it.dn, 'Delivery Note', 'dn'));
+		// DN, Item Code, Item Name and Delivered Qty all sit on ONE single
+		// row, left-aligned starting from DN, with minimal spacing between
+		// them. The row never wraps — if the item name is too long the line
+		// truncates with an ellipsis rather than dropping to a second line,
+		// so Delivered Qty always stays visible on the right of that same row.
 		const itemNameSafe = frappe.utils.escape_html(it.name || '');
-		this.page.main.find('.st-diag-item').html(
-			`<span class="st-diag-item-line" title="${itemNameSafe}">${this.doc_link(it.code, 'Item')}<span class="st-diag-item-name">${it.name ? ' — ' + itemNameSafe : ''}</span></span>`
+		this.page.main.find('.st-diag-dn-item').html(
+			`${this.chip_link(it.dn, 'Delivery Note', 'dn')}<span class="st-diag-sep"></span>${this.doc_link(it.code, 'Item')}${it.name ? ' — <span class="st-diag-item-name">' + itemNameSafe + '</span>' : ''}`
 		);
 		this.page.main.find('.st-diag-delivered').text(it.delivered);
-		this.page.main.find('.st-diag-traced').html(`<span class="st-pct-pill st-pct-pill-lg ${cls}">${label}</span>`);
 
 		// Each entry in it.branches is a SELF-CONTAINED chain from the server
 		// (by design — see Section 5 of the logic doc), so two branches that
@@ -1357,7 +1350,11 @@ class StockTraceability {
 
 		this.state.items.forEach(it => {
 			const branches = it.branches || [];
-			const leadItemCell = `${this.doc_link(it.code, 'Item')}<br><span class="st-muted">${frappe.utils.escape_html(it.name || '')}</span>`;
+			// Item Code + Item Name sit on ONE line (same row), separated by
+			// an en dash — matching the same "code — name" style used in the
+			// Traceability Flow header — instead of stacking the name onto a
+			// second line underneath the code.
+			const leadItemCell = `${this.doc_link(it.code, 'Item')}${it.name ? ' — <span class="st-muted">' + frappe.utils.escape_html(it.name) + '</span>' : ''}`;
 
 			if (!branches.length) {
 				rows += `<tr>
@@ -1387,38 +1384,45 @@ class StockTraceability {
 				if (b.untraced) {
 					// Same diagnostic hint as the diagram (see render_subtree()):
 					// prefer a clickable link to the nearby-but-unusable entry
-					// over a flat "not traced" label whenever the backend found one.
+					// over a flat "not traced" label whenever the backend found
+					// one. Nothing to show for Component/Raw Material here (it's
+					// untraced, so there's no consumed component to name) — the
+					// reason/hint (including a Stock Reconciliation chip, where
+					// one exists) now lives in the Source Document column
+					// instead, since that's the column it actually describes.
+					// Purchase/Sub. Order stays blank rather than a "—" filler.
 					let reason;
 					if (b.skipped_valuation) {
-						reason = __('— {0}, not FIFO —', [it.valuationMethod || __('Non-FIFO')]);
+						reason = __('{0}, not FIFO', [it.valuationMethod || __('Non-FIFO')]);
 					} else if (b.short) {
 						reason = b.hint_entry
-							? `${__('Stock Reconciliation')}: ${this.chip_link(b.hint_entry, b.hint_entry_type || 'Stock Reconciliation', 'src')}`
+							? `${this.chip_link(b.hint_entry, b.hint_entry_type || 'Stock Reconciliation', 'src')}`
 							: __('Opening Stock');
 					} else if (b.hint_entry) {
-						reason = `${__('— nearest entry')}: ${this.chip_link(b.hint_entry, b.hint_entry_type, 'src')}`;
+						reason = `${__('Nearest entry')}: ${this.chip_link(b.hint_entry, b.hint_entry_type, 'src')}`;
 					} else {
-						reason = __('— not traced (opening stock) —');
+						reason = __('Not traced (opening stock)');
 					}
 					rows += `<tr>
 						${leadCells}
-						<td class="st-muted">${reason}</td>
+						<td></td>
 						<td>${b.qty}</td>
-						<td class="st-muted">—</td>
-						<td class="st-muted">—</td>
+						<td class="st-muted">${reason}</td>
+						<td></td>
 					</tr>`;
 					return;
 				}
 
 				// Component / Raw Material cell — always shows the component's
-				// OWN Item Code (clickable) + resolved Item Name. For a Direct
-				// item (delivered stock item consumed as-is, no RM breakdown)
-				// this mirrors the delivered item's own code/name rather than
-				// a flat "(Direct — same item)" string, per requirements.
+				// OWN Item Code (clickable) + resolved Item Name, on the same
+				// line. For a Direct item (delivered stock item consumed as-is,
+				// no RM breakdown) this mirrors the delivered item's own
+				// code/name rather than a flat "(Direct — same item)" string,
+				// per requirements.
 				const isRM = it.isFG && b.rm;
 				const componentCode = isRM ? b.rm : it.code;
 				const componentName = isRM ? (b.rm_name || '') : (it.name || '');
-				const componentCell = `${this.doc_link(componentCode, 'Item')}${componentName ? `<br><span class="st-muted">${frappe.utils.escape_html(componentName)}</span>` : ''}`;
+				const componentCell = `${this.doc_link(componentCode, 'Item')}${componentName ? ' — <span class="st-muted">' + frappe.utils.escape_html(componentName) + '</span>' : ''}`;
 
 				rows += `<tr>
 					${leadCells}
@@ -1560,8 +1564,13 @@ const STOCK_TRACEABILITY_CSS = `
 	--st-text: #111827;
 	--st-text-2: #374151;
 	--st-text-3: #6b7280;
-	--st-primary: #6366f1;
-	--st-primary-dark: #4f46e5;
+	/* Primary brand colour switched to Frappe's own blue (matches the
+	   --st-fp-blue-* tokens used by the legend / node colouring below) so
+	   the whole page uses one consistent, on-brand blue instead of mixing
+	   an unrelated indigo/violet in for buttons, hints, and links. */
+	--st-primary: #2490ef;
+	--st-primary-dark: #1367c9;
+	--st-primary-accent: #0d5eae;
 
 	/* Dedicated connector-line colour — deliberately darker/higher-contrast
 	   than --st-border (which is far too light to read as a "line" against
@@ -1714,7 +1723,7 @@ const STOCK_TRACEABILITY_CSS = `
 	transition: background .15s ease, border-color .15s ease;
 }
 .st-field input:hover, .st-field select:hover { background: var(--st-surface); border-color: var(--st-primary); }
-.st-field input:focus, .st-field select:focus { background: var(--st-surface); border-color: var(--st-primary); box-shadow: 0 0 0 2px rgba(99,102,241,.15); }
+.st-field input:focus, .st-field select:focus { background: var(--st-surface); border-color: var(--st-primary); box-shadow: 0 0 0 2px rgba(36,144,239,.15); }
 
 /* ------------------------------------------------------------------ */
 /* Delivery Note — custom button + dialog multi-select (NOT Frappe's    */
@@ -1749,7 +1758,7 @@ const STOCK_TRACEABILITY_CSS = `
 	background: var(--st-surface);
 	border-color: var(--st-primary);
 	outline: none;
-	box-shadow: 0 0 0 2px rgba(99,102,241,.15);
+	box-shadow: 0 0 0 2px rgba(36,144,239,.15);
 }
 .st-dn-trigger.has-value { color: var(--st-text); }
 .st-dn-trigger svg { color: var(--st-text-3); flex-shrink: 0; }
@@ -1841,9 +1850,9 @@ const STOCK_TRACEABILITY_CSS = `
 	background: linear-gradient(135deg, var(--st-primary), var(--st-primary-dark));
 	border-color: transparent;
 	color: #fff;
-	box-shadow: 0 2px 8px rgba(99,102,241,.28);
+	box-shadow: 0 3px 10px rgba(36,144,239,.35);
 }
-#st-refresh:hover { background: linear-gradient(135deg, var(--st-primary-dark), var(--st-primary-dark)); color: #fff; box-shadow: 0 4px 12px rgba(99,102,241,.38); }
+#st-refresh:hover { background: linear-gradient(135deg, var(--st-primary-dark), var(--st-primary-dark)); color: #fff; box-shadow: 0 5px 16px rgba(36,144,239,.45); }
 #st-refresh:disabled { box-shadow: none; }
 #st-theme-toggle { width: 36px; padding: 0; justify-content: center; }
 .st-refresh-label { white-space: nowrap; }
@@ -1854,21 +1863,24 @@ const STOCK_TRACEABILITY_CSS = `
 	font-size: 12px;
 	margin: 0 0 10px 2px;
 	font-weight: 600;
-	color: var(--st-primary);
+	color: var(--st-primary-dark);
 	display: flex;
 	align-items: center;
 	gap: 6px;
 	letter-spacing: .1px;
 }
-.st-hint.st-required-hint {
-	background: linear-gradient(90deg, rgba(99,102,241,.10), rgba(99,102,241,.03));
-	border: 1px solid rgba(99,102,241,.25);
+.st-hint.st-required-hint,
+.st-hint.st-ao-hint {
+	background: linear-gradient(90deg, rgba(36,144,239,.12), rgba(36,144,239,.03));
+	border: 1px solid rgba(36,144,239,.35);
 	border-radius: 8px;
 	padding: 7px 12px;
 	margin: 0 0 12px 0;
 	color: var(--st-primary-dark);
+	font-weight: 700;
 }
-.st-page[data-theme="dark"] .st-hint.st-required-hint { color: #a5b4fc; }
+.st-page[data-theme="dark"] .st-hint.st-required-hint,
+.st-page[data-theme="dark"] .st-hint.st-ao-hint { color: #7fc0ff; }
 
 /* Small red asterisk after the AO / Sales Order labels to signal that
    picking at least ONE of the three (AO / SO / DN) is required. The
@@ -1889,7 +1901,7 @@ const STOCK_TRACEABILITY_CSS = `
 	margin-bottom: -1px; display: flex; align-items: center; gap: 6px; border-radius: 6px 6px 0 0;
 	transition: color .15s ease, background .15s ease;
 }
-.st-tab:hover { color: var(--st-primary-dark); background: rgba(99,102,241,.05); }
+.st-tab:hover { color: var(--st-primary-dark); background: rgba(36,144,239,.05); }
 .st-tab.active { color: var(--st-primary); border-bottom-color: var(--st-primary); }
 .st-tab-panel { display: none; }
 .st-tab-panel.active { display: block; }
@@ -1897,7 +1909,7 @@ const STOCK_TRACEABILITY_CSS = `
 /* Scoped loading overlay — covers ONLY the results panel (tables + item
    list + diagram), never the sidebar/navbar/rest of the Desk. Replaces the
    old full-page frappe.dom.freeze(), which used to visibly flash the whole
-   screen grey on every AO / Sales Order / Delivery Note change. */
+   screen grey on every AO/SO/DN change. */
 .st-panels-wrap { position: relative; }
 .st-loading-overlay {
 	position: absolute;
@@ -1920,10 +1932,10 @@ const STOCK_TRACEABILITY_CSS = `
 	transition: opacity .15s ease;
 }
 .st-loading-overlay.is-active { opacity: 1; pointer-events: all; }
-.st-page[data-theme="dark"] .st-loading-overlay { background: rgba(20,22,31,.78); color: #a5b4fc; }
+.st-page[data-theme="dark"] .st-loading-overlay { background: rgba(20,22,31,.78); color: #7fc0ff; }
 .st-spinner {
 	width: 18px; height: 18px; border-radius: 50%;
-	border: 2.5px solid rgba(99,102,241,.25);
+	border: 2.5px solid rgba(36,144,239,.25);
 	border-top-color: var(--st-primary);
 	animation: st-spin .7s linear infinite;
 }
@@ -1953,10 +1965,10 @@ const STOCK_TRACEABILITY_CSS = `
 	padding: 22px 12px; font-size: 13px; font-weight: 600; color: var(--st-primary-dark);
 	font-family: var(--st-font-display);
 }
-.st-page[data-theme="dark"] .st-select-prompt { color: #a5b4fc; }
+.st-page[data-theme="dark"] .st-select-prompt { color: #7fc0ff; }
 .st-empty-state--prompt svg { color: var(--st-primary); opacity: .55; }
 .st-empty-state--prompt p { color: var(--st-primary-dark); font-family: var(--st-font-display); }
-.st-page[data-theme="dark"] .st-empty-state--prompt p { color: #a5b4fc; }
+.st-page[data-theme="dark"] .st-empty-state--prompt p { color: #7fc0ff; }
 
 /* Tables */
 .st-table-scroll { overflow-x: auto; }
@@ -1969,8 +1981,12 @@ const STOCK_TRACEABILITY_CSS = `
 .st-table tbody td { padding: 10px 12px; border-bottom: 1px solid var(--st-border); vertical-align: top; color: var(--st-text-2); }
 .st-table tbody tr:last-child td { border-bottom: none; }
 .st-table tbody tr.st-selectable-row { cursor: pointer; transition: background .15s ease; }
-.st-table tbody tr.st-selectable-row:hover { background: rgba(99,102,241,.06); }
-.st-table tbody tr.st-selectable-row.is-active td { background: rgba(99,102,241,.09); }
+.st-table tbody tr.st-selectable-row:hover { background: rgba(36,144,239,.06); }
+.st-table tbody tr.st-selectable-row.is-active td { background: rgba(36,144,239,.09); }
+
+/* Delivered Qty is the last column — right-align it so the numbers read
+   flush against the end of the row instead of left-hugging like text. */
+.st-table th.st-col-end, .st-table td.st-col-end { text-align: right; font-weight: 700; color: var(--st-text); }
 
 .st-pct-pill { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 20px; font-weight: 700; font-size: 12px; }
 .st-pct-pill.full { background: var(--st-green-bg); color: var(--st-green-text); }
@@ -2024,7 +2040,7 @@ const STOCK_TRACEABILITY_CSS = `
 	cursor: pointer; background: var(--st-surface); transition: all .15s ease;
 }
 .st-item-card:hover { box-shadow: 0 2px 10px rgba(16,24,40,.08); }
-.st-item-card.is-active { border-color: var(--st-primary); background: rgba(99,102,241,.07); box-shadow: 0 4px 14px rgba(99,102,241,.15); }
+.st-item-card.is-active { border-color: var(--st-primary); background: rgba(36,144,239,.07); box-shadow: 0 4px 14px rgba(36,144,239,.15); }
 .st-item-row1 { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .st-item-code { font-family: var(--st-font-display); font-weight: 700; font-size: 13.5px; letter-spacing: -.05px; color: var(--st-text); }
 .st-item-delivered { font-size: 11px; color: var(--st-text-3); white-space: nowrap; }
@@ -2082,25 +2098,53 @@ const STOCK_TRACEABILITY_CSS = `
 .st-diagram-toolbar {
 	margin: 0 -18px 18px;
 	padding: 20px 18px 16px;
-	background: linear-gradient(180deg, rgba(99,102,241,.06), rgba(99,102,241,0));
+	background: linear-gradient(180deg, rgba(36,144,239,.06), rgba(36,144,239,0));
 	border-bottom: 1px solid var(--st-border);
 }
-.st-diagram-info { display: flex; gap: 30px; flex-wrap: wrap; font-size: 13px; justify-content: center; text-align: center; align-items: flex-start; }
-.st-diagram-info span { display: flex; flex-direction: column; gap: 4px; align-items: center; }
-.st-diagram-info > span:nth-child(2) { flex: 1 1 auto; min-width: 0; max-width: 480px; }
+/* Single-row header: DN chip, Item Code, Item Name and Delivered Qty all
+   sit on ONE line, left-aligned starting from DN. The line never wraps —
+   .st-diag-dn-item truncates with an ellipsis if the item name is too
+   long, so Delivered stays pinned on the right of the same row instead of
+   ever dropping to a second line. */
+/* Single-row header: DN chip, Item Code, Item Name and Delivered Qty all
+   sit on ONE line, left-aligned starting from DN. The line never wraps —
+   .st-diag-dn-item truncates with an ellipsis if the item name is too
+   long, so Delivered stays pinned on the right of the same row instead of
+   ever dropping to a second line. Delivered itself is stacked — label on
+   its own row above the value — with a generous gap separating it from
+   the DN/Item text on the left. */
 .st-info-label { font-size: 10px; font-weight: 700; color: var(--st-text-3); text-transform: uppercase; letter-spacing: .4px; }
-.st-diagram-info b { color: var(--st-text); font-size: 13px; }
-.st-diag-item-line {
-	display: inline-flex;
-	align-items: baseline;
-	max-width: 100%;
+.st-diagram-info-row {
+	display: flex;
+	align-items: center;
+	gap: 40px;
+	font-size: 13px;
+	width: 100%;
+}
+.st-diagram-info-row b { color: var(--st-text); font-size: 13px; }
+.st-diag-dn-item {
+	flex: 1 1 auto;
+	min-width: 0;
+	display: block;
+	line-height: 1.4;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
-	vertical-align: bottom;
+	text-align: left;
 }
-.st-diag-item-name { color: var(--st-text-3); font-weight: 600; font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
-.st-pct-pill-lg { font-size: 13px; padding: 4px 12px; }
+.st-diag-sep { display: inline-block; width: 24px; }
+.st-diag-item-name { color: var(--st-text-3); font-weight: 600; font-size: 12px; }
+.st-diag-delivered-inline {
+	flex: 0 0 auto;
+	white-space: nowrap;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 3px;
+}
+.st-diag-delivered-inline .st-diag-delivered {
+	font-size: 15px;
+}
 .st-pct-pill.zero { background: #fde3e3; color: #c0362c; }
 .st-page[data-theme="dark"] .st-pct-pill.zero { background: #4a1f1f; color: #ff8f87; }
 
@@ -2223,20 +2267,23 @@ const STOCK_TRACEABILITY_CSS = `
 }
 .st-node-with-side .st-node { margin-bottom: 0; flex: 0 0 200px; }
 
+/* Same solid line + filled-circle style as .st-connector (the vertical
+   connector used everywhere else in the tree) — just rotated horizontal —
+   instead of a dashed line, so every connector in the diagram reads as
+   one consistent visual language. */
 .st-node-side-connector {
 	position: relative;
 	flex: 0 0 30px;
 	height: 2px;
 	background: var(--st-line-color-strong);
+	align-self: center;
 }
 .st-node-side-connector::after {
 	content: '';
 	position: absolute;
-	right: -1px; top: 50%;
-	width: 0; height: 0;
-	border-top: 4px solid transparent;
-	border-bottom: 4px solid transparent;
-	border-left: 6px solid var(--st-line-color-strong);
+	left: -3px; top: 50%;
+	width: 6px; height: 6px; border-radius: 50%;
+	background: var(--st-line-color-strong);
 	transform: translateY(-50%);
 }
 
@@ -2361,7 +2408,7 @@ const STOCK_TRACEABILITY_CSS = `
 }
 	
 .st-legend-all { font-weight: 800; border-color: var(--st-border) !important; }
-.st-legend-all.is-active { background: rgba(99,102,241,.12); border-color: rgba(99,102,241,.35) !important; color: var(--st-primary-dark); }
+.st-legend-all.is-active { background: rgba(36,144,239,.12); border-color: rgba(36,144,239,.35) !important; color: var(--st-primary-dark); }
 .st-dot { width: 11px; height: 11px; border-radius: 3px; display: inline-block; flex-shrink: 0; }
 
 /* Clicking a legend chip dims every node EXCEPT the matching type, and

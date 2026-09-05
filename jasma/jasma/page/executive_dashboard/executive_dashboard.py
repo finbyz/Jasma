@@ -160,6 +160,9 @@ def fmt_money_full(value, symbol="₹"):
 def get_total_sales(period_preset="yearly", company=None, from_date=None, to_date=None):
     """
     Returns Total Sales (Net Total) from submitted Sales Invoices only.
+    Also referred to on the card as "Total Sales From SI" to distinguish
+    it from get_total_sales_from_gl below, which sources the same metric
+    from the General Ledger instead.
     """
     from_date, to_date = get_date_range(period_preset, from_date, to_date)
 
@@ -240,6 +243,102 @@ def get_total_sales_order(period_preset="yearly", company=None, from_date=None, 
         "period_preset": period_preset,
         "company": company,
     }
+
+# ============================================================
+# CARD 1B: TOTAL SALES FROM GL (DYNAMIC)
+# ============================================================
+
+@frappe.whitelist()
+def get_total_sales_from_gl(period_preset="yearly", company=None, from_date=None, to_date=None):
+    """
+    "Total Sales From GL" - the same headline metric as get_total_sales,
+    but sourced from the General Ledger instead of Sales Invoice rows, so
+    it also picks up Journal Entries, Debit/Credit Notes, and any other
+    postings to Income accounts (not just Sales Invoices) - which is why
+    this figure can differ from the Sales-Invoice-based "Total Sales" card.
+
+    Computed the same way the General Ledger report's own
+    "Closing (Opening + Total)" row is computed for a date range with
+    "Show Opening Entries" left OFF (as in the report screenshot this was
+    modelled on): SUM(credit) - SUM(debit) across submitted, non-cancelled
+    GL Entries posted between from_date and to_date, restricted to
+    non-group accounts under root_type = 'Income' (the Sales side of the
+    chart of accounts). Income accounts are credit-natured, so this
+    closing balance is the net Sales figure for the period.
+
+    Also returns `gl_report_url`, a deep link into the General Ledger
+    report (/app/general-ledger) with the same Company / From Date /
+    To Date filters pre-applied, so the card's "View in General Ledger"
+    action opens straight into the report already filtered - the same
+    linking pattern used by the Receivables and Aging Payables cards.
+    """
+    from_date, to_date = get_date_range(period_preset, from_date, to_date)
+
+    account_conditions = "root_type = 'Income' AND is_group = 0"
+    account_params = {}
+    if company:
+        account_conditions += " AND company = %(company)s"
+        account_params["company"] = company
+
+    income_accounts = frappe.db.sql_list(
+        f"SELECT name FROM `tabAccount` WHERE {account_conditions}",
+        account_params,
+    )
+
+    closing_balance = 0
+    if income_accounts:
+        conditions = (
+            "gle.is_cancelled = 0"
+            " AND gle.account IN %(accounts)s"
+            " AND gle.posting_date BETWEEN %(from_date)s AND %(to_date)s"
+        )
+        params = {"accounts": income_accounts, "from_date": from_date, "to_date": to_date}
+        if company:
+            conditions += " AND gle.company = %(company)s"
+            params["company"] = company
+
+        closing_balance = frappe.db.sql(
+            f"""
+            SELECT SUM(gle.credit) - SUM(gle.debit)
+            FROM `tabGL Entry` gle
+            WHERE {conditions}
+            """,
+            params,
+        )[0][0] or 0
+
+    gl_report_url = get_general_ledger_report_url(company, from_date, to_date)
+
+    return {
+        "closing_balance": closing_balance,
+        "closing_balance_fmt": fmt_inr(closing_balance),
+        "net_total": closing_balance,
+        "net_total_fmt": fmt_inr(closing_balance),
+        "accounts": income_accounts,
+        "from_date": str(from_date),
+        "to_date": str(to_date),
+        "period_preset": period_preset,
+        "company": company,
+        "gl_report_url": gl_report_url,
+    }
+
+
+def get_general_ledger_report_url(company, from_date, to_date):
+    """
+    Build a deep link into the standard General Ledger report
+    (/app/general-ledger) with Company / From Date / To Date pre-filled,
+    so a card can open straight into it, already filtered to the same
+    range shown on the dashboard.
+    """
+    from urllib.parse import urlencode
+
+    filters = {
+        "company": company or frappe.defaults.get_global_default("company"),
+        "from_date": str(from_date),
+        "to_date": str(to_date),
+    }
+    filters = {k: v for k, v in filters.items() if v}
+    return "/app/general-ledger?" + urlencode(filters)
+
 # ============================================================
 # MONTHLY REVENUE TREND (DYNAMIC)
 # ============================================================
@@ -1215,7 +1314,11 @@ def get_aging_payables(period_preset="yearly", company=None, from_date=None, to_
         for r in rows:
             r = frappe._dict(r)
             for b in AGING_PAYABLES_BUCKETS:
-                totals[b["key"]] += flt(r.get(b["field"]))
+                # Only count positive outstanding amounts per bucket - a negative
+                # value here means a credit/debit note landed in that ageing
+                # bucket (money owed to us, not by us), which shouldn't show as a
+                # negative bucket value or drag the grand total down.
+                totals[b["key"]] += max(flt(r.get(b["field"])), 0)
 
     grand_total = sum(totals.values())
     max_val = max(list(totals.values()) + [1])
@@ -1992,6 +2095,7 @@ def get_page_data(period_preset="yearly", company=None, item_groups=None, from_d
     """
     # Get dynamic data
     total_sales = get_total_sales(period_preset, company, from_date, to_date)
+    total_sales_from_gl = get_total_sales_from_gl(period_preset, company, from_date, to_date)
     total_sales_order = get_total_sales_order(period_preset, company, from_date, to_date)
     sales_orders = get_sales_order_stats(period_preset, company, from_date, to_date)
     quotations = get_quotation_stats(period_preset, company, from_date, to_date)
@@ -2035,6 +2139,7 @@ def get_page_data(period_preset="yearly", company=None, item_groups=None, from_d
 
     return {
         "total_sales": total_sales,
+        "total_sales_from_gl": total_sales_from_gl,
         "total_sales_order": total_sales_order, 
         "sales_orders": sales_orders,
         "quotations": quotations,
