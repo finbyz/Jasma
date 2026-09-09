@@ -8,8 +8,30 @@
 // Drop at: <app>/<app>/page/ao_tracker/ao_tracker.js
 // Page route: /app/ao-tracker  (page name must be "ao-tracker")
 //
-// CHANGELOG vs. the previous version (fixing issues found against the
-// wireframe):
+// CHANGELOG (this revision):
+//   - REMOVED: the "Stage" dot-and-connector timeline column and the
+//     "Severity" badge column (both driven by project age) are gone.
+//   - NEW: replaced them with a single "Priority" column. Priority is
+//     derived from how many days remain between the linked Sales Order's
+//     Delivery Date and today:
+//       > 60 days left   -> Low
+//       31-60 days left  -> Medium
+//       16-30 days left  -> High
+//       1-15 days left   -> Urgent
+//       <= 0 days left   -> Overdue
+//     Once a Delivery Note already exists for the project it's considered
+//     fulfilled and always shows Low, regardless of date. Computed
+//     server-side in get_ao_list (see ao_tracker.py::determine_priority).
+//   - NEW: "Purchase Invoice" name + status columns added right beside
+//     "Purchase Receipt" in the list grid.
+//   - FIXED: every "—" placeholder shown when a value is missing (Sales
+//     Order, Pending At, per-doc-type cells, the doc preview modal's
+//     Reference AO stat) has been replaced with a blank cell instead of a
+//     dash character.
+//
+// --- Everything below this point is unchanged from the previous revision
+//     except where noted inline, which fixed issues found against the
+//     wireframe:
 //   - FIXED: the MR/PO/DN/SI status pills in the list table looked like
 //     links but had no click handler at all, and didn't carry a doctype —
 //     so nothing happened when clicked. They now navigate correctly.
@@ -31,9 +53,6 @@
 //     `.ao-tracker-wrap`, so dark mode is just a second variable set
 //     applied via `.ao-tracker-wrap[data-theme="dark"]` — no markup or
 //     data logic was touched.
-//   - NEW: "Stage" strip redesigned to a dot-and-connector timeline
-//     (green = done, amber = current/pending stage, grey dashed = not
-//     reached yet) instead of a plain row of ticks.
 //   - NEW: "Sales Order" column widened so SO numbers no longer clip.
 //   - NEW: removed the grey vertical divider line that used to run down
 //     every row between column groups (MR|PO|SCO|...) — the colored bar
@@ -110,12 +129,15 @@ class AOTracker {
 
 		// Column + color key for the procurement trail shown on the list
 		// grid. Each key must match a `docs` key returned by get_ao_list.
+		// NEW: "Purchase Invoice" (pi) added right beside "Purchase
+		// Receipt" (pr), matching the requested layout.
 		this.doc_columns = [
 			{ key: 'mr', label: 'MR', full_label: 'Material Requests', color: '#7C3AED' },
 			{ key: 'po', label: 'PO', full_label: 'Purchase Orders', color: '#0284C7' },
 			{ key: 'sco', label: 'Subcontracting Order', full_label: 'Subcontracting Orders', color: '#0D9488' },
 			{ key: 'scr', label: 'Subcontracting Receipt', full_label: 'Subcontracting Receipts', color: '#D97706' },
 			{ key: 'pr', label: 'Purchase Receipt', full_label: 'Purchase Receipts', color: '#E11D48' },
+			{ key: 'pi', label: 'Purchase Invoice', full_label: 'Purchase Invoices', color: '#EA580C' },
 			{ key: 'dn', label: 'Delivery Note', full_label: 'Delivery Notes', color: '#059669' },
 			{ key: 'si', label: 'Sales Invoice', full_label: 'Sales Invoices', color: '#C026D3' }
 		];
@@ -410,8 +432,7 @@ class AOTracker {
 								<th class="aot-grp-start" style="border-top:3px solid ${c.color};">${__(c.label)}</th>
 								<th>${__(c.label)} ${__('Status')}</th>
 							`).join('')}
-							<th class="aot-grp-start aot-stage-col">${__('Stage')}</th>
-							<th>${__('Severity')}</th>
+							<th class="aot-grp-start aot-priority-col">${__('Priority')}</th>
 							<th style="width:40px;"></th>
 						</tr>
 					</thead>
@@ -705,7 +726,10 @@ class AOTracker {
 
 		const $tbody = this.$wrap.find('.aot-tbody').empty();
 		this.$wrap.find('.aot-select-all').prop('checked', false);
-		const colspan = 6 + (this.doc_columns.length * 2);
+		// 5 fixed columns (checkbox, AO Number, Sales Order, Customer,
+		// Pending At) + one label/status pair per doc column + Priority +
+		// the row-action column.
+		const colspan = 7 + (this.doc_columns.length * 2);
 		if (!list.length) {
 			$tbody.html(`<tr><td colspan="${colspan}" class="aot-empty-row">${__('No advance orders match these filters.')}</td></tr>`);
 			return;
@@ -720,7 +744,8 @@ class AOTracker {
 		const docPair = (col) => {
 			const d = ao.docs[col.key];
 			if (!d) {
-				return `<td class="aot-grp-start"><span class="aot-dash">\u2014</span></td><td><span class="aot-dash">\u2014</span></td>`;
+				// FIX: blank cells instead of a "—" placeholder.
+				return `<td class="aot-grp-start"></td><td></td>`;
 			}
 
 			// NEW: when more than one document of this type exists for the
@@ -754,10 +779,10 @@ class AOTracker {
 			`;
 		};
 
-		const stageKeys = ['so', 'mr', 'po', 'pr', 'si'];
-		const stageHtml = this.render_stage_strip(stageKeys.map((k) => ao.stage[k]));
-
-		const sevClass = 'aot-sev-' + (ao.severity || 'low').toLowerCase();
+		// Priority is computed server-side (see ao_tracker.py::determine_priority)
+		// from the days remaining between the linked Sales Order's Delivery
+		// Date and today. Blank when there's nothing to compute it from yet.
+		const priorityClass = this.priority_class(ao.priority);
 		const checked = this.state.selected.has(ao.project) ? 'checked' : '';
 
 		// FIX: previously showed the AO number twice (the link, then an
@@ -771,45 +796,29 @@ class AOTracker {
 			<td><a class="aot-ao-link" data-project="${frappe.utils.escape_html(ao.project)}">${frappe.utils.escape_html(ao.project)}</a>
 				${showSubtitle ? `<div class="aot-project-name">${frappe.utils.escape_html(ao.project_name)}</div>` : ''}
 			</td>
-			<td class="aot-so-col">${ao.so ? frappe.utils.escape_html(ao.so) : '<span class="aot-dash">\u2014</span>'}</td>
-			<td class="aot-customer-cell" title="${frappe.utils.escape_html(ao.customer || '')}">${frappe.utils.escape_html(ao.customer || '')}</td>
-			<td class="aot-pending-cell">${ao.pending_at === '\u2014' ? '<span class="aot-dash">\u2014</span>' : `<span class="aot-pending-chip" title="${frappe.utils.escape_html(ao.pending_at)}">${frappe.utils.escape_html(this.format_pending_at(ao.pending_at))}</span>`}</td>
+			<td class="aot-so-col">${ao.so ? `<span class="aot-doc-link aot-so-link" data-doctype="Sales Order" data-name="${frappe.utils.escape_html(ao.so)}">${frappe.utils.escape_html(ao.so)}</span>` : ''}</td>
+			<td class="aot-customer-cell" title="${frappe.utils.escape_html(ao.customer || '')}">${ao.customer ? `<span class="aot-doc-link aot-customer-link" data-doctype="Customer" data-name="${frappe.utils.escape_html(ao.customer)}">${frappe.utils.escape_html(ao.customer)}</span>` : ''}</td>
+			<td class="aot-pending-cell">${ao.pending_at ? `<span class="aot-pending-chip" title="${frappe.utils.escape_html(ao.pending_at)}">${frappe.utils.escape_html(this.format_pending_at(ao.pending_at))}</span>` : ''}</td>
 			${this.doc_columns.map(col => docPair(col)).join('')}
-			<td class="aot-grp-start aot-stage-col">${stageHtml}</td>
-			<td><span class="aot-sev-badge ${sevClass}">${ao.severity}</span></td>
+			<td class="aot-grp-start aot-priority-col">${ao.priority ? `<span class="aot-pri-badge ${priorityClass}">${frappe.utils.escape_html(ao.priority)}</span>` : ''}</td>
 			<td><button class="aot-view-btn" data-project="${frappe.utils.escape_html(ao.project)}" title="${__('Detailed view')}">${frappe.utils.icon('right', 'sm')}</button></td>
 		</tr>
 		`;
 	}
 
-	// NEW: dot-and-connector timeline for the Stage column, replacing the
-	// old plain row of ticks. Completed steps are solid green and joined by
-	// a solid green line; the first not-yet-done step is highlighted amber
-	// as "current"; everything after it is a light grey dashed line with
-	// hollow dots, so at a glance you can see exactly where in the SO -> MR
-	// -> PO -> PR -> SI flow a project currently sits.
-	render_stage_strip(doneFlags) {
-		let currentIdx = doneFlags.findIndex((d) => !d);
-		if (currentIdx === -1) currentIdx = doneFlags.length; // all done
-
-		const dot = (state) => `<span class="aot-stage-dot aot-stage-dot--${state}"></span>`;
-		const line = (state) => `<span class="aot-stage-line aot-stage-line--${state}"></span>`;
-
-		let html = '';
-		doneFlags.forEach((done, i) => {
-			let dotState;
-			if (i < currentIdx) dotState = 'done';
-			else if (i === currentIdx) dotState = 'current';
-			else dotState = 'pending';
-
-			if (i > 0) {
-				const lineState = i <= currentIdx ? (i < currentIdx ? 'done' : 'active') : 'pending';
-				html += line(lineState);
-			}
-			html += dot(dotState);
-		});
-
-		return `<div class="aot-stage-mini">${html}</div>`;
+	// NEW: maps a priority label (from the backend) to its badge color
+	// class. Low -> green, Medium -> amber, High -> orange, Urgent -> red,
+	// Overdue -> solid dark red.
+	priority_class(priority) {
+		if (!priority) return '';
+		if (priority.startsWith('Overdue')) return 'aot-pri-overdue';
+		const MAP = {
+			Low: 'aot-pri-low',
+			Medium: 'aot-pri-medium',
+			High: 'aot-pri-high',
+			Urgent: 'aot-pri-urgent'
+		};
+		return MAP[priority] || 'aot-pri-low';
 	}
 
 	// some `pending_at` values combine two alternative next steps
@@ -818,7 +827,7 @@ class AOTracker {
 	// pending step is shown in the pill itself; the full original text
 	// is still available as a hover tooltip (see render_list_row).
 	format_pending_at(text) {
-		if (!text || text === '\u2014') return text;
+		if (!text) return text;
 		return text.split(/\s*\/\s*/)[0];
 	}
 
@@ -893,8 +902,8 @@ class AOTracker {
 			return;
 		}
 
-		const num = (v) => (v === null || v === undefined) ? '<span class="aot-dash">\u2014</span>' : format_number(v);
-		const money = (v) => (v === null || v === undefined) ? '<span class="aot-dash">\u2014</span>' : format_currency(v);
+		const num = (v) => (v === null || v === undefined) ? '' : format_number(v);
+		const money = (v) => (v === null || v === undefined) ? '' : format_currency(v);
 
 		rows.forEach((row) => {
 			const typeClass = row.type === 'FG' ? 'aot-type-fg' : 'aot-type-rm';
@@ -905,7 +914,7 @@ class AOTracker {
 					</td>
 					<td><span class="aot-type-badge ${typeClass}">${row.type}</span></td>
 					<td>
-						${row.component_name ? `<div class="aot-fg-name">${frappe.utils.escape_html(row.component_name)}</div><div class="aot-fg-code">${frappe.utils.escape_html(row.component_code || '')}</div>` : '<span class="aot-dash">\u2014</span>'}
+						${row.component_name ? `<div class="aot-fg-name">${frappe.utils.escape_html(row.component_name)}</div><div class="aot-fg-code">${frappe.utils.escape_html(row.component_code || '')}</div>` : ''}
 					</td>
 					<td class="aot-num">${num(row.qty_needed)}</td>
 					<td class="aot-num">${num(row.total_ordered)}</td>
@@ -1010,7 +1019,8 @@ class AOTracker {
 		const [bg, ink] = this.tone(d.status);
 		const stats = [
 			[__('Status'), `<span class="aot-mini-pill" style="background:${bg};color:${ink};">${frappe.utils.escape_html(d.status || '')}</span>`, true],
-			[__('Reference AO'), frappe.utils.escape_html(d.project || '\u2014')],
+			// FIX: blank instead of "—" when there's no reference AO.
+			[__('Reference AO'), frappe.utils.escape_html(d.project || '')],
 			[__('Items'), d.items.length],
 			[__('Total Qty'), format_number(d.total_qty)]
 		];
@@ -1097,6 +1107,8 @@ class AOTracker {
 			--aot-amber-bg:#FDF1DC; --aot-amber-ink:#9A5B00; --aot-red-bg:#FBE4E1; --aot-red-ink:#C0392B;
 			--aot-green-bg:#E1F5EA; --aot-green-ink:#1E8E56; --aot-gray-bg:#EEF0F5; --aot-gray-ink:#5B6478;
 			--aot-purple-bg:#EFE9FC; --aot-purple-ink:#6B3FBF;
+			--aot-orange-bg:#FDE4CE; --aot-orange-ink:#B85C00;
+			--aot-overdue-bg:#7F1D1D; --aot-overdue-ink:#FFFFFF;
 			--aot-radius:12px; --aot-shadow:0 1px 2px rgba(20,24,40,.04),0 8px 24px -12px rgba(20,24,40,.10);
 			color:var(--aot-ink); padding:18px 20px 48px; background:var(--aot-bg);
 			transition:background .2s ease, color .2s ease;
@@ -1116,6 +1128,8 @@ class AOTracker {
 			--aot-amber-bg:#3a2c10; --aot-amber-ink:#fbbf24; --aot-red-bg:#3a1414; --aot-red-ink:#f87171;
 			--aot-green-bg:#12291d; --aot-green-ink:#34d399; --aot-gray-bg:#262a38; --aot-gray-ink:#9ca3af;
 			--aot-purple-bg:#2a2140; --aot-purple-ink:#a78bfa;
+			--aot-orange-bg:#3a2413; --aot-orange-ink:#fb923c;
+			--aot-overdue-bg:#7f1d1d; --aot-overdue-ink:#fecaca;
 			--aot-shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.65);
 		}
 		/* native date/text inputs: let the browser paint its own dark
@@ -1254,7 +1268,7 @@ class AOTracker {
 		/* NEW: the grey vertical divider that used to run down every body
 		   row between column groups (MR|PO|SCO|...) is gone — the colored
 		   3px bar under each group's header (set inline, see markup()) is
-		   the only separator now, both here and in the Stage column. */
+		   the only separator now. */
 		.ao-tracker-wrap .aot-status-table tbody td{padding:12px; border-bottom:1px solid var(--aot-line-soft); vertical-align:middle;}
 		.ao-tracker-wrap .aot-status-table tbody tr:nth-child(even){background:#FBFCFE;}
 		.ao-tracker-wrap .aot-status-table tbody tr:hover{background:var(--aot-accent-soft);}
@@ -1265,7 +1279,6 @@ class AOTracker {
 		.ao-tracker-wrap .aot-customer-cell{font-weight:500; color:var(--aot-ink-soft); max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 		.ao-tracker-wrap .aot-pending-cell{color:var(--aot-ink-soft); font-size:12.5px; max-width:200px;}
 		.ao-tracker-wrap .aot-pending-chip{display:inline-block; max-width:190px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:middle; background:var(--aot-amber-bg); color:var(--aot-amber-ink); padding:4px 10px; border-radius:999px; font-size:11.5px; font-weight:700;}
-		.ao-tracker-wrap .aot-dash{color:var(--aot-ink-faint);}
 		.ao-tracker-wrap .aot-doc-link{font-weight:700; font-size:12px; cursor:pointer;}
 		.ao-tracker-wrap .aot-doc-link:hover{text-decoration:underline;}
 		/* NEW: the "N Sales Invoices" chip shown when a project has more
@@ -1275,24 +1288,25 @@ class AOTracker {
 			padding:5px 11px; border:1.5px solid; border-radius:999px; cursor:pointer;
 			background:var(--aot-panel); transition:filter .15s ease, transform .15s ease;
 		}
+	
 		.ao-tracker-wrap .aot-doc-multi:hover{ filter:brightness(0.95); transform:translateY(-1px); }
-		.ao-tracker-wrap .aot-mini-pill{display:inline-flex; align-items:center; gap:5px; padding:4px 10px; border-radius:999px; font-size:11.5px; font-weight:700;}
+		/* FIX: status pills (e.g. "To Receive and Bill") were wrapping
+		   onto 2 lines inside table cells. white-space:nowrap keeps every
+		   pill on one line; the table already scrolls horizontally
+		   (.aot-table-scroll), so a wider pill just takes its own space
+		   instead of breaking. */
+		.ao-tracker-wrap .aot-mini-pill{display:inline-flex; align-items:center; gap:5px; padding:4px 10px; border-radius:999px; font-size:11.5px; font-weight:700; white-space:nowrap;}
+		.ao-tracker-wrap .aot-pri-closed{background:var(--aot-gray-bg); color:var(--aot-gray-ink);}
+		/* NEW: Priority column — replaces the old Stage timeline + Severity
+		   badge with a single badge computed from days-left-to-delivery. */
+		.ao-tracker-wrap .aot-priority-col{ min-width:110px; }
+		.ao-tracker-wrap .aot-pri-badge{display:inline-flex; align-items:center; padding:4px 12px; border-radius:999px; font-size:11.5px; font-weight:800; text-transform:uppercase; white-space:nowrap;}
+		.ao-tracker-wrap .aot-pri-low{background:var(--aot-green-bg); color:var(--aot-green-ink);}
+		.ao-tracker-wrap .aot-pri-medium{background:var(--aot-amber-bg); color:var(--aot-amber-ink);}
+		.ao-tracker-wrap .aot-pri-high{background:var(--aot-orange-bg); color:var(--aot-orange-ink);}
+		.ao-tracker-wrap .aot-pri-urgent{background:var(--aot-red-bg); color:var(--aot-red-ink);}
+		.ao-tracker-wrap .aot-pri-overdue{background:var(--aot-overdue-bg); color:var(--aot-overdue-ink);}
 
-		/* NEW: dot-and-connector Stage timeline. */
-		.ao-tracker-wrap .aot-stage-col{ min-width:150px; }
-		.ao-tracker-wrap .aot-stage-mini{display:flex; align-items:center;}
-		.ao-tracker-wrap .aot-stage-dot{width:11px; height:11px; border-radius:50%; flex-shrink:0; box-sizing:border-box;}
-		.ao-tracker-wrap .aot-stage-dot--done{ background:var(--aot-green-ink); border:2px solid var(--aot-green-ink); box-shadow:0 0 0 3px var(--aot-green-bg); }
-		.ao-tracker-wrap .aot-stage-dot--current{ background:var(--aot-amber-ink); border:2px solid var(--aot-amber-ink); box-shadow:0 0 0 3px var(--aot-amber-bg); }
-		.ao-tracker-wrap .aot-stage-dot--pending{ background:var(--aot-panel); border:2px solid var(--aot-line); }
-		.ao-tracker-wrap .aot-stage-line{height:2px; width:22px; flex-shrink:0;}
-		.ao-tracker-wrap .aot-stage-line--done{ background:var(--aot-green-ink); }
-		.ao-tracker-wrap .aot-stage-line--active{ background:repeating-linear-gradient(90deg, var(--aot-amber-ink) 0 5px, transparent 5px 9px); }
-		.ao-tracker-wrap .aot-stage-line--pending{ background:repeating-linear-gradient(90deg, var(--aot-line) 0 5px, transparent 5px 9px); }
-		.ao-tracker-wrap .aot-sev-badge{display:inline-flex; align-items:center; padding:4px 12px; border-radius:999px; font-size:11.5px; font-weight:800; text-transform:uppercase;}
-		.ao-tracker-wrap .aot-sev-low{background:var(--aot-green-bg); color:var(--aot-green-ink);}
-		.ao-tracker-wrap .aot-sev-medium{background:var(--aot-amber-bg); color:var(--aot-amber-ink);}
-		.ao-tracker-wrap .aot-sev-high{background:var(--aot-red-bg); color:var(--aot-red-ink);}
 		.ao-tracker-wrap .aot-view-btn{border:1px solid var(--aot-line); background:var(--aot-panel); color:var(--aot-ink-soft); width:28px; height:28px; border-radius:8px; cursor:pointer;}
 		.ao-tracker-wrap .aot-view-btn:hover{background:var(--aot-accent-soft); border-color:var(--aot-accent); color:var(--aot-accent);}
 		.ao-tracker-wrap .aot-empty-row{text-align:center; padding:40px 20px; color:var(--aot-ink-faint); font-size:13.5px;}

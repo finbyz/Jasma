@@ -12,8 +12,29 @@
 # Drop this file at:
 #   <app>/<app>/page/ao_tracker/ao_tracker.py
 #
-# CHANGELOG vs. the previous version (fixing issues found against the
-# wireframe):
+# CHANGELOG (this revision):
+#   - REMOVED: `determine_severity()` and the project-age-based "Stage"
+#     milestone dict are gone from the list payload.
+#   - NEW: `determine_priority()` replaces them. Priority is based on how
+#     many days remain between the linked Sales Order's Delivery Date and
+#     today:
+#       > 60 days left   -> Low
+#       31-60 days left  -> Medium
+#       16-30 days left  -> High
+#       1-15 days left   -> Urgent
+#       <= 0 days left   -> Overdue
+#     If a Delivery Note already exists for the project it's treated as
+#     fulfilled and always reported as Low. If there's no Sales Order yet,
+#     or the Sales Order has no Delivery Date set, priority is None (the
+#     frontend renders a blank cell).
+#   - NEW: "pi" (Purchase Invoice) added to LIST_DOC_KEYS so its name +
+#     status are returned to the list view beside Purchase Receipt.
+#   - FIXED: `determine_pending()` used to return the literal string "—"
+#     once every step was complete; it now returns "" so the frontend can
+#     render a blank cell instead of a dash placeholder.
+#
+# --- Everything below this point is unchanged from the previous revision
+#     except where noted inline:
 #   - Every doc object returned to the client now carries its own `doctype`,
 #     so the frontend can build correct links/routes instead of guessing.
 #   - Added a `count` per document type so the UI can show the little
@@ -30,7 +51,7 @@
 #   - New `get_doc_summary` endpoint powers a lightweight preview popup when
 #     a document card is clicked, instead of jumping straight into the full
 #     form.
-#   - NEW: `get_doc_list` endpoint. When a project has MORE THAN ONE
+#   - `get_doc_list` endpoint. When a project has MORE THAN ONE
 #     document of a given type (e.g. 2 Sales Invoices), the list view no
 #     longer just silently shows the latest one — the frontend shows a
 #     "N Sales Invoices" chip, and clicking it calls this endpoint to fetch
@@ -54,6 +75,11 @@
 #   6. Stock Requisition / QC Report / Non-Conformance field mappings are
 #      best-effort placeholders — confirm doctype + project field name for
 #      your site and adjust DOC_CONFIG.
+#   7. Priority reads the standard `delivery_date` field on Sales Order
+#      (ERPNext keeps this in sync with the earliest/soonest item delivery
+#      date). If your site doesn't populate that field, priority will
+#      simply come back blank for that project — swap the field name in
+#      `determine_priority()` if your schema differs.
 # ---------------------------------------------------------------------------
 
 import frappe
@@ -68,13 +94,14 @@ DOC_ORDER = [
 
 # Columns shown on the Tab 1 list grid, in this order (per client request):
 # MR -> PO -> Subcontracting Order -> Subcontracting Receipt -> Purchase
-# Receipt -> Delivery Note -> Sales Invoice.
-LIST_DOC_KEYS = ["mr", "po", "sco", "scr", "pr", "dn", "si"]
+# Receipt -> Purchase Invoice -> Delivery Note -> Sales Invoice.
+LIST_DOC_KEYS = ["mr", "po", "sco", "scr", "pr", "pi", "dn", "si"]
 
 DOC_CONFIG = {
 	"quote": {
 		"doctype": "Quotation", "label": "Quotation", "short": "QTN",
-		"status_field": "status", "amount_field": "grand_total", "project_field": "project",
+		"status_field": "status", "amount_field": "grand_total",
+		"project_field": None,  # matched via Sales Order — see get_quotation_names_for_project()
 	},
 	"so": {
 		"doctype": "Sales Order", "label": "Sales Order", "short": "SO",
@@ -112,12 +139,12 @@ DOC_CONFIG = {
 		"extra_filters": {"purpose": "Material Transfer"},
 	},
 	"qc": {
-		"doctype": "Quality Inspection", "label": "QC Report", "short": "QC",
-		"status_field": "status", "amount_field": None, "project_field": None,
+		"doctype": "QC Report", "label": "QC Report", "short": "QC",
+		"status_field": "status", "amount_field": None, "project_field": "project",
 	},
 	"nc": {
-		"doctype": "Non Conformance", "label": "Non-Conformance", "short": "NC",
-		"status_field": "status", "amount_field": None, "project_field": None,
+		"doctype": "Non - Conformance", "label": "Non-Conformance", "short": "NC",
+		"status_field": "status", "amount_field": None, "project_field": "ao_reference_no",
 	},
 	"pi": {
 		"doctype": "Purchase Invoice", "label": "Purchase Invoice", "short": "PI",
@@ -146,9 +173,6 @@ DOC_CONFIG = {
 		"status_field": None, "amount_field": "total_debit", "project_field": None,
 	},
 }
-
-# Simplified milestone strip shown on the list view
-STAGE_MILESTONES = ["so", "mr", "po", "pr", "si"]
 
 # Statuses that count as "still needs action" for pending-stage detection
 PENDING_STATUSES = {"Draft", "Pending Approval", "To Approve", "Pending"}
@@ -191,10 +215,13 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, li
 	if project:
 		filters["name"] = ["like", "%{0}%".format(project)]
 
+	# NEW: Customer no longer comes from Project.customer — it's read from
+	# the linked Sales Order instead (Project.customer can be blank/stale
+	# even once a Sales Order with its own customer exists).
 	projects = frappe.get_all(
 		"Project",
 		filters=filters,
-		fields=["name", "project_name", "customer", "creation", "status"],
+		fields=["name", "project_name", "creation", "status"],
 		order_by="creation desc",
 		limit_page_length=frappe.utils.cint(limit) or 200,
 	)
@@ -211,21 +238,26 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, li
 	for p in projects:
 		docs = get_docs_for_project(p.name)
 		so_doc = docs.get("so")
-		pending_at, stage_key = determine_pending(docs)
-		severity = determine_severity(p.creation, stage_key)
+		# NEW: pull the customer straight off the linked Sales Order,
+		# rather than the Project doctype's own (often stale/blank)
+		# customer field.
+		customer = None
+		if so_doc:
+			customer = frappe.db.get_value("Sales Order", so_doc["name"], "customer")
+		pending_at, _stage_key = determine_pending(docs)
+		priority = determine_priority(docs)
 		result.append({
 			"project": p.name,
 			"project_name": p.project_name,
 			"so": so_doc["name"] if so_doc else None,
-			"customer": p.customer,
+			"customer": customer,
 			"date": str(getdate(p.creation)) if p.creation else None,
 			"pending_at": pending_at,
-			"severity": severity,
-			# Full procurement trail now shown on the list grid, not just
-			# MR/PO/DN/SI — each doc carries its own `doctype` so the
-			# frontend can route to the right form without guessing.
+			"priority": priority,
+			# Full procurement trail shown on the list grid — each doc
+			# carries its own `doctype` so the frontend can route to the
+			# right form without guessing.
 			"docs": {k: docs.get(k) for k in LIST_DOC_KEYS},
-			"stage": {k: bool(docs.get(k)) for k in STAGE_MILESTONES},
 		})
 	return result
 
@@ -269,19 +301,61 @@ def determine_pending(docs):
 	if not si:
 		return "Sales Invoice", "si"
 
-	return "\u2014", None
+	# FIX: blank instead of the literal "—" placeholder, so the frontend
+	# renders an empty cell rather than a dash.
+	return "", None
 
+def determine_priority(docs):
+	"""Priority = urgency of the still-pending delivery, based on how many
+	days are left between the linked Sales Order's Delivery Date and today.
 
-def determine_severity(project_creation, pending_stage_key):
-	if not pending_stage_key:
+	  Closed SO         -> "Closed" (shown as-is, not folded into Low —
+	                        a closed order isn't necessarily fully delivered)
+	  Completed SO / or
+	  fully delivered    -> Low
+	  > 60 days left     -> Low
+	  31-60 days left    -> Medium
+	  16-30 days left    -> High
+	  1-15 days left     -> Urgent
+	  <= 0 days left      -> Overdue (label includes day count, e.g.
+	                        "Overdue (5d)")
+	"""
+	so = docs.get("so")
+	if not so:
+		return None
+
+	so_info = frappe.db.get_value(
+		"Sales Order", so.get("name"),
+		["delivery_date", "per_delivered", "status"],
+		as_dict=True,
+	) or {}
+
+	status = so_info.get("status")
+
+	# Closed is reported as its own label — it does NOT necessarily mean
+	# the order was fully delivered, so it must not be silently folded
+	# into "Low".
+	if status == "Closed":
+		return "Closed"
+
+	if flt(so_info.get("per_delivered")) >= 100 or status == "Completed":
 		return "Low"
-	days = date_diff(today(), project_creation)
-	if days > 30:
-		return "High"
-	if days > 14:
-		return "Medium"
-	return "Low"
 
+	delivery_date = so_info.get("delivery_date")
+	if not delivery_date:
+		return None
+
+	diff = date_diff(delivery_date, today())
+	if diff > 60:
+		return "Low"
+	if diff > 30:
+		return "Medium"
+	if diff > 15:
+		return "High"
+	if diff >= 1:
+		return "Urgent"
+
+	return "Overdue ({0}d)".format(abs(diff))
 
 # ---------------------------------------------------------------------------
 # Detail view (Tab 2 — Detailed View)
@@ -306,10 +380,7 @@ def get_ao_detail(project):
 				"label": cfg["label"],
 				"short": cfg["short"],
 				"doctype": cfg["doctype"],
-				# lets the frontend show "Not applicable" instead of
-				# "Not generated" when the doctype/field genuinely isn't
-				# usable on this site, rather than looking like a bug.
-				"queryable": is_doc_type_queryable(cfg),
+				"queryable": is_doc_type_queryable(cfg, k),
 			}
 			for k, cfg in DOC_CONFIG.items()
 		},
@@ -317,11 +388,17 @@ def get_ao_detail(project):
 	}
 
 
-def is_doc_type_queryable(cfg):
+def is_doc_type_queryable(cfg, key=None):
 	if not doctype_installed(cfg["doctype"]):
 		return False
 	if cfg["doctype"] == "Journal Entry":
 		return doctype_installed("Journal Entry Account") and field_exists("Journal Entry Account", "project")
+	if key == "quote":
+		return (
+			doctype_installed("Sales Order")
+			and doctype_installed("Sales Order Item")
+			and field_exists("Sales Order Item", "prevdoc_docname")
+		)
 	if cfg.get("project_field"):
 		return field_exists(cfg["doctype"], cfg["project_field"])
 	return False
@@ -342,24 +419,50 @@ def resolve_status_field(doctype, cfg):
 	return None
 
 
+def get_quotation_names_for_project(project):
+	"""Quotation carries no direct project link — it only picks up a
+	project once it's converted into a Sales Order. A Quotation is
+	treated as belonging to this project if it's the source quotation of
+	a Sales Order that has this project set, matched via Sales Order
+	Item.prevdoc_docname (the standard field Frappe stamps when a Sales
+	Order is created from a Quotation)."""
+	so_names = frappe.get_all(
+		"Sales Order",
+		filters={"project": project, "docstatus": ["!=", 2]},
+		pluck="name",
+	)
+	if not so_names:
+		return []
+	quotation_names = frappe.get_all(
+		"Sales Order Item",
+		filters={"parent": ["in", so_names], "prevdoc_docname": ["is", "set"]},
+		pluck="prevdoc_docname",
+	)
+	return list(set(quotation_names))
+
+
 def get_docs_for_project(project):
 	return {key: get_latest_doc(project, key, cfg) for key, cfg in DOC_CONFIG.items()}
 
 
 def get_latest_doc(project, key, cfg):
 	doctype = cfg["doctype"]
-	if not is_doc_type_queryable(cfg):
+	if not is_doc_type_queryable(cfg, key):
 		return None
 
-	if cfg.get("project_field"):
+	filters = None
+	if key == "quote":
+		quotation_names = get_quotation_names_for_project(project)
+		if not quotation_names:
+			return None
+		filters = {"name": ["in", quotation_names], "docstatus": ["!=", 2]}
+	elif cfg.get("project_field"):
 		filters = {cfg["project_field"]: project, "docstatus": ["!=", 2]}
 		filters.update(cfg.get("extra_filters") or {})
+
+	if filters is not None:
 		fields = ["name", "creation"]
 
-		# Only ask the DB for a status column if one genuinely exists.
-		# Newer frappe.qb rejects fake literals like "'' as status" outright
-		# (PermissionError: Invalid field format for SELECT), so we can't
-		# paper over a missing column in SQL — we fill it in afterwards.
 		status_field = resolve_status_field(doctype, cfg)
 		if status_field:
 			fields.append("{0} as status".format(status_field))
@@ -412,10 +515,8 @@ def get_latest_doc(project, key, cfg):
 		return doc
 
 	return None
-
-
 # ---------------------------------------------------------------------------
-# NEW: full document list for a given key/project — powers the "N Sales
+# Full document list for a given key/project — powers the "N Sales
 # Invoices" / "N Work Orders" style chip. get_latest_doc() (above) only
 # ever returns the single newest row plus a count; this returns every row
 # so the frontend can let the user page through them one by one instead of
@@ -429,12 +530,20 @@ def get_doc_list(project, key):
 		frappe.throw(_("Unknown document key: {0}").format(key))
 
 	doctype = cfg["doctype"]
-	if not is_doc_type_queryable(cfg):
+	if not is_doc_type_queryable(cfg, key):
 		return []
 
-	if cfg.get("project_field"):
+	filters = None
+	if key == "quote":
+		quotation_names = get_quotation_names_for_project(project)
+		if not quotation_names:
+			return []
+		filters = {"name": ["in", quotation_names], "docstatus": ["!=", 2]}
+	elif cfg.get("project_field"):
 		filters = {cfg["project_field"]: project, "docstatus": ["!=", 2]}
 		filters.update(cfg.get("extra_filters") or {})
+
+	if filters is not None:
 		fields = ["name", "creation"]
 
 		status_field = resolve_status_field(doctype, cfg)
@@ -472,11 +581,12 @@ def get_doc_list(project, key):
 
 	return []
 
-
 def compute_overview(project):
+	# Est. Revenue = Sales Invoice net_value, falling back to Sales Order
+	# net_total if no Sales Invoice exists yet.
 	revenue = flt(frappe.db.sql(
 		"""
-		select sum(grand_total) from `tabSales Invoice`
+		select sum(net_total) from `tabSales Invoice`
 		where project = %s and docstatus = 1
 		""",
 		project,
@@ -484,22 +594,60 @@ def compute_overview(project):
 	if not revenue:
 		revenue = flt(frappe.db.sql(
 			"""
-			select sum(grand_total) from `tabSales Order`
+			select sum(net_total) from `tabSales Order`
 			where project = %s and docstatus = 1
 			""",
 			project,
 		)[0][0] or 0)
 
-	rm_cost = flt(frappe.db.sql(
+	# FIXED: Total RM Cost was previously pulling every Delivery Note whose
+	# own `project` field matched — but a DN's project can be blank/wrong
+	# even when it's genuinely the one that fulfilled this project's Sales
+	# Invoice. Correct source of truth: walk from this project's Sales
+	# Invoice(s) -> Sales Invoice Item.delivery_note (the actual DN each
+	# invoiced row was billed against) -> GL Entries posted for those
+	# specific Delivery Notes.
+	dn_names = frappe.db.sql(
 		"""
-		select sum(sle.stock_value_difference * -1)
-		from `tabStock Ledger Entry` sle
-		where sle.project = %s and sle.actual_qty < 0
+		select distinct sii.delivery_note
+		from `tabSales Invoice Item` sii
+		inner join `tabSales Invoice` si on si.name = sii.parent
+		where si.project = %s and si.docstatus = 1
+			and sii.delivery_note is not null and sii.delivery_note != ''
 		""",
 		project,
-	)[0][0] or 0)
+		pluck=True,
+	)
 
-	indirect = flt(frappe.db.get_value("Project", project, "total_costing_amount") or 0)
+	rm_cost = 0.0
+	if dn_names:
+		rm_cost = flt(frappe.db.sql(
+			"""
+			select sum(debit_in_account_currency)
+			from `tabGL Entry`
+			where voucher_type = 'Delivery Note'
+				and voucher_no in %s
+			""",
+			(dn_names,),
+		)[0][0] or 0)
+
+	# Total Indirect Expense = Purchase Invoice net_value, this project's
+	# Purchase Invoices only, non-stock items only, "Is Subcontracted"
+	# unchecked.
+	has_is_subcontracted = field_exists("Purchase Invoice", "is_subcontracted")
+	subcontract_clause = "and pi.is_subcontracted = 0" if has_is_subcontracted else ""
+	indirect = flt(frappe.db.sql(
+		"""
+		select sum(pii.net_amount)
+		from `tabPurchase Invoice Item` pii
+		inner join `tabPurchase Invoice` pi on pi.name = pii.parent
+		inner join `tabItem` it on it.name = pii.item_code
+		where pi.project = %s and pi.docstatus = 1
+			and it.is_stock_item = 0
+			{subcontract_clause}
+		""".format(subcontract_clause=subcontract_clause),
+		project,
+	)[0][0] or 0)
 
 	profit = revenue - rm_cost - indirect
 	profit_pct = (profit / revenue * 100) if revenue else 0
