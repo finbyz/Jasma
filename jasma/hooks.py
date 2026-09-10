@@ -13,6 +13,14 @@ from jasma.jasma.doc_events.purchase_order import apply_patch
 
 apply_patch()
 
+
+# --- Login Redirect feature --------------------------------------------------
+
+# Adds login_redirect_enabled / login_redirect_route to frappe.boot for the
+# current user (see overrides/boot.py). Runs on every boot request.
+
+boot_session = "jasma.jasma.ovveride.boot.boot_session"
+
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
 # 	{
@@ -43,11 +51,14 @@ fixtures = [
 # include js, css files in header of desk.html
 app_include_css = [
     "/assets/jasma/css/business_cycle_dashboard.css",
+    
 ]
 # app_include_js = "/assets/jasma/js/jasma.js"
 app_include_js = [
     "jasma.bundle.js",
     "/assets/jasma/js/file_uploader_link_name.js",
+    "/assets/jasma/js/login_redirect.js?v=1.4",
+    "/assets/jasma/js/hide_search.js"
 ]
 # include js, css files in header of web template
 # web_include_css = "/assets/jasma/css/jasma.css"
@@ -230,7 +241,9 @@ doc_events = {
 		"validate": [
             "jasma.jasma.doc_events.Sales_order.set_quotation_numbers",
             # "jasma.jasma.doc_events.Sales_order.distribute_packing_charges"
-        ]
+        ],
+        "on_submit": "jasma.jasma.doc_events.Sales_order.update_project_item_details",
+		"on_cancel": "jasma.jasma.doc_events.Sales_order.remove_project_item_details",
 	},
     "Material Request": {
 		"validate": "jasma.jasma.doc_events.material_request.validate",
@@ -317,7 +330,8 @@ doc_events = {
 # ------------------------------
 #
 override_whitelisted_methods = {
-	"erpnext.selling.doctype.sales_order.sales_order.make_material_request": "jasma.jasma.ovveride.material_request.make_material_request"
+	"erpnext.selling.doctype.sales_order.sales_order.make_material_request": "jasma.jasma.ovveride.material_request.make_material_request",
+    "erpnext.selling.doctype.sales_order.sales_order.make_sales_invoice": "jasma.jasma.ovveride.sales_order.make_sales_invoice"
 }
 #
 # each overriding function accepts a `data` argument;

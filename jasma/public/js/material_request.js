@@ -41,6 +41,7 @@ frappe.ui.form.on('Material Request', {
         if (frm.doc.status === 'Shipped') {
             frm.page.set_indicator(__('Shipped'), 'blue');
             watch_and_hide_stop_button(frm);
+            hide_create_button(frm);
         }
         // =========================
         // PRODUCTION PLAN BUTTON
@@ -172,4 +173,40 @@ function watch_and_hide_stop_button(frm) {
     const observer = new MutationObserver(remove_stop);
     observer.observe(container, { childList: true, subtree: true });
     frm.__shipped_stop_observer = observer;
+}
+
+function hide_create_button(frm) {
+    if (frm.__create_btn_observer) return; // already watching
+
+    const remove_create = () => {
+        if (frm.doc.status !== 'Shipped') return;
+        let $create_group = frm.page.get_inner_group_button(__('Create'));
+        if ($create_group && $create_group.length) {
+            $create_group.addClass('hide');
+        }
+    };
+
+    remove_create(); // try immediately in case it's already there
+
+    const container = frm.page.wrapper.get(0);
+    const observer = new MutationObserver(remove_create);
+    observer.observe(container, { childList: true, subtree: true });
+    frm.__create_btn_observer = observer;
+}function hide_create_button(frm) {
+    if (frm.__create_btn_observer) return; // already watching
+
+    const remove_create = () => {
+        if (frm.doc.status !== 'Shipped') return;
+        let $create_group = frm.page.get_inner_group_button(__('Create'));
+        if ($create_group && $create_group.length) {
+            $create_group.addClass('hide');
+        }
+    };
+
+    remove_create(); // try immediately in case it's already there
+
+    const container = frm.page.wrapper.get(0);
+    const observer = new MutationObserver(remove_create);
+    observer.observe(container, { childList: true, subtree: true });
+    frm.__create_btn_observer = observer;
 }

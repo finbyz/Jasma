@@ -108,8 +108,23 @@ from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from frappe.utils import nowdate
+import re
 
-
+def sanitize_bank_field(value, allow_slash=False):
+    """
+    Strip characters the netbanking upload rejects — e.g. , . & - ( ) —
+    keeping only letters, numbers, and spaces. When allow_slash=True
+    (used for DEBIT_NARR), '/' is kept as well; BNF_NAME never keeps it.
+    """
+    if not value:
+        return ""
+    pattern = r"[^A-Za-z0-9 /]" if allow_slash else r"[^A-Za-z0-9 ]"
+    if not allow_slash:
+        pattern = r"[^A-Za-z0-9 ]"
+    cleaned = re.sub(pattern, "", str(value))
+    # Collapse any resulting double spaces left behind by removed characters
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned
 
 
 @frappe.whitelist()
@@ -191,7 +206,7 @@ def export_payment_entries(payment_entries):
         if pe.party_bank_account:
             bank = frappe.get_doc("Bank Account", pe.party_bank_account)
             party_bank_account = bank.bank_account_no or ""
-            ban_name = bank.account_name or ""
+            ban_name = sanitize_bank_field(bank.account_name, allow_slash=False)
             is_icici = bool(bank.ifs_code) and bank.ifs_code.upper().startswith("ICIC")
             ifsc = "" if is_icici else (bank.ifs_code or "")
 
@@ -207,6 +222,7 @@ def export_payment_entries(payment_entries):
         if pe.references:
             ref = pe.references[0]
             debit_narr = ref.bill_no if ref.bill_no else (ref.reference_name or "")
+        debit_narr = sanitize_bank_field(debit_narr, allow_slash=True)
         debit_narr = debit_narr[:30]
 
         row = [

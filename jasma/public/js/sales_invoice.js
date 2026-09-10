@@ -458,12 +458,52 @@ function commercial_items_are_synced(frm, expected_rows) {
     });
 }
 
+
 function update_commercial_items_after_mapping(frm) {
     if (!frm.doc.__unsaved || !(frm.doc.items || []).length) {
         return;
     }
 
+    // If commercial_item already has rows (populated by the server-side
+    // make_sales_invoice override), leave them alone — don't overwrite.
+    if ((frm.doc.commercial_item || []).length > 0) {
+        return;
+    }
+
     update_commercial_items(frm);
+}
+
+function update_commercial_items(frm) {
+    if (!frm.fields_dict.commercial_item) {
+        return;
+    }
+
+    let commercial_rows = get_commercial_item_rows(frm);
+
+    frm.clear_table("commercial_item");
+
+    commercial_rows.forEach(row => {
+        let d = frm.add_child("commercial_item");
+        d.commercial_item_code = row.commercial_item_code;
+        d.commercial_item_name = row.commercial_item_name;
+        d.description = row.description;
+        d.quantity = row.quantity;
+        d.rate = row.rate;
+        d.amount = row.amount;
+    });
+
+    frm.refresh_field("commercial_item");
+}
+
+function get_commercial_item_rows(frm) {
+    return (frm.doc.items || []).map(row => ({
+        commercial_item_code: row.item_code || "",
+        commercial_item_name: row.item_name || "",
+        description: row.description || "",
+        quantity: flt(row.qty),
+        rate: flt(row.rate),
+        amount: flt(row.amount)
+    }));
 }
 
 function update_commercial_items(frm) {

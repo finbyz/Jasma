@@ -476,7 +476,10 @@ def get_dashboard(
         "as_of": nowdate(),
         "summary": summary,
         "stages": stages,
-        "procurement_cards": _get_procurement_cards(company, from_date, to_date),
+        "procurement_cards": (
+            _get_procurement_cards(company, from_date, to_date)
+            + _get_production_plan_cards(company, from_date, to_date)
+        ),
     }
 
 
@@ -624,7 +627,7 @@ def _get_procurement_cards(
             limit_page_length=50,
             order_by="modified desc",
         )
-        records = [r for r in records if flt(r.get("per_ordered")) < 100 and r.get("status") != "Stopped"]
+        records = [r for r in records if flt(r.get("per_ordered")) < 100 and r.get("status") not in ("Stopped", "Shipped")]
         card_recs = [
             {
                 "ao": r.name,
@@ -713,6 +716,8 @@ def _get_procurement_cards(
         po_fields = ["name", "transaction_date", "supplier", "supplier_name", "owner", "status", "per_received"]
         if po_meta.has_field("is_subcontracted"):
             po_fields.append("is_subcontracted")
+        if po_meta.has_field("project"):
+            po_fields.append("project")
 
         records = frappe.get_list(
             "Purchase Order",
@@ -728,6 +733,7 @@ def _get_procurement_cards(
                 "jpc": r.name,
                 "status": r.status or "To Receive",
                 "who": r.owner or "—",
+                "project": r.get("project") or "",
                 "doctype": "Purchase Order",
                 "_is_subcontracted": cint(r.get("is_subcontracted")),
             }
@@ -834,10 +840,14 @@ def _get_procurement_cards(
         f: dict[str, Any] = {"docstatus": 0}
         if company:
             f["company"] = company
+        dt_meta = frappe.get_meta(dt)
+        qc_fields = ["name", "posting_date", "supplier", "supplier_name", "owner", "status"]
+        if dt_meta.has_field("project"):
+            qc_fields.append("project")
         recs = frappe.get_list(
             dt,
             filters=f,
-            fields=["name", "posting_date", "supplier", "supplier_name", "owner", "status"],
+            fields=qc_fields,
             limit_page_length=20,
             order_by="modified desc",
         )
@@ -849,6 +859,7 @@ def _get_procurement_cards(
                 "jpc": r.name,
                 "status": r.status or "Draft",
                 "who": r.owner or "—",
+                "project": r.get("project") or "",
                 "doctype": dt,
             })
         # Attach child items per sub-doctype
@@ -873,10 +884,14 @@ def _get_procurement_cards(
         else None
     )
     if nc_doctype and frappe.has_permission(nc_doctype, "read"):
+        nc_meta_grouping = frappe.get_meta(nc_doctype)
+        nc_fields = ["name", "creation", "status", "product_name", "jasma_part_code", "owner"]
+        if nc_meta_grouping.has_field("ao_reference_no"):
+            nc_fields.append("ao_reference_no")
         records = frappe.get_list(
             nc_doctype,
             filters={"docstatus": 0},
-            fields=["name", "creation", "status", "product_name", "jasma_part_code", "owner"],
+            fields=nc_fields,
             limit_page_length=30,
             order_by="modified desc",
         )
@@ -902,6 +917,7 @@ def _get_procurement_cards(
                 "jpc": r.jasma_part_code or r.name,
                 "status": r.status or "Draft NC",
                 "who": r.owner or "—",
+                "project": r.get("ao_reference_no") or "",
                 "doctype": nc_doctype,
             }
             for r in records
@@ -922,10 +938,14 @@ def _get_procurement_cards(
         filters = {"docstatus": 1}
         if company:
             filters["company"] = company
+        po_meta_overdue = frappe.get_meta("Purchase Order")
+        overdue_fields = ["name", "transaction_date", "schedule_date", "supplier", "supplier_name", "owner", "status", "per_received"]
+        if po_meta_overdue.has_field("project"):
+            overdue_fields.append("project")
         records = frappe.get_list(
             "Purchase Order",
             filters=filters,
-            fields=["name", "transaction_date", "schedule_date", "supplier", "supplier_name", "owner", "status", "per_received"],
+            fields=overdue_fields,
             order_by="modified desc",
         )
 
@@ -949,9 +969,9 @@ def _get_procurement_cards(
                     "jpc": r.name,
                     "status": "Overdue PO",
                     "who": r.owner or "—",
+                    "project": r.get("project") or "",
                     "doctype": "Purchase Order",
                 })
-
         # Attach child items
         items_map = _fetch_items_for_docs("Purchase Order", [r["ao"] for r in overdue_recs])
         for rec in overdue_recs:
@@ -1378,6 +1398,7 @@ def _get_overdue_po_qty_by_item() -> dict[str, dict[str, Any]]:
                 "type": "Purchase Order",
                 "required_date": str(r.get("schedule_date") or "—"),
                 "supplier": r.get("supplier_name") or r.get("supplier") or "—",
+                "item_code": code,
             })
 
     # Subcontracting Order items overdue
@@ -1420,7 +1441,28 @@ def _get_overdue_po_qty_by_item() -> dict[str, dict[str, Any]]:
                 "type": "Subcontracting Order",
                 "required_date": str(r.get("schedule_date") or "—"),
                 "supplier": r.get("supplier_name") or r.get("supplier") or "—",
+                "item_code": code,
             })
+
+    # ── Resolve UOM from the Item master in one batch query ────────────────
+    # Safer than reading uom off the child tables directly: Subcontracting
+    # Order Item doesn't carry a uom column on every Frappe/ERPNext version,
+    # so we source it the same way Export Forecast already does.
+    all_codes = list(result.keys())
+    uom_by_code: dict[str, str] = {}
+    if all_codes:
+        item_rows = frappe.get_all(
+            "Item",
+            filters={"name": ["in", all_codes]},
+            fields=["name", "stock_uom"],
+        )
+        uom_by_code = {row.name: row.stock_uom or "" for row in item_rows}
+
+    for code, entry in result.items():
+        uom = uom_by_code.get(code, "")
+        for detail in entry["details"]:
+            detail["uom"] = uom
+            detail.pop("item_code", None)
 
     return result
 
@@ -1882,6 +1924,7 @@ def get_pending_so_details(
         return []
 
     result = []
+    item_uom = frappe.db.get_value("Item", item_code, "stock_uom") or ""
 
         # ── Build shared date filter clause (on Sales Order.transaction_date) ──
     date_conditions: list[str] = []
@@ -1929,6 +1972,7 @@ def get_pending_so_details(
             "so": s.get("so_name"),
             "cust": s.get("customer_name") or s.get("customer") or "—",
             "qty": rem_qty,
+            "uom": item_uom,
             "due": str(s.get("so_delivery_date") or s.get("item_delivery_date") or "—"),
             "project": s.get("project") or "—",
         })
@@ -2042,6 +2086,7 @@ def get_pending_so_details(
                     "so": f"{ps.get('so_name')} (via BOM → {p_label})",
                     "cust": ps.get("customer_name") or ps.get("customer") or "—",
                     "qty": round(needed_component_qty, 2),
+                    "uom": item_uom,
                     "due": str(ps.get("so_delivery_date") or ps.get("item_delivery_date") or "—"),
                     "project": ps.get("project") or "—",
                 })
@@ -2259,3 +2304,82 @@ def get_export_forecast_details(
                 })
 
     return result
+
+
+def _get_production_plan_cards(
+    company: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return Production Plan card summaries: Material Requested, Draft, Not Started."""
+    if not _doctype_exists("Production Plan") or not frappe.has_permission("Production Plan", "read"):
+        return []
+
+    pp_meta = frappe.get_meta("Production Plan")
+    date_field = "posting_date" if pp_meta.has_field("posting_date") else "creation"
+
+    def _base_filters() -> dict[str, Any]:
+        f: dict[str, Any] = {}
+        if company and pp_meta.has_field("company"):
+            f["company"] = company
+        if from_date and to_date:
+            f[date_field] = ["between", [from_date, to_date]]
+        elif from_date:
+            f[date_field] = [">=", from_date]
+        elif to_date:
+            f[date_field] = ["<=", to_date]
+        return f
+
+    def _fetch(extra_filters: dict[str, Any], card_id: str, title: str, urgent: bool = False) -> dict[str, Any]:
+        filters = {**_base_filters(), **extra_filters}
+        fields = ["name", date_field, "status", "owner", "company"]
+        has_project = pp_meta.has_field("project")
+        if has_project:
+            fields.append("project")
+
+        records = frappe.get_list(
+            "Production Plan",
+            filters=filters,
+            fields=fields,
+            limit_page_length=50,
+            order_by="modified desc",
+        )
+        card_recs = [
+            {
+                "ao": r.name,
+                "date": str(r.get(date_field) or ""),
+                "item": r.get("status") or title,
+                "jpc": r.name,
+                "status": r.get("status") or title,
+                "who": r.get("owner") or "—",
+                "project": (r.get("project") or "") if has_project else "",
+                "doctype": "Production Plan",
+            }
+            for r in records
+        ]
+        return {
+            "id": card_id,
+            "title": _(title),
+            "doctype": "Production Plan",
+            "count": len(card_recs),
+            "urg": urgent,
+            "items": card_recs,
+        }
+
+    return [
+        _fetch(
+            {"status": "Material Requested"},
+            "pp_material_requested",
+            "Production Plan - Material Requested",
+        ),
+        _fetch(
+            {"docstatus": 0},
+            "pp_draft",
+            "Production Plan - Draft",
+        ),
+        _fetch(
+            {"status": "Submitted"},
+            "pp_not_started",
+            "Production Plan - Not Started",
+        ),
+    ]

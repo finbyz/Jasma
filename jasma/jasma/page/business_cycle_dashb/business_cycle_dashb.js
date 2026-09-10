@@ -5,14 +5,14 @@ const business_cycle_dashboard_routes = [
 ];
 
 function ensure_business_cycle_dashboard(wrapper) {
+	if (wrapper.business_cycle_dashb) {
+		return;
+	}
 	frappe.require("/assets/jasma/css/business_cycle_dashboard.css", () => {
 		if (!wrapper.business_cycle_dashb) {
 			wrapper.business_cycle_dashb = new MELBusinessCycleDashboard(wrapper);
 		}
 	});
-	if (!wrapper.business_cycle_dashb) {
-		wrapper.business_cycle_dashb = new MELBusinessCycleDashboard(wrapper);
-	}
 }
 
 business_cycle_dashboard_routes.forEach((route) => {
@@ -58,6 +58,7 @@ class MELBusinessCycleDashboard {
 		this.loading = false;
 		this.refresh_timer = null;
 		this.suppress_filter_refresh = true;
+		this._control_ready_promises = [];   // ← add this
 
 		this.colors = {
 			mr_approved: { cls: "clr-cyan", icon: "octicon octicon-file", clr: "#0891b2" },
@@ -67,13 +68,17 @@ class MELBusinessCycleDashboard {
 			qc_pending: { cls: "clr-emerald", icon: "octicon octicon-search", clr: "#059669" },
 			nc_pending: { cls: "clr-rose", icon: "octicon octicon-alert", clr: "#e11d48" },
 			overdue_po: { cls: "clr-red", icon: "octicon octicon-clock", clr: "#dc2626" },
+			// ── Production Plan cards ──
+			pp_material_requested: { cls: "clr-indigo", icon: "octicon octicon-package", clr: "#4f46e5" },
+			pp_draft: { cls: "clr-amber", icon: "octicon octicon-pencil", clr: "#d97706" },
+			pp_not_started: { cls: "clr-slate", icon: "octicon octicon-circle-slash", clr: "#475569" },
 		};
 
 		this.build();
 		this.suppress_filter_refresh = false;
 		this.bind_events();
 		this.configure_page_actions();
-		this.refresh();
+		Promise.all(this._control_ready_promises).then(() => this.refresh());
 	}
 
 	build() {
@@ -100,6 +105,10 @@ class MELBusinessCycleDashboard {
 
 				<div style="padding: 8px 24px 28px 24px;">
 					<div class="grid-7" id="mel-cardGrid"></div>
+				</div>
+
+				<div style="padding: 0 24px 28px 24px;">
+					<div class="grid-full" id="mel-ppCardGrid"></div>
 				</div>
 
 				<div class="sec-bar">
@@ -227,8 +236,12 @@ class MELBusinessCycleDashboard {
 			render_input: true,
 		});
 		control.refresh();
+
+		this._control_ready_promises = this._control_ready_promises || [];
 		if (df.default) {
-			control.set_value(df.default);
+			// set_value() resolves asynchronously — track it so we know
+			// exactly when the control's value is actually committed.
+			this._control_ready_promises.push(Promise.resolve(control.set_value(df.default)));
 		}
 		return control;
 	}
@@ -324,11 +337,14 @@ class MELBusinessCycleDashboard {
 
 	clear_filters() {
 		this.suppress_filter_refresh = true;
-		this.controls.company.set_value(frappe.defaults.get_user_default("Company") || "");
-		this.controls.from_date.set_value("");
-		this.controls.to_date.set_value("");
-		this.suppress_filter_refresh = false;
-		this.refresh();
+		const p1 = Promise.resolve(this.controls.company.set_value(frappe.defaults.get_user_default("Company") || ""));
+		const p2 = Promise.resolve(this.controls.from_date.set_value(""));
+		const p3 = Promise.resolve(this.controls.to_date.set_value(""));
+
+		Promise.all([p1, p2, p3]).then(() => {
+			this.suppress_filter_refresh = false;
+			this.refresh();
+		});
 	}
 
 	async call(method, args = {}) {
@@ -367,12 +383,18 @@ class MELBusinessCycleDashboard {
 
 	render_overview_cards() {
 		const $grid = this.$main.find("#mel-cardGrid").empty();
-		let html = "";
+		const $ppGrid = this.$main.find("#mel-ppCardGrid").empty();
 		const cards = this.procurement_cards || [];
 
-		cards.forEach((c, idx) => {
+		// Production Plan cards render separately, below the main scrolling
+		// row, as a full-width responsive grid instead of horizontal scroll.
+		const pp_ids = new Set(["pp_material_requested", "pp_draft", "pp_not_started"]);
+		const main_cards = cards.filter((c) => !pp_ids.has(c.id));
+		const pp_cards = cards.filter((c) => pp_ids.has(c.id));
+
+		const render_card = (c, idx) => {
 			const config = this.colors[c.id] || { cls: "clr-slate", icon: "octicon octicon-file", clr: "#475569" };
-			html += `
+			return `
 				<div class="dash-card ${config.cls} anim-in" style="animation-delay:${idx * 0.05}s" data-cid="${c.id}">
 					${c.urg ? `<div class="urgent-dot"></div>` : ""}
 					<div class="card-icon"><i class="${config.icon}"></i></div>
@@ -381,9 +403,14 @@ class MELBusinessCycleDashboard {
 					<div class="card-hint"><i class="octicon octicon-link-external" style="margin-right:6px;"></i>${__("Click to View")}</div>
 				</div>
 			`;
-		});
-		$grid.html(html || `<div class="text-muted p-4">${__("No procurement cards available")}</div>`);
-	}
+		};
+
+    $grid.html(
+        main_cards.map(render_card).join("") ||
+        `<div class="text-muted p-4">${__("No procurement cards available")}</div>`
+    );
+    $ppGrid.html(pp_cards.map(render_card).join(""));
+}
 
 	render_stock_table(filter_query = "") {
 		const $body = this.$main.find("#mel-stockBody").empty();
@@ -488,7 +515,7 @@ class MELBusinessCycleDashboard {
 	}
 
 
-	// ─── Stage Dialog (accordion, single-open, date formatted, no dupe button) ──
+	// ─── Stage Dialog (AO-grouped accordion, single-open rows, no dupe button) ──
 	open_stage_list_dialog(cid) {
 		const cards = this.procurement_cards || [];
 		const card = cards.find((c) => c.id === cid);
@@ -497,86 +524,112 @@ class MELBusinessCycleDashboard {
 		const card_default_doctype = card.doctype || "Purchase Order";
 		const items = card.items || [];
 
+		// ── Group records by AO Number (it.project) ─────────────────────────
+		const groups = new Map();
+		items.forEach((it) => {
+			const ao_key = (it.project && String(it.project).trim()) || __("No AO Number");
+			if (!groups.has(ao_key)) groups.set(ao_key, []);
+			groups.get(ao_key).push(it);
+		});
+
 		let rows_html = "";
 		if (items.length) {
-			items.forEach((it, idx) => {
-				const row_id = `mel-row-${idx}`;
-				// Use per-item doctype if available (e.g. QC Pending: PR vs SCR)
-				const row_doctype = it.doctype || card_default_doctype;
-				const date_display = fmt_date(it.date);
+			let group_idx = 0;
+			for (const [ao_label, group_items] of groups.entries()) {
+				const group_id = `mel-ao-group-${group_idx}`;
+				let inner_rows_html = "";
 
-				// Status badge color
-				const status_lc = (it.status || "").toLowerCase();
-				let status_cls = "bdg-slate";
-				if (status_lc.includes("draft")) status_cls = "bdg-amber";
-				else if (status_lc.includes("overdue")) status_cls = "bdg-rose";
-				else if (status_lc.includes("ordered") || status_lc.includes("received") || status_lc.includes("submitted")) status_cls = "bdg-green";
+				group_items.forEach((it, item_idx) => {
+					const row_id = `${group_id}-row-${item_idx}`;
+					const row_doctype = it.doctype || card_default_doctype;
+					const date_display = fmt_date(it.date);
+
+					const status_lc = (it.status || "").toLowerCase();
+					let status_cls = "bdg-slate";
+					if (status_lc.includes("draft")) status_cls = "bdg-amber";
+					else if (status_lc.includes("overdue")) status_cls = "bdg-rose";
+					else if (status_lc.includes("ordered") || status_lc.includes("received") || status_lc.includes("submitted")) status_cls = "bdg-green";
+
+					inner_rows_html += `
+						<div class="mel-collapsible-row" id="${row_id}" data-row-idx="${item_idx}">
+							<div class="mel-row-header" data-row-toggle="${row_id}">
+								<span class="mel-row-chevron" id="${row_id}-icon">▶</span>
+								<a class="mel-row-docid" onclick="event.stopPropagation();frappe.set_route('Form', '${row_doctype}', '${frappe.utils.escape_html(it.ao)}')">
+									${frappe.utils.escape_html(it.ao)}
+								</a>
+								${row_doctype !== "Non - Conformance" ? `<span class="mel-row-doctype-hint">${frappe.utils.escape_html(it.item || "")}</span>` : ""}
+								<span class="mel-row-date-badge">${date_display}</span>
+								<span class="bdg ${status_cls} mel-row-status-badge">${frappe.utils.escape_html(it.status || "")}</span>
+							</div>
+							<div class="mel-row-detail" id="${row_id}-detail" style="display:none;">
+							${(() => {
+								if (row_doctype === "Non - Conformance") {
+									return `
+									<div style="padding:16px;background:#f8fafc;border-radius:8px;margin-bottom:12px;border:1px solid #e2e8f0;">
+										<div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:4px;">${__("Product Name")}</div>
+										<div style="font-size:14px;font-weight:600;color:#1e293b;">${frappe.utils.escape_html(it.item || "—")}</div>
+									</div>`;
+								}
+								const doc_items = it.doc_items || [];
+								if (!doc_items.length) {
+									return `<div class="text-center text-muted" style="padding:14px 0;font-size:13px;">${__("No line items found")}</div>`;
+								}
+								const has_received_col = doc_items.some(di => di.received_qty > 0);
+								const has_rate_col = doc_items.some(di => di.rate > 0);
+								const trows = doc_items.map((di) => {
+									const rem = has_received_col ? (di.qty - (di.received_qty || 0)) : null;
+									const rem_cls = rem !== null && rem > 0 ? "bdg-amber" : "bdg-green";
+									return `<tr>
+										<td><span class="bdg bdg-indigo" style="font-size:11px;">${frappe.utils.escape_html(di.item_code)}</span></td>
+										<td style="font-weight:600;">${frappe.utils.escape_html(di.item_name)}</td>
+										<td style="text-align:right;"><span class="bdg bdg-slate">${di.qty} ${frappe.utils.escape_html(di.uom)}</span></td>
+										${has_received_col ? `<td style="text-align:right;"><span class="bdg ${rem_cls}">${rem} ${__("rem")}</span></td>` : ""}
+										<td style="color:#64748b;">${di.schedule_date ? fmt_date(di.schedule_date) : "—"}</td>
+										${has_rate_col ? `<td style="color:#475569;">${di.rate > 0 ? format_currency(di.rate) : "—"}</td>` : ""}
+									</tr>`;
+								}).join("");
+								return `
+								<div class="mel-doc-items-scroll">
+									<table class="mel-doc-items-table">
+										<thead>
+											<tr>
+												<th>${__("Code")}</th>
+												<th>${__("Item Name")}</th>
+												<th style="text-align:right;">${__("Qty")}</th>
+												${has_received_col ? `<th style="text-align:right;">${__("Remaining")}</th>` : ""}
+												<th>${__("Req. Date")}</th>
+												${has_rate_col ? `<th>${__("Rate")}</th>` : ""}
+											</tr>
+										</thead>
+										<tbody>${trows}</tbody>
+									</table>
+								</div>`;
+							})()}
+							<div style="margin-top:10px;display:flex;justify-content:flex-end;">
+								<button class="btn-b" type="button" onclick="frappe.set_route('Form', '${row_doctype}', '${frappe.utils.escape_html(it.ao)}')">
+									<i class="octicon octicon-link-external" style="margin-right:6px;"></i>${__("Open Full Form")}
+								</button>
+							</div>
+						</div>
+						</div>
+					`;
+				});
 
 				rows_html += `
-					<div class="mel-collapsible-row" id="${row_id}" data-row-idx="${idx}">
-						<div class="mel-row-header" data-row-toggle="${row_id}">
-							<span class="mel-row-chevron" id="${row_id}-icon">▶</span>
-							<a class="mel-row-docid" onclick="event.stopPropagation();frappe.set_route('Form', '${row_doctype}', '${frappe.utils.escape_html(it.ao)}')">
-								${frappe.utils.escape_html(it.ao)}
-							</a>
-							${row_doctype !== "Non - Conformance" ? `<span class="mel-row-doctype-hint">${frappe.utils.escape_html(it.item || "")}</span>` : ""}
-							<span class="mel-row-date-badge">${date_display}</span>
-							<span class="bdg ${status_cls} mel-row-status-badge">${frappe.utils.escape_html(it.status || "")}</span>
-							${it.project ? `<span class="bdg bdg-indigo mel-row-project-badge" title="${__('Project')}: ${frappe.utils.escape_html(it.project)}" onclick="event.stopPropagation();frappe.set_route('Form','Project','${frappe.utils.escape_html(it.project)}')">&#128193; ${frappe.utils.escape_html(it.project)}</span>` : ""}
+					<div class="mel-ao-group" id="${group_id}">
+						<div class="mel-ao-group-header" data-group-toggle="${group_id}">
+							<span class="mel-ao-group-chevron" id="${group_id}-icon">▶</span>
+							<span class="mel-ao-group-icon">📁</span>
+							<span class="mel-ao-group-title">${frappe.utils.escape_html(ao_label)}</span>
+							<span class="mel-ao-group-count">${group_items.length} ${__("records")}</span>
 						</div>
-						<div class="mel-row-detail" id="${row_id}-detail" style="display:none;">
-						${(() => {
-							if (row_doctype === "Non - Conformance") {
-								return `
-								<div style="padding:16px;background:#f8fafc;border-radius:8px;margin-bottom:12px;border:1px solid #e2e8f0;">
-									<div style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;margin-bottom:4px;">${__("Product Name")}</div>
-									<div style="font-size:14px;font-weight:600;color:#1e293b;">${frappe.utils.escape_html(it.item || "—")}</div>
-								</div>`;
-							}
-							const doc_items = it.doc_items || [];
-							if (!doc_items.length) {
-								return `<div class="text-center text-muted" style="padding:14px 0;font-size:13px;">${__("No line items found")}</div>`;
-							}
-							const has_received_col = doc_items.some(di => di.received_qty > 0);
-							const has_rate_col = doc_items.some(di => di.rate > 0);
-							const trows = doc_items.map((di) => {
-								const rem = has_received_col ? (di.qty - (di.received_qty || 0)) : null;
-								const rem_cls = rem !== null && rem > 0 ? "bdg-amber" : "bdg-green";
-								return `<tr>
-									<td><span class="bdg bdg-indigo" style="font-size:11px;">${frappe.utils.escape_html(di.item_code)}</span></td>
-									<td style="font-weight:600;">${frappe.utils.escape_html(di.item_name)}</td>
-									<td style="text-align:right;"><span class="bdg bdg-slate">${di.qty} ${frappe.utils.escape_html(di.uom)}</span></td>
-									${has_received_col ? `<td style="text-align:right;"><span class="bdg ${rem_cls}">${rem} ${__("rem")}</span></td>` : ""}
-									<td style="color:#64748b;">${di.schedule_date ? fmt_date(di.schedule_date) : "—"}</td>
-									${has_rate_col ? `<td style="color:#475569;">${di.rate > 0 ? format_currency(di.rate) : "—"}</td>` : ""}
-								</tr>`;
-							}).join("");
-							return `
-							<div class="mel-doc-items-scroll">
-								<table class="mel-doc-items-table">
-									<thead>
-										<tr>
-											<th>${__("Code")}</th>
-											<th>${__("Item Name")}</th>
-											<th style="text-align:right;">${__("Qty")}</th>
-											${has_received_col ? `<th style="text-align:right;">${__("Remaining")}</th>` : ""}
-											<th>${__("Req. Date")}</th>
-											${has_rate_col ? `<th>${__("Rate")}</th>` : ""}
-										</tr>
-									</thead>
-									<tbody>${trows}</tbody>
-								</table>
-							</div>`;
-						})()}
-						<div style="margin-top:10px;display:flex;justify-content:flex-end;">
-							<button class="btn-b" type="button" onclick="frappe.set_route('Form', '${row_doctype}', '${frappe.utils.escape_html(it.ao)}')">
-								<i class="octicon octicon-link-external" style="margin-right:6px;"></i>${__("Open Full Form")}
-							</button>
+						<div class="mel-ao-group-body" id="${group_id}-body" style="display:none;">
+							${inner_rows_html}
 						</div>
-					</div>
 					</div>
 				`;
-			});
+				group_idx++;
+			}
 		} else {
 			rows_html = `<div class="text-center text-muted p-4">${__("No records found in database for this stage")}</div>`;
 		}
@@ -585,15 +638,20 @@ class MELBusinessCycleDashboard {
 			<div class="modal-head">
 				<div>
 					<div class="modal-head-title">${frappe.utils.escape_html(card.title)} — ${__("Detailed Record Inspection")}</div>
-					<div class="modal-head-sub">${items.length} ${__("records in current workflow stage")}</div>
+					<div class="modal-head-sub">${items.length} ${__("records")} · ${groups.size} ${__("AO group(s) in current workflow stage")}</div>
 				</div>
 				<div style="display:flex;align-items:center;gap:8px;">
 					<button class="btn-x" data-close-modal type="button">✕</button>
 				</div>
 			</div>
 			<div style="padding:16px 24px 8px 24px;display:flex;align-items:center;justify-content:space-between;">
-				<input type="text" class="f-input-light" id="mel-dialogSearch" placeholder="${__("Search records...")}" style="width:300px;">
-				<span style="font-size:13px;color:#64748b;">${__("DocType")}: <strong>${card_default_doctype}</strong></span>
+				<input type="text" class="f-input-light" id="mel-dialogSearch" placeholder="${__("Search AO number or records...")}" style="width:300px;">
+				<div style="display:flex;align-items:center;gap:12px;">
+					<button class="btn-s mel-expand-all-ao" type="button" data-expanded="false">
+						<i class="octicon octicon-unfold" style="margin-right:4px;"></i>${__("Expand All")}
+					</button>
+					<span style="font-size:13px;color:#64748b;">${__("DocType")}: <strong>${card_default_doctype}</strong></span>
+				</div>
 			</div>
 			<div style="padding:8px 24px 24px 24px;max-height:60vh;overflow-y:auto;" id="mel-collapsible-list">
 				${rows_html}
@@ -609,7 +667,44 @@ class MELBusinessCycleDashboard {
 		this.$main.find("#mel-modalBody").html(content);
 		this.$main.find("#mel-modal").addClass("show");
 
-		// ── Accordion: single-open logic ────────────────────────────────────
+		// ── Expand All / Collapse All toggle ──────────────────────────────────
+		this.$main.find(".mel-expand-all-ao").off("click").on("click", (e) => {
+			const $btn = $(e.currentTarget);
+			const currentlyExpanded = $btn.data("expanded") === true || $btn.data("expanded") === "true";
+			const willExpand = !currentlyExpanded;
+
+			this.$main.find(".mel-ao-group-body").each((_, body) => {
+				const $body = $(body);
+				$body.toggle(willExpand);
+				if (!willExpand) {
+					// Collapsing — also reset any open MR row details inside,
+					// same rule as the individual group-toggle handler.
+					$body.find(".mel-row-detail").hide();
+					$body.find(".mel-row-chevron").text("▶");
+				}
+			});
+			this.$main.find(".mel-ao-group-chevron").text(willExpand ? "▼" : "▶");
+
+			$btn.data("expanded", willExpand);
+			$btn.html(
+				willExpand
+					? `<i class="octicon octicon-fold" style="margin-right:4px;"></i>${__("Collapse All")}`
+					: `<i class="octicon octicon-unfold" style="margin-right:4px;"></i>${__("Expand All")}`
+			);
+		});
+
+		// ── AO Group toggle (multiple groups can stay open at once) ──────────
+		this.$main.find("#mel-collapsible-list").off("click", "[data-group-toggle]").on("click", "[data-group-toggle]", (e) => {
+			e.stopPropagation();
+			const group_id = $(e.currentTarget).data("group-toggle");
+			const $body = this.$main.find(`#${group_id}-body`);
+			const $icon = this.$main.find(`#${group_id}-icon`);
+			const isOpen = $body.is(":visible");
+			$body.toggle(!isOpen);
+			$icon.text(isOpen ? "▶" : "▼");
+		});
+
+		// ── Row detail: single-open logic (unchanged from before) ────────────
 		this.$main.find("#mel-collapsible-list").off("click", "[data-row-toggle]").on("click", "[data-row-toggle]", (e) => {
 			e.stopPropagation();
 			const row_id = $(e.currentTarget).data("row-toggle");
@@ -617,23 +712,36 @@ class MELBusinessCycleDashboard {
 			const $icon = this.$main.find(`#${row_id}-icon`);
 			const isOpen = $detail.is(":visible");
 
-			// Close all
 			this.$main.find(".mel-row-detail").hide();
 			this.$main.find(".mel-row-chevron").text("▶");
 
-			// Open clicked if it was closed
 			if (!isOpen) {
 				$detail.show();
 				$icon.text("▼");
 			}
 		});
 
-		// ── Search filter ────────────────────────────────────────────────────
+		// ── Search: matches AO group label OR any row inside it ──────────────
 		this.$main.find("#mel-dialogSearch").off("input").on("input", (e) => {
 			const q = $(e.currentTarget).val().toLowerCase();
-			this.$main.find(".mel-collapsible-row").each((_, row) => {
-				const text = $(row).text().toLowerCase();
-				$(row).toggle(text.includes(q));
+			this.$main.find(".mel-ao-group").each((_, group) => {
+				const $group = $(group);
+				const group_label_text = $group.find(".mel-ao-group-title").text().toLowerCase();
+				let any_visible = group_label_text.includes(q);
+
+				$group.find(".mel-collapsible-row").each((_, row) => {
+					const text = $(row).text().toLowerCase();
+					const match = !q || text.includes(q) || group_label_text.includes(q);
+					$(row).toggle(match);
+					if (match) any_visible = true;
+				});
+
+				$group.toggle(any_visible);
+
+				if (q && any_visible) {
+					$group.find(".mel-ao-group-body").show();
+					$group.find(".mel-ao-group-chevron").text("▼");
+				}
 			});
 		});
 	}
@@ -642,7 +750,7 @@ class MELBusinessCycleDashboard {
 		const today = frappe.datetime.get_today();
 		const filter_map = {
 			mr_approved:  { docstatus: 0 },
-			po_pending:   { docstatus: 1, material_request_type: "Purchase" },
+			po_pending:   { docstatus: 1, material_request_type: "Purchase" ,status: ["not in", ["Shipped"]]},
 			subcon_po:    { docstatus: 1 },
 			pr_pending: {
 				docstatus: 1,
@@ -657,11 +765,33 @@ class MELBusinessCycleDashboard {
 				per_received: ["<", 100],
 				schedule_date: ["<=", today],
 			},
+			// ── Production Plan cards ──
+			pp_material_requested: { status: "Material Requested" },
+			pp_draft:              { docstatus: 0 },
+			pp_not_started:        { status: "Submitted" },
 		};
 
 		const route_options = {
 			...(filter_map[cid] || {}),
 		};
+
+		// Production Plan cards also carry the dashboard's Company / Date filters
+		// through to the List View, same as what was used to compute the count.
+		const pp_ids = ["pp_material_requested", "pp_draft", "pp_not_started"];
+		if (pp_ids.includes(cid)) {
+			const filters = this.get_filters();
+			if (filters.company) {
+				route_options.company = filters.company;
+			}
+			const pp_date_field = "posting_date"; // matches date_field used server-side
+			if (filters.from_date && filters.to_date) {
+				route_options[pp_date_field] = ["between", [filters.from_date, filters.to_date]];
+			} else if (filters.from_date) {
+				route_options[pp_date_field] = [">=", filters.from_date];
+			} else if (filters.to_date) {
+				route_options[pp_date_field] = ["<=", filters.to_date];
+			}
+		}
 
 		frappe.route_options = route_options;
 		frappe.set_route("List", doctype);
@@ -687,7 +817,7 @@ class MELBusinessCycleDashboard {
 						</td>
 						<td><span class="bdg ${type_cls}">${frappe.utils.escape_html(d.type)}</span></td>
 						<td>${frappe.utils.escape_html(d.supplier)}</td>
-						<td><span class="bdg bdg-rose">${d.qty}</span></td>
+						<td><span class="bdg bdg-rose">${d.qty} ${frappe.utils.escape_html(d.uom || "")}</span></td>
 						<td>${fmt_date(d.required_date)}</td>
 					</tr>
 				`;
@@ -812,7 +942,7 @@ class MELBusinessCycleDashboard {
 						<td>
 							${o.project && o.project !== "—" ? `<a style="font-weight:600;color:#4f46e5;text-decoration:underline;" onclick="event.stopPropagation();frappe.set_route('Form', 'Project', '${frappe.utils.escape_html(o.project)}')">${frappe.utils.escape_html(o.project)}</a>` : `<span class="bdg bdg-slate">—</span>`}
 						</td>
-						<td><span class="bdg bdg-amber">${o.qty}</span></td>
+						<td><span class="bdg bdg-amber">${o.qty} ${frappe.utils.escape_html(o.uom || "")}</span></td>
 						<td>${fmt_date(o.due)}</td>
 					</tr>
 				`;
