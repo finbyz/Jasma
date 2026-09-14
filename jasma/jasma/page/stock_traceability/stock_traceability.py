@@ -193,24 +193,15 @@ def split_front(lots, front_qty):
 # Untraced-shortfall diagnostics (see module docstring note above)
 # --------------------------------------------------------------------------- #
 
-def _diagnose_shortfall(item_code, warehouse, before_datetime):
-	"""When the backward scan can't cover the needed qty, work out WHY
-	instead of just labelling it "Opening Stock". Read-only — never changes
-	what's traced, only what's reported for the untraced remainder.
-
-	Returns a dict:
-	{item_name, hint_entry, hint_entry_type, hint_sle, note, short}
-	`short` is True whenever the underlying entry is a Stock Reconciliation
-	(the standard way Opening Stock is recorded) or when no entry was found
-	anywhere — in both cases the frontend renders a minimal two-line note
-	("Opening Stock / Stock Reconciliation Entry" + item code) instead of
-	the full diagnostic paragraph, since there's nothing actionable to
-	investigate in either scenario.
+def _diagnose_shortfall(item_code, warehouse, before_datetime, excluded_sles=None):
+	"""When the backward scan can't cover the needed qty, resolve the
+	opening stock or Stock Reconciliation source.
 	"""
 	item_name = frappe.db.get_value("Item", item_code, "item_name") or item_code
 
 	def _short(hint_entry=None, hint_entry_type=None, hint_sle=None):
 		return {
+			"item_code": item_code,
 			"item_name": item_name,
 			"hint_entry": hint_entry,
 			"hint_entry_type": hint_entry_type,
@@ -219,153 +210,108 @@ def _diagnose_shortfall(item_code, warehouse, before_datetime):
 			"short": True,
 		}
 
-	# Case 0: an inward SLE for this EXACT item + warehouse, before this
-	# date, DOES exist — but stage1_backward_scan() still didn't pick it up
-	# as a source (excluded by actual_qty<=0 / is_cancelled, or a query-
-	# level mismatch). Kept as the FULL diagnostic UNLESS the entry itself
-	# is a Stock Reconciliation — that's Opening Stock by definition, so it
-	# gets the short note instead.
-	exact_row = frappe.db.sql(
+	# 1. Check if an opening Stock Reconciliation exists for this item & warehouse
+	# on or before this datetime (or as an initial opening record).
+	reco_row = frappe.db.sql(
 		"""
+		select name, actual_qty, qty_after_transaction, voucher_type, voucher_no,
+		       timestamp(posting_date, posting_time) as posting_datetime
+		from `tabStock Ledger Entry`
+		where item_code = %(item_code)s and warehouse = %(warehouse)s
+		  and is_cancelled = 0
+		  and voucher_type = 'Stock Reconciliation'
+		  and timestamp(posting_date, posting_time) <= %(before)s
+		order by posting_date desc, posting_time desc
+		limit 1
+		""",
+		{"item_code": item_code, "warehouse": warehouse, "before": before_datetime},
+		as_dict=True,
+	)
+	if reco_row:
+		r = reco_row[0]
+		return _short(r.voucher_no, r.voucher_type, r.name)
+
+	# 2. Check if an opening Stock Entry exists
+	open_se = frappe.db.sql(
+		"""
+		select name, actual_qty, qty_after_transaction, voucher_type, voucher_no,
+		       timestamp(posting_date, posting_time) as posting_datetime
+		from `tabStock Ledger Entry`
+		where item_code = %(item_code)s and warehouse = %(warehouse)s
+		  and is_cancelled = 0
+		  and (voucher_no like '%%OPEN%%' or voucher_no like '%%OP-%%')
+		  and timestamp(posting_date, posting_time) <= %(before)s
+		order by posting_date desc, posting_time desc
+		limit 1
+		""",
+		{"item_code": item_code, "warehouse": warehouse, "before": before_datetime},
+		as_dict=True,
+	)
+	if open_se:
+		r = open_se[0]
+		return _short(r.voucher_no, r.voucher_type, r.name)
+
+	# 3. Check for any earlier inward entry before this date, excluding already-scanned SLEs
+	sle_cond = ""
+	params = {"item_code": item_code, "warehouse": warehouse, "before": before_datetime}
+	if excluded_sles:
+		sle_cond = "and name not in %(excluded)s"
+		params["excluded"] = tuple(excluded_sles)
+
+	exact_row = frappe.db.sql(
+		f"""
 		select name, actual_qty, is_cancelled, voucher_type, voucher_no,
 		       timestamp(posting_date, posting_time) as posting_datetime
 		from `tabStock Ledger Entry`
 		where item_code = %(item_code)s and warehouse = %(warehouse)s
 		  and timestamp(posting_date, posting_time) < %(before)s
+		  {sle_cond}
 		order by posting_date desc, posting_time desc
 		limit 1
 		""",
-		{"item_code": item_code, "warehouse": warehouse, "before": before_datetime},
+		params,
 		as_dict=True,
 	)
 	if exact_row:
 		e = exact_row[0]
-		if e.voucher_type == "Stock Reconciliation":
-			return _short(e.voucher_no, e.voucher_type, e.name)
+		return _short(e.voucher_no, e.voucher_type, e.name)
 
-		reasons = []
-		if flt(e.actual_qty) <= 0:
-			reasons.append(f"actual_qty is {e.actual_qty} (not > 0, so it isn't an inward entry)")
-		if e.is_cancelled:
-			reasons.append("is_cancelled = 1 on this entry")
-		if reasons:
-			return {
-				"item_name": item_name,
-				"hint_entry": e.voucher_no,
-				"hint_entry_type": e.voucher_type,
-				"hint_sle": e.name,
-				"note": (
-					f"An SLE for {item_name} ({item_code}) in {warehouse} before this date "
-					f"DOES exist — {e.voucher_type} {e.voucher_no} ({e.name}) — but it was "
-					f"excluded from tracing because: {'; '.join(reasons)}. This is a data "
-					f"issue on that specific entry, not a genuine untraced quantity — "
-					f"check it directly."
-				),
-				"short": False,
-			}
-		return {
-			"item_name": item_name,
-			"hint_entry": e.voucher_no,
-			"hint_entry_type": e.voucher_type,
-			"hint_sle": e.name,
-			"note": (
-				f"An SLE for {item_name} ({item_code}) in {warehouse} before this date "
-				f"DOES exist and looks valid ({e.voucher_type} {e.voucher_no}, {e.name}), "
-				f"but the backward scan still didn't pick it up. This points to a query- "
-				f"level mismatch (e.g. warehouse value formatting, or the before-datetime "
-				f"comparison) rather than a real untraced quantity — please report this "
-				f"exact case for investigation."
-			),
-			"short": False,
-		}
-
-	# Case 1: an inward SLE for this exact item+warehouse exists, but it's
-	# dated AFTER this delivery. Short-circuited to the short note if it's
-	# a Stock Reconciliation entry too.
-	future_row = frappe.db.sql(
+	# 4. Check if any Stock Reconciliation exists for this item anywhere
+	any_reco = frappe.db.sql(
 		"""
-		select name, voucher_type, voucher_no,
-		       timestamp(posting_date, posting_time) as posting_datetime
+		select name, voucher_type, voucher_no
 		from `tabStock Ledger Entry`
-		where item_code = %(item_code)s and warehouse = %(warehouse)s
-		  and actual_qty > 0 and is_cancelled = 0
-		  and timestamp(posting_date, posting_time) >= %(before)s
-		order by posting_date asc, posting_time asc
-		limit 1
-		""",
-		{"item_code": item_code, "warehouse": warehouse, "before": before_datetime},
-		as_dict=True,
-	)
-	if future_row:
-		f = future_row[0]
-		if f.voucher_type == "Stock Reconciliation":
-			return _short(f.voucher_no, f.voucher_type, f.name)
-		return {
-			"item_name": item_name,
-			"hint_entry": f.voucher_no,
-			"hint_entry_type": f.voucher_type,
-			"hint_sle": f.name,
-			"note": (
-				f"No inward stock found before this date for {item_name} ({item_code}) in "
-				f"{warehouse}. Nearest inward entry is {f.voucher_type} {f.voucher_no} "
-				f"({f.posting_datetime}) — but it's dated AFTER this delivery, so it can't "
-				f"be the source. Check the posting dates."
-			),
-			"short": False,
-		}
-
-	# Case 2: an inward SLE for this item exists, but in a DIFFERENT
-	# warehouse before this date. Same Stock Reconciliation short-circuit.
-	other_wh_row = frappe.db.sql(
-		"""
-		select name, warehouse, voucher_type, voucher_no,
-		       timestamp(posting_date, posting_time) as posting_datetime
-		from `tabStock Ledger Entry`
-		where item_code = %(item_code)s and warehouse != %(warehouse)s
-		  and actual_qty > 0 and is_cancelled = 0
-		  and timestamp(posting_date, posting_time) < %(before)s
+		where item_code = %(item_code)s
+		  and is_cancelled = 0
+		  and voucher_type = 'Stock Reconciliation'
 		order by posting_date desc, posting_time desc
 		limit 1
 		""",
-		{"item_code": item_code, "warehouse": warehouse, "before": before_datetime},
+		{"item_code": item_code},
 		as_dict=True,
 	)
-	if other_wh_row:
-		o = other_wh_row[0]
-		if o.voucher_type == "Stock Reconciliation":
-			return _short(o.voucher_no, o.voucher_type, o.name)
-		return {
-			"item_name": item_name,
-			"hint_entry": o.voucher_no,
-			"hint_entry_type": o.voucher_type,
-			"hint_sle": o.name,
-			"note": (
-				f"No inward stock for {item_name} ({item_code}) in {warehouse} before this "
-				f"date. It WAS received into a different warehouse ({o.warehouse}) via "
-				f"{o.voucher_type} {o.voucher_no} — likely a missing Material Transfer "
-				f"into {warehouse}."
-			),
-			"short": False,
-		}
+	if any_reco:
+		r = any_reco[0]
+		return _short(r.voucher_no, r.voucher_type, r.name)
 
-	# Case 3: genuinely nothing anywhere — this IS opening stock by
-	# definition, so it's always the short note.
+	# 5. Default to plain Opening Stock
 	return _short()
 
 
-def _untraced_branch(qty, item_code, warehouse, before_datetime):
+def _untraced_branch(qty, item_code, warehouse, before_datetime, excluded_sles=None):
 	"""Builds one untraced branch dict, populated with the diagnostic hint
 	from _diagnose_shortfall()."""
-	diag = _diagnose_shortfall(item_code, warehouse, before_datetime)
+	diag = _diagnose_shortfall(item_code, warehouse, before_datetime, excluded_sles=excluded_sles)
 	return {
 		"qty": qty,
 		"untraced": True,
-		"note": diag["note"],
-		"item_name": diag["item_name"],
-		"hint_entry": diag["hint_entry"],
-		"hint_entry_type": diag["hint_entry_type"],
-		"hint_sle": diag["hint_sle"],
-		"short": diag.get("short", False),
+		"note": diag.get("note") or "Opening Stock / Stock Reconciliation Entry",
+		"item_code": item_code,
+		"item_name": diag.get("item_name") or item_code,
+		"hint_entry": diag.get("hint_entry"),
+		"hint_entry_type": diag.get("hint_entry_type"),
+		"hint_sle": diag.get("hint_sle"),
+		"short": diag.get("short", True),
 	}
 
 
@@ -388,12 +334,8 @@ def build_branches(item_code, warehouse, qty, before_datetime, depth=0):
 
 	shortfall = qty - covered
 	if shortfall > EPSILON:
-		# No earlier inward SLE found in this exact warehouse (opening
-		# stock / stock reconciliation / negative stock) — or one exists
-		# but couldn't be used (see _diagnose_shortfall() for the exact
-		# reason surfaced to the UI, including the Case 0 same-warehouse
-		# exclusion check).
-		branches.append(_untraced_branch(shortfall, item_code, warehouse, before_datetime))
+		scanned_sles = [lot["sle"] for lot in lots if lot.get("sle")]
+		branches.append(_untraced_branch(shortfall, item_code, warehouse, before_datetime, excluded_sles=scanned_sles))
 	return branches
 
 
@@ -447,7 +389,14 @@ def resolve_purchase_receipt(lot, item_code, warehouse):
 			if mr and mr.material_request:
 				chain.append(_node("request", "Material Request", mr.material_request, lot["qty"]))
 
-	return [{"qty": lot["qty"], "chain": chain, "src": lot["voucher_no"], "po": po}]
+	return [{
+		"qty": lot["qty"],
+		"chain": chain,
+		"src": lot["voucher_no"],
+		"src_type": "Purchase Receipt",
+		"po": po,
+		"po_type": "Purchase Order" if po else None,
+	}]
 
 
 _scr_order_field_cache = {}
@@ -582,7 +531,7 @@ def resolve_subcontracting_receipt(lot, item_code, warehouse, depth):
 		as_dict=True,
 	)
 	if not scr_item_row or not flt(scr_item_row.qty):
-		return [{"qty": lot["qty"], "chain": base_chain, "src": lot["voucher_no"], "po": so_no}]
+		return [{"qty": lot["qty"], "chain": base_chain, "src": lot["voucher_no"], "src_type": "Subcontracting Receipt", "po": so_no, "po_type": so_label}]
 
 	ratio = lot["qty"] / flt(scr_item_row.qty)
 	supplied = frappe.db.get_all(
@@ -591,7 +540,7 @@ def resolve_subcontracting_receipt(lot, item_code, warehouse, depth):
 		fields=["rm_item_code", "consumed_qty"],
 	)
 	if not supplied or not scr:
-		return [{"qty": lot["qty"], "chain": base_chain, "src": lot["voucher_no"], "po": so_no}]
+		return [{"qty": lot["qty"], "chain": base_chain, "src": lot["voucher_no"], "src_type": "Subcontracting Receipt", "po": so_no, "po_type": so_label}]
 
 	before_dt = f"{scr.posting_date} {scr.posting_time}"
 	subcontractor_wh = scr.supplier_warehouse  # ASSUMPTION: field holds subcontractor's stock loc
@@ -618,7 +567,7 @@ def resolve_subcontracting_receipt(lot, item_code, warehouse, depth):
 			branches.append(rb)
 
 	if not branches:
-		branches = [{"qty": lot["qty"], "chain": base_chain, "src": lot["voucher_no"], "po": so_no}]
+		branches = [{"qty": lot["qty"], "chain": base_chain, "src": lot["voucher_no"], "src_type": "Subcontracting Receipt", "po": so_no, "po_type": so_label}]
 	return branches
 
 def resolve_stock_entry(lot, item_code, warehouse, depth):
@@ -731,10 +680,8 @@ def trace_delivery_note_item(dn_name, item_code, warehouse):
 	consumed_sum = sum(b["qty"] for b in branches)
 	untraced_qty = consumed_qty - consumed_sum
 	if untraced_qty > EPSILON:
-		# See module docstring note — this now carries the real reason
-		# (nearby-but-unusable entry / same-warehouse exclusion / genuine
-		# opening stock) instead of a flat "Opening Stock" label.
-		branches.append(_untraced_branch(untraced_qty, item_code, warehouse, before_dt))
+		scanned_sles = [lot["sle"] for lot in all_lots if lot.get("sle")]
+		branches.append(_untraced_branch(untraced_qty, item_code, warehouse, before_dt, excluded_sles=scanned_sles))
 
 	return branches
 
@@ -901,6 +848,29 @@ def get_so_links(sales_order):
 	project = frappe.db.get_value("Sales Order", sales_order, "project")
 	delivery_notes = get_dn_items_for_sales_order(sales_order)
 	return {"project": project, "delivery_notes": delivery_notes}
+
+
+@frappe.whitelist()
+def resolve_doctype(name):
+	"""Resolves the doctype for a given document name across standard traceability doctypes."""
+	if not name:
+		return None
+	for dt in [
+		"Purchase Order",
+		"Purchase Receipt",
+		"Stock Entry",
+		"Subcontracting Receipt",
+		"Subcontracting Order",
+		"Material Request",
+		"Delivery Note",
+		"Sales Order",
+		"Stock Reconciliation",
+		"Project",
+		"Item",
+	]:
+		if frappe.db.exists(dt, name):
+			return dt
+	return None
 
 
 def _delivery_notes_for_project(project):

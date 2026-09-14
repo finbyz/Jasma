@@ -882,16 +882,28 @@ class StockTraceability {
 			e.preventDefault();
 			const $t = $(e.currentTarget);
 			const name = $t.data('name');
-			// Explicit data-doctype (e.g. Item links from the Items Summary
-			// table, or Project links from the AO Number chip, or the
-			// title -> doctype map used by diagram nodes via node_doctype(),
-			// or the SLE / hint-entry links from the untraced diagnostics)
-			// wins; otherwise fall back to the naming-series guess.
-			const doctype = $t.data('doctype') || this.guess_doctype(name);
+			if (!name) return;
+			let doctype = $t.data('doctype') || this.guess_doctype(name);
+			if (!doctype) {
+				if ($t.hasClass('st-chip-po')) doctype = 'Purchase Order';
+				else if ($t.hasClass('st-chip-src')) doctype = 'Purchase Receipt';
+				else if ($t.hasClass('st-chip-dn')) doctype = 'Delivery Note';
+				else if ($t.hasClass('st-chip-ao')) doctype = 'Project';
+			}
 			if (doctype) {
 				frappe.set_route('Form', doctype, name);
 			} else {
-				frappe.msgprint(__('Could not resolve document type for {0}.', [name]));
+				frappe.call({
+					method: 'jasma.jasma.page.stock_traceability.stock_traceability.resolve_doctype',
+					args: { name: name },
+					callback: (r) => {
+						if (r && r.message) {
+							frappe.set_route('Form', r.message, name);
+						} else {
+							frappe.msgprint(__('Could not resolve document type for {0}.', [name]));
+						}
+					}
+				});
 			}
 		});
 
@@ -1246,56 +1258,51 @@ class StockTraceability {
 		if (tn.untraced) {
 			const b = tn.untraced;
 
-			// Short form: Stock Reconciliation / genuine Opening Stock —
-			// just the label + item code, no paragraph, no nearest-entry
-			// or SLE links.
-						// Short form: Stock Reconciliation / genuine Opening Stock —
-			// label + entry number (clickable, when one exists) + item
-			// code, no paragraph, no extra meta panel.
-			if (b.short && !b.skipped_valuation) {
-				const title = b.hint_entry ? __('Stock Reconciliation Entry') : __('Opening Stock');
-				const entryLine = b.hint_entry
-					? `<div class="st-node-s"><a class="st-node-meta-link st-doc-link" href="#" data-name="${frappe.utils.escape_html(b.hint_entry)}" data-doctype="${frappe.utils.escape_html(b.hint_entry_type || 'Stock Reconciliation')}">${frappe.utils.escape_html(b.hint_entry)}</a></div>`
-					: '';
+			if (b.skipped_valuation) {
 				return `
 					<div class="st-branch">
 						<div class="st-qty-label">${__('Qty')}: ${b.qty}</div>
 						<div class="st-node st-node-request" style="border-style:dashed; opacity:.85;">
 							<div class="st-node-inner">
-								<div class="st-node-t">${title}</div>
-								${entryLine}
-								<div class="st-node-s">${__('Item')}: ${frappe.utils.escape_html(b.item_name || '')}</div>
+								<div class="st-node-t">${__('Non-FIFO Item — Skipped')}</div>
+								<div class="st-node-s">${__('Item')}: ${frappe.utils.escape_html(b.item_name || b.item_code || '')}</div>
 							</div>
 						</div>
 					</div>`;
 			}
 
-			const hasHint = !b.skipped_valuation && b.hint_entry;
-			const title = b.skipped_valuation
-				? __('Non-FIFO Item — Skipped')
-				: (hasHint ? __('Nearby Entry Found — Not Usable') : __('Opening Stock'));
+			// Clean, compact card matching Image 1:
+			// Title: "Stock Reconciliation Entry" or "Opening Stock" (or entry type)
+			// Clickable Document link (e.g. STK-RECO-YY026)
+			// Item: <Item Code — Item Name>
+			// No verbose diagnostic paragraph.
+			let title = __('Opening Stock');
+			if (b.hint_entry_type === 'Stock Reconciliation' || (b.hint_entry && b.hint_entry.startsWith('STK-RECO'))) {
+				title = __('Stock Reconciliation Entry');
+			} else if (b.hint_entry && b.hint_entry_type) {
+				title = frappe.utils.escape_html(b.hint_entry_type);
+			}
 
-			const lines = [];
-			if (!b.skipped_valuation && b.item_name) {
-				lines.push(`<div>${__('Item')}: ${frappe.utils.escape_html(b.item_name)}</div>`);
-			}
-			if (hasHint) {
-				lines.push(`<div>${__('Nearest Entry')}: <a class="st-node-meta-link st-doc-link" href="#" data-name="${frappe.utils.escape_html(b.hint_entry)}" data-doctype="${frappe.utils.escape_html(b.hint_entry_type || '')}">${frappe.utils.escape_html(b.hint_entry)}</a></div>`);
-				if (b.hint_sle) {
-					lines.push(`<div>${__('SLE')}: <a class="st-node-meta-link st-doc-link" href="#" data-name="${frappe.utils.escape_html(b.hint_sle)}" data-doctype="Stock Ledger Entry">${frappe.utils.escape_html(b.hint_sle)}</a></div>`);
-				}
-			}
-			const hintHTML = lines.length ? `<div class="st-node-meta">${lines.join('')}</div>` : '';
+			const entryLine = b.hint_entry
+				? `<div class="st-node-s"><a class="st-node-meta-link st-doc-link" href="#" data-name="${frappe.utils.escape_html(b.hint_entry)}" data-doctype="${frappe.utils.escape_html(b.hint_entry_type || 'Stock Reconciliation')}">${frappe.utils.escape_html(b.hint_entry)}</a></div>`
+				: '';
+
+			const itemText = (b.item_code && b.item_name && !b.item_name.includes(b.item_code))
+				? `${b.item_code} — ${b.item_name}`
+				: (b.item_name || b.item_code || '');
+			const itemLine = itemText
+				? `<div class="st-node-s">${__('Item')}: ${frappe.utils.escape_html(itemText)}</div>`
+				: '';
 
 			return `
 				<div class="st-branch">
-					<div class="st-qty-label">${__('Qty')}: ${b.qty} (${__('untraced')})</div>
+					<div class="st-qty-label">${__('Qty')}: ${b.qty}</div>
 					<div class="st-node st-node-request" style="border-style:dashed; opacity:.85;">
 						<div class="st-node-inner">
 							<div class="st-node-t">${title}</div>
-							<div class="st-node-s">${frappe.utils.escape_html(b.note || __('Untraced quantity'))}</div>
+							${entryLine}
+							${itemLine}
 						</div>
-						${hintHTML}
 					</div>
 				</div>`;
 		}
@@ -1394,14 +1401,10 @@ class StockTraceability {
 					let reason;
 					if (b.skipped_valuation) {
 						reason = __('{0}, not FIFO', [it.valuationMethod || __('Non-FIFO')]);
-					} else if (b.short) {
-						reason = b.hint_entry
-							? `${this.chip_link(b.hint_entry, b.hint_entry_type || 'Stock Reconciliation', 'src')}`
-							: __('Opening Stock');
 					} else if (b.hint_entry) {
-						reason = `${__('Nearest entry')}: ${this.chip_link(b.hint_entry, b.hint_entry_type, 'src')}`;
+						reason = this.chip_link(b.hint_entry, b.hint_entry_type || 'Stock Reconciliation', 'src');
 					} else {
-						reason = __('Not traced (opening stock)');
+						reason = __('Opening Stock');
 					}
 					rows += `<tr>
 						${leadCells}
@@ -1424,12 +1427,15 @@ class StockTraceability {
 				const componentName = isRM ? (b.rm_name || '') : (it.name || '');
 				const componentCell = `${this.doc_link(componentCode, 'Item')}${componentName ? ' — <span class="st-muted">' + frappe.utils.escape_html(componentName) + '</span>' : ''}`;
 
+				const srcDoctype = b.src_type || this.guess_doctype(b.src) || (b.src && /^SCR/i.test(b.src) ? 'Subcontracting Receipt' : (/STK|RECO/i.test(b.src) ? 'Stock Reconciliation' : (/STE|MAT-STE/i.test(b.src) ? 'Stock Entry' : 'Purchase Receipt')));
+				const poDoctype = b.po_type || (b.po && /^SC/i.test(b.po) ? 'Subcontracting Order' : 'Purchase Order');
+
 				rows += `<tr>
 					${leadCells}
 					<td class="st-item-cell">${componentCell}</td>
 					<td>${b.qty}</td>
-					<td>${this.chip_link(b.src, null, 'src')}${b.via ? `<span class="st-via">${frappe.utils.escape_html(b.via)}</span>` : ''}</td>
-					<td>${this.chip_link(b.po, null, 'po')}</td>
+					<td>${this.chip_link(b.src, srcDoctype, 'src')}${b.via ? `<span class="st-via">${frappe.utils.escape_html(b.via)}</span>` : ''}</td>
+					<td>${this.chip_link(b.po, poDoctype, 'po')}</td>
 				</tr>`;
 			});
 		});
@@ -1464,17 +1470,22 @@ class StockTraceability {
 	// Heuristic prefix -> doctype map so report/diagram links can jump straight
 	// to the document. ADAPT this to your own naming series.
 	guess_doctype(name) {
+		if (!name) return null;
+		const s = String(name).trim();
 		const map = [
-			[/^PR-/, 'Purchase Receipt'],
-			[/^SCR-/, 'Subcontracting Receipt'],
-			[/^SC-PO-/, 'Subcontracting Order'],
-			[/^PO-/, 'Purchase Order'],
-			[/^SE-/, 'Stock Entry'],
-			[/^MR-/, 'Material Request'],
-			[/^SO-/, 'Sales Order'],
-			[/^DN-/, 'Delivery Note']
+			[/^(PR-|GRN)/i, 'Purchase Receipt'],
+			[/^SCR/i, 'Subcontracting Receipt'],
+			[/^SC-PO/i, 'Subcontracting Order'],
+			[/^PO/i, 'Purchase Order'],
+			[/^(MAT-)?ST?E/i, 'Stock Entry'],
+			[/^(STK-)?RECO/i, 'Stock Reconciliation'],
+			[/^MR/i, 'Material Request'],
+			[/^SO/i, 'Sales Order'],
+			[/^DN/i, 'Delivery Note'],
+			[/^AO/i, 'Project'],
+			[/^MAT-SLE/i, 'Stock Ledger Entry']
 		];
-		const hit = map.find(([re]) => re.test(name));
+		const hit = map.find(([re]) => re.test(s));
 		return hit ? hit[1] : null;
 	}
 
