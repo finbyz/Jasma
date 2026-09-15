@@ -226,10 +226,18 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, li
 		limit_page_length=frappe.utils.cint(limit) or 200,
 	)
 
+	# Only include projects that have a submitted Sales Order
+	so_projects = set(frappe.get_all(
+		"Sales Order",
+		filters={"project": ["is", "set"], "docstatus": 1},
+		pluck="project",
+	))
+	projects = [p for p in projects if p.name in so_projects]
+
 	if sales_order:
 		matching = set(frappe.get_all(
 			"Sales Order",
-			filters={"project": ["is", "set"], "name": ["like", "%{0}%".format(sales_order)]},
+			filters={"project": ["is", "set"], "name": ["like", "%{0}%".format(sales_order)], "docstatus": 1},
 			pluck="project",
 		))
 		projects = [p for p in projects if p.name in matching]
@@ -238,6 +246,9 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, li
 	for p in projects:
 		docs = get_docs_for_project(p.name)
 		so_doc = docs.get("so")
+		if not so_doc:
+			continue
+
 		# NEW: pull the customer straight off the linked Sales Order,
 		# rather than the Project doctype's own (often stale/blank)
 		# customer field.
@@ -301,9 +312,8 @@ def determine_pending(docs):
 	if not si:
 		return "Sales Invoice", "si"
 
-	# FIX: blank instead of the literal "—" placeholder, so the frontend
-	# renders an empty cell rather than a dash.
-	return "", None
+	# When Sales Invoice is created, procurement and invoicing cycle is Completed
+	return "Completed", "si"
 
 def determine_priority(docs):
 	"""Priority = urgency of the still-pending delivery, based on how many
@@ -365,11 +375,15 @@ def determine_priority(docs):
 def get_ao_detail(project):
 	p = frappe.get_doc("Project", project)
 	docs = get_docs_for_project(project)
+	so_doc = docs.get("so")
+	customer = p.customer
+	if not customer and so_doc:
+		customer = frappe.db.get_value("Sales Order", so_doc["name"], "customer")
 
 	return {
 		"project": p.name,
 		"project_name": p.project_name,
-		"customer": p.customer,
+		"customer": customer,
 		"date": str(getdate(p.creation)) if p.creation else None,
 		"status": p.status,
 		"overview": compute_overview(project),
@@ -392,16 +406,12 @@ def is_doc_type_queryable(cfg, key=None):
 	if not doctype_installed(cfg["doctype"]):
 		return False
 	if cfg["doctype"] == "Journal Entry":
-		return doctype_installed("Journal Entry Account") and field_exists("Journal Entry Account", "project")
+		return doctype_installed("Journal Entry Account")
+	if key in ("pe_in", "pe_out"):
+		return doctype_installed("Payment Entry")
 	if key == "quote":
-		return (
-			doctype_installed("Sales Order")
-			and doctype_installed("Sales Order Item")
-			and field_exists("Sales Order Item", "prevdoc_docname")
-		)
-	if cfg.get("project_field"):
-		return field_exists(cfg["doctype"], cfg["project_field"])
-	return False
+		return doctype_installed("Quotation")
+	return True
 
 
 def resolve_status_field(doctype, cfg):
@@ -419,108 +429,398 @@ def resolve_status_field(doctype, cfg):
 	return None
 
 
-def get_quotation_names_for_project(project):
-	"""Quotation carries no direct project link — it only picks up a
-	project once it's converted into a Sales Order. A Quotation is
-	treated as belonging to this project if it's the source quotation of
-	a Sales Order that has this project set, matched via Sales Order
-	Item.prevdoc_docname (the standard field Frappe stamps when a Sales
-	Order is created from a Quotation)."""
-	so_names = frappe.get_all(
+def get_project_document_map(project):
+	"""Discovers all documents belonging to this project/AO either directly
+	or via document connections (Sales Order -> Material Request -> PO -> PR/PI,
+	Sales Order -> Delivery Note -> Sales Invoice -> Payment Entry, etc.).
+	Only submitted documents (docstatus = 1) are included — Draft and Cancelled
+	entries are strictly excluded.
+	"""
+	doc_map = {k: set() for k in DOC_CONFIG.keys()}
+
+	# 1. Sales Orders (Primary anchor for AO)
+	so_names = set(frappe.get_all(
 		"Sales Order",
-		filters={"project": project, "docstatus": ["!=", 2]},
+		filters={"project": project, "docstatus": 1},
+		pluck="name",
+	))
+	doc_map["so"] = so_names
+
+	# 2. Quotations (via Sales Order Item.prevdoc_docname or direct project)
+	if so_names and doctype_installed("Sales Order Item") and field_exists("Sales Order Item", "prevdoc_docname"):
+		quotes = frappe.get_all(
+			"Sales Order Item",
+			filters={"parent": ["in", list(so_names)], "prevdoc_docname": ["is", "set"], "docstatus": 1},
+			pluck="prevdoc_docname",
+		)
+		doc_map["quote"].update(quotes)
+	if field_exists("Quotation", "project"):
+		direct_quotes = frappe.get_all(
+			"Quotation",
+			filters={"project": project, "docstatus": 1},
+			pluck="name",
+		)
+		doc_map["quote"].update(direct_quotes)
+
+	# 3. Material Requests (direct project or via Sales Order Item)
+	direct_mr = frappe.get_all(
+		"Material Request",
+		filters={"project": project, "docstatus": 1},
 		pluck="name",
 	)
-	if not so_names:
-		return []
-	quotation_names = frappe.get_all(
-		"Sales Order Item",
-		filters={"parent": ["in", so_names], "prevdoc_docname": ["is", "set"]},
-		pluck="prevdoc_docname",
+	doc_map["mr"].update(direct_mr)
+	if so_names and doctype_installed("Material Request Item") and field_exists("Material Request Item", "sales_order"):
+		mr_connected = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabMaterial Request Item`
+			WHERE sales_order IN %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(tuple(so_names),),
+			pluck=True,
+		)
+		doc_map["mr"].update(mr_connected)
+
+	# 4. Purchase Orders (direct project or via Sales Order or Material Request)
+	direct_po = frappe.get_all(
+		"Purchase Order",
+		filters={"project": project, "docstatus": 1},
+		pluck="name",
 	)
-	return list(set(quotation_names))
+	doc_map["po"].update(direct_po)
+	if so_names and doctype_installed("Purchase Order Item") and field_exists("Purchase Order Item", "sales_order"):
+		po_from_so = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabPurchase Order Item`
+			WHERE sales_order IN %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(tuple(so_names),),
+			pluck=True,
+		)
+		doc_map["po"].update(po_from_so)
+	if doc_map["mr"] and doctype_installed("Purchase Order Item") and field_exists("Purchase Order Item", "material_request"):
+		po_from_mr = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabPurchase Order Item`
+			WHERE material_request IN %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(tuple(doc_map["mr"]),),
+			pluck=True,
+		)
+		doc_map["po"].update(po_from_mr)
+
+	# 5. Subcontracting Orders (direct project or via PO)
+	if doctype_installed("Subcontracting Order"):
+		direct_sco = frappe.get_all(
+			"Subcontracting Order",
+			filters={"project": project, "docstatus": 1},
+			pluck="name",
+		)
+		doc_map["sco"].update(direct_sco)
+		if doc_map["po"] and field_exists("Subcontracting Order", "purchase_order"):
+			sco_from_po = frappe.get_all(
+				"Subcontracting Order",
+				filters={"purchase_order": ["in", list(doc_map["po"])], "docstatus": 1},
+				pluck="name",
+			)
+			doc_map["sco"].update(sco_from_po)
+
+	# 6. Subcontracting Receipts (direct project or via SCO)
+	if doctype_installed("Subcontracting Receipt"):
+		direct_scr = frappe.get_all(
+			"Subcontracting Receipt",
+			filters={"project": project, "docstatus": 1},
+			pluck="name",
+		)
+		doc_map["scr"].update(direct_scr)
+		if doc_map["sco"] and field_exists("Subcontracting Receipt", "subcontracting_order"):
+			scr_from_sco = frappe.get_all(
+				"Subcontracting Receipt",
+				filters={"subcontracting_order": ["in", list(doc_map["sco"])], "docstatus": 1},
+				pluck="name",
+			)
+			doc_map["scr"].update(scr_from_sco)
+
+	# 7. Purchase Receipts (direct project or via PO)
+	direct_pr = frappe.get_all(
+		"Purchase Receipt",
+		filters={"project": project, "docstatus": 1},
+		pluck="name",
+	)
+	doc_map["pr"].update(direct_pr)
+	if doc_map["po"] and doctype_installed("Purchase Receipt Item") and field_exists("Purchase Receipt Item", "purchase_order"):
+		pr_from_po = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabPurchase Receipt Item`
+			WHERE purchase_order IN %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(tuple(doc_map["po"]),),
+			pluck=True,
+		)
+		doc_map["pr"].update(pr_from_po)
+
+	# 8. Purchase Invoices (direct project or via PO or via PR)
+	direct_pi = frappe.get_all(
+		"Purchase Invoice",
+		filters={"project": project, "docstatus": 1},
+		pluck="name",
+	)
+	doc_map["pi"].update(direct_pi)
+	if doc_map["po"] and doctype_installed("Purchase Invoice Item") and field_exists("Purchase Invoice Item", "purchase_order"):
+		pi_from_po = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabPurchase Invoice Item`
+			WHERE purchase_order IN %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(tuple(doc_map["po"]),),
+			pluck=True,
+		)
+		doc_map["pi"].update(pi_from_po)
+	if doc_map["pr"] and doctype_installed("Purchase Invoice Item") and field_exists("Purchase Invoice Item", "purchase_receipt"):
+		pi_from_pr = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabPurchase Invoice Item`
+			WHERE purchase_receipt IN %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(tuple(doc_map["pr"]),),
+			pluck=True,
+		)
+		doc_map["pi"].update(pi_from_pr)
+
+	# 9. Delivery Notes (direct project or via Sales Order)
+	direct_dn = frappe.get_all(
+		"Delivery Note",
+		filters={"project": project, "docstatus": 1},
+		pluck="name",
+	)
+	doc_map["dn"].update(direct_dn)
+	if so_names and doctype_installed("Delivery Note Item") and field_exists("Delivery Note Item", "against_sales_order"):
+		dn_from_so = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabDelivery Note Item`
+			WHERE against_sales_order IN %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(tuple(so_names),),
+			pluck=True,
+		)
+		doc_map["dn"].update(dn_from_so)
+
+	# 10. Sales Invoices (direct project or via Sales Order or via Delivery Note)
+	direct_si = frappe.get_all(
+		"Sales Invoice",
+		filters={"project": project, "docstatus": 1},
+		pluck="name",
+	)
+	doc_map["si"].update(direct_si)
+	if so_names and doctype_installed("Sales Invoice Item") and field_exists("Sales Invoice Item", "sales_order"):
+		si_from_so = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabSales Invoice Item`
+			WHERE sales_order IN %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(tuple(so_names),),
+			pluck=True,
+		)
+		doc_map["si"].update(si_from_so)
+	if doc_map["dn"] and doctype_installed("Sales Invoice Item") and field_exists("Sales Invoice Item", "delivery_note"):
+		si_from_dn = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabSales Invoice Item`
+			WHERE delivery_note IN %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(tuple(doc_map["dn"]),),
+			pluck=True,
+		)
+		doc_map["si"].update(si_from_dn)
+	if doc_map["si"] and doctype_installed("Sales Invoice Item") and field_exists("Sales Invoice Item", "delivery_note"):
+		dn_from_si = frappe.db.sql(
+			"""
+			SELECT DISTINCT delivery_note FROM `tabSales Invoice Item`
+			WHERE parent IN %s AND delivery_note IS NOT NULL AND delivery_note != '' AND docstatus = 1
+			""",
+			(tuple(doc_map["si"]),),
+			pluck=True,
+		)
+		doc_map["dn"].update(dn_from_si)
+
+	# 11. Payment Entry - Received (pe_in)
+	# Direct project OR connected via Payment Entry Reference to Sales Order or Sales Invoice
+	direct_pe_in = frappe.get_all(
+		"Payment Entry",
+		filters={"project": project, "payment_type": "Receive", "docstatus": 1},
+		pluck="name",
+	)
+	doc_map["pe_in"].update(direct_pe_in)
+	if doctype_installed("Payment Entry Reference"):
+		ref_clauses = []
+		ref_params = []
+		if so_names:
+			ref_clauses.append("(per.reference_doctype = 'Sales Order' AND per.reference_name IN %s)")
+			ref_params.append(tuple(so_names))
+		if doc_map["si"]:
+			ref_clauses.append("(per.reference_doctype = 'Sales Invoice' AND per.reference_name IN %s)")
+			ref_params.append(tuple(doc_map["si"]))
+		if ref_clauses:
+			pe_in_connected = frappe.db.sql(
+				"""
+				SELECT DISTINCT per.parent
+				FROM `tabPayment Entry Reference` per
+				INNER JOIN `tabPayment Entry` pe ON pe.name = per.parent
+				WHERE per.docstatus = 1 AND pe.docstatus = 1
+					AND pe.payment_type = 'Receive'
+					AND ({0})
+				""".format(" OR ".join(ref_clauses)),
+				tuple(ref_params),
+				pluck=True,
+			)
+			doc_map["pe_in"].update(pe_in_connected)
+
+	# 12. Payment Entry - Paid (pe_out)
+	# Direct project OR connected via Payment Entry Reference to Purchase Order or Purchase Invoice
+	direct_pe_out = frappe.get_all(
+		"Payment Entry",
+		filters={"project": project, "payment_type": "Pay", "docstatus": 1},
+		pluck="name",
+	)
+	doc_map["pe_out"].update(direct_pe_out)
+	if doctype_installed("Payment Entry Reference"):
+		ref_clauses = []
+		ref_params = []
+		if doc_map["po"]:
+			ref_clauses.append("(per.reference_doctype = 'Purchase Order' AND per.reference_name IN %s)")
+			ref_params.append(tuple(doc_map["po"]))
+		if doc_map["pi"]:
+			ref_clauses.append("(per.reference_doctype = 'Purchase Invoice' AND per.reference_name IN %s)")
+			ref_params.append(tuple(doc_map["pi"]))
+		if ref_clauses:
+			pe_out_connected = frappe.db.sql(
+				"""
+				SELECT DISTINCT per.parent
+				FROM `tabPayment Entry Reference` per
+				INNER JOIN `tabPayment Entry` pe ON pe.name = per.parent
+				WHERE per.docstatus = 1 AND pe.docstatus = 1
+					AND pe.payment_type = 'Pay'
+					AND ({0})
+				""".format(" OR ".join(ref_clauses)),
+				tuple(ref_params),
+				pluck=True,
+			)
+			doc_map["pe_out"].update(pe_out_connected)
+
+	# 13. Stock Entry / Requisition (sr)
+	direct_sr = frappe.get_all(
+		"Stock Entry",
+		filters={"project": project, "purpose": "Material Transfer", "docstatus": 1},
+		pluck="name",
+	)
+	doc_map["sr"].update(direct_sr)
+	if so_names and doctype_installed("Stock Entry Detail") and field_exists("Stock Entry Detail", "against_sales_order"):
+		sr_from_so = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabStock Entry Detail`
+			WHERE against_sales_order IN %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(tuple(so_names),),
+			pluck=True,
+		)
+		doc_map["sr"].update(sr_from_so)
+
+	# 14. QC Report (qc) & Non-Conformance (nc)
+	if doctype_installed("QC Report"):
+		if field_exists("QC Report", "project"):
+			doc_map["qc"].update(frappe.get_all("QC Report", filters={"project": project, "docstatus": 1}, pluck="name"))
+		if doc_map["po"] and field_exists("QC Report", "po_no"):
+			doc_map["qc"].update(frappe.get_all("QC Report", filters={"po_no": ["in", list(doc_map["po"])], "docstatus": 1}, pluck="name"))
+		if doc_map["sco"] and field_exists("QC Report", "so_no"):
+			doc_map["qc"].update(frappe.get_all("QC Report", filters={"so_no": ["in", list(doc_map["sco"])], "docstatus": 1}, pluck="name"))
+
+	if doctype_installed("Non - Conformance"):
+		if field_exists("Non - Conformance", "ao_reference_no"):
+			doc_map["nc"].update(frappe.get_all("Non - Conformance", filters={"ao_reference_no": project, "docstatus": 1}, pluck="name"))
+		elif field_exists("Non - Conformance", "project"):
+			doc_map["nc"].update(frappe.get_all("Non - Conformance", filters={"project": project, "docstatus": 1}, pluck="name"))
+		if doc_map["po"] and field_exists("Non - Conformance", "po_reference_no"):
+			doc_map["nc"].update(frappe.get_all("Non - Conformance", filters={"po_reference_no": ["in", list(doc_map["po"])], "docstatus": 1}, pluck="name"))
+		if doc_map["qc"] and field_exists("Non - Conformance", "qc_report"):
+			doc_map["nc"].update(frappe.get_all("Non - Conformance", filters={"qc_report": ["in", list(doc_map["qc"])], "docstatus": 1}, pluck="name"))
+
+	# 15. Journal Entry (je)
+	je_names = set()
+	if doctype_installed("Journal Entry Account"):
+		if field_exists("Journal Entry Account", "project"):
+			je_direct = frappe.db.sql(
+				"""
+				SELECT DISTINCT jea.parent FROM `tabJournal Entry Account` jea
+				INNER JOIN `tabJournal Entry` je ON je.name = jea.parent
+				WHERE jea.project = %s AND je.docstatus = 1
+				""",
+				project,
+				pluck=True,
+			)
+			je_names.update(je_direct)
+		all_refs = list(so_names | doc_map["si"] | doc_map["po"] | doc_map["pi"])
+		if all_refs and field_exists("Journal Entry Account", "reference_name"):
+			je_ref = frappe.db.sql(
+				"""
+				SELECT DISTINCT jea.parent FROM `tabJournal Entry Account` jea
+				INNER JOIN `tabJournal Entry` je ON je.name = jea.parent
+				WHERE jea.reference_name IN %s AND je.docstatus = 1
+				""",
+				(tuple(all_refs),),
+				pluck=True,
+			)
+			je_names.update(je_ref)
+	doc_map["je"] = je_names
+
+	return doc_map
 
 
 def get_docs_for_project(project):
-	return {key: get_latest_doc(project, key, cfg) for key, cfg in DOC_CONFIG.items()}
+	doc_map = get_project_document_map(project)
+	return {key: get_latest_doc(project, key, cfg, doc_map) for key, cfg in DOC_CONFIG.items()}
 
 
-def get_latest_doc(project, key, cfg):
+def get_latest_doc(project, key, cfg, doc_map=None):
 	doctype = cfg["doctype"]
 	if not is_doc_type_queryable(cfg, key):
 		return None
 
-	filters = None
-	if key == "quote":
-		quotation_names = get_quotation_names_for_project(project)
-		if not quotation_names:
-			return None
-		filters = {"name": ["in", quotation_names], "docstatus": ["!=", 2]}
-	elif cfg.get("project_field"):
-		filters = {cfg["project_field"]: project, "docstatus": ["!=", 2]}
-		filters.update(cfg.get("extra_filters") or {})
+	if doc_map is None:
+		doc_map = get_project_document_map(project)
 
-	if filters is not None:
-		fields = ["name", "creation"]
+	names = doc_map.get(key) or set()
+	if not names:
+		return None
 
-		status_field = resolve_status_field(doctype, cfg)
-		if status_field:
-			fields.append("{0} as status".format(status_field))
-
-		if cfg.get("amount_field") and field_exists(doctype, cfg["amount_field"]):
-			fields.append("{0} as amount".format(cfg["amount_field"]))
-
-		count = frappe.db.count(doctype, filters=filters)
-		if not count:
-			return None
-
-		rows = frappe.get_all(doctype, filters=filters, fields=fields, order_by="creation desc", limit_page_length=1)
-		doc = rows[0]
-		if not status_field:
-			doc["status"] = None
-		doc["doctype"] = doctype
-		doc["count"] = count
-		return doc
-
+	fields = ["name", "creation"]
+	status_field = resolve_status_field(doctype, cfg)
+	if status_field:
+		fields.append("{0} as status".format(status_field))
+	if cfg.get("amount_field") and field_exists(doctype, cfg["amount_field"]):
+		fields.append("{0} as amount".format(cfg["amount_field"]))
 	if doctype == "Journal Entry":
-		count_row = frappe.db.sql(
-			"""
-			select count(distinct je.name)
-			from `tabJournal Entry` je
-			inner join `tabJournal Entry Account` jea on jea.parent = je.name
-			where jea.project = %s and je.docstatus != 2
-			""",
-			project,
-		)
-		count = count_row[0][0] if count_row else 0
-		if not count:
-			return None
+		fields.append("docstatus")
 
-		rows = frappe.db.sql(
-			"""
-			select je.name, je.docstatus, je.creation, je.total_debit as amount
-			from `tabJournal Entry` je
-			inner join `tabJournal Entry Account` jea on jea.parent = je.name
-			where jea.project = %s and je.docstatus != 2
-			order by je.creation desc
-			limit 1
-			""",
-			project,
-			as_dict=True,
-		)
-		doc = rows[0]
-		doc["status"] = "Submitted" if doc["docstatus"] == 1 else "Draft"
-		doc["doctype"] = "Journal Entry"
-		doc["count"] = count
-		return doc
+	filters = {"name": ["in", list(names)], "docstatus": 1}
+	count = frappe.db.count(doctype, filters=filters)
+	if not count:
+		return None
 
-	return None
+	rows = frappe.get_all(doctype, filters=filters, fields=fields, order_by="creation desc", limit_page_length=1)
+	if not rows:
+		return None
+	doc = rows[0]
+	if doctype == "Journal Entry":
+		doc["status"] = "Submitted"
+	elif not status_field:
+		doc["status"] = None
+	doc["doctype"] = doctype
+	doc["count"] = count
+	return doc
+
+
 # ---------------------------------------------------------------------------
 # Full document list for a given key/project — powers the "N Sales
-# Invoices" / "N Work Orders" style chip. get_latest_doc() (above) only
-# ever returns the single newest row plus a count; this returns every row
-# so the frontend can let the user page through them one by one instead of
-# only ever seeing the newest document.
+# Invoices" / "N Work Orders" style chip.
 # ---------------------------------------------------------------------------
 
 @frappe.whitelist()
@@ -533,121 +833,140 @@ def get_doc_list(project, key):
 	if not is_doc_type_queryable(cfg, key):
 		return []
 
-	filters = None
-	if key == "quote":
-		quotation_names = get_quotation_names_for_project(project)
-		if not quotation_names:
-			return []
-		filters = {"name": ["in", quotation_names], "docstatus": ["!=", 2]}
-	elif cfg.get("project_field"):
-		filters = {cfg["project_field"]: project, "docstatus": ["!=", 2]}
-		filters.update(cfg.get("extra_filters") or {})
+	doc_map = get_project_document_map(project)
+	names = doc_map.get(key) or set()
+	if not names:
+		return []
 
-	if filters is not None:
-		fields = ["name", "creation"]
-
-		status_field = resolve_status_field(doctype, cfg)
-		if status_field:
-			fields.append("{0} as status".format(status_field))
-
-		if cfg.get("amount_field") and field_exists(doctype, cfg["amount_field"]):
-			fields.append("{0} as amount".format(cfg["amount_field"]))
-
-		rows = frappe.get_all(
-			doctype, filters=filters, fields=fields, order_by="creation desc"
-		)
-		for r in rows:
-			r["doctype"] = doctype
-			if not status_field:
-				r["status"] = None
-		return rows
-
+	fields = ["name", "creation"]
+	status_field = resolve_status_field(doctype, cfg)
+	if status_field:
+		fields.append("{0} as status".format(status_field))
+	if cfg.get("amount_field") and field_exists(doctype, cfg["amount_field"]):
+		fields.append("{0} as amount".format(cfg["amount_field"]))
 	if doctype == "Journal Entry":
-		rows = frappe.db.sql(
-			"""
-			select distinct je.name, je.docstatus, je.creation, je.total_debit as amount
-			from `tabJournal Entry` je
-			inner join `tabJournal Entry Account` jea on jea.parent = je.name
-			where jea.project = %s and je.docstatus != 2
-			order by je.creation desc
-			""",
-			project,
-			as_dict=True,
-		)
-		for r in rows:
-			r["status"] = "Submitted" if r["docstatus"] == 1 else "Draft"
-			r["doctype"] = "Journal Entry"
-		return rows
+		fields.append("docstatus")
 
-	return []
+	filters = {"name": ["in", list(names)], "docstatus": 1}
+	rows = frappe.get_all(doctype, filters=filters, fields=fields, order_by="creation desc")
+	for r in rows:
+		r["doctype"] = doctype
+		if doctype == "Journal Entry":
+			r["status"] = "Submitted"
+		elif not status_field:
+			r["status"] = None
+	return rows
+
 
 def compute_overview(project):
-	# Est. Revenue = Sales Invoice net_value, falling back to Sales Order
-	# net_total if no Sales Invoice exists yet.
-	revenue = flt(frappe.db.sql(
-		"""
-		select sum(net_total) from `tabSales Invoice`
-		where project = %s and docstatus = 1
-		""",
-		project,
-	)[0][0] or 0)
-	if not revenue:
+	doc_map = get_project_document_map(project)
+	si_names = list(doc_map.get("si") or [])
+	so_names = list(doc_map.get("so") or [])
+	dn_names = list(doc_map.get("dn") or [])
+	pi_names = list(doc_map.get("pi") or [])
+
+	company_currency = frappe.db.get_default("currency") or "INR"
+
+	revenue = 0.0
+	if si_names:
 		revenue = flt(frappe.db.sql(
 			"""
-			select sum(net_total) from `tabSales Order`
-			where project = %s and docstatus = 1
+			select sum(base_net_total) from `tabSales Invoice`
+			where name in %s and docstatus = 1
 			""",
-			project,
+			(tuple(si_names),),
+		)[0][0] or 0)
+	if not revenue and so_names:
+		revenue = flt(frappe.db.sql(
+			"""
+			select sum(base_net_total) from `tabSales Order`
+			where name in %s and docstatus = 1
+			""",
+			(tuple(so_names),),
 		)[0][0] or 0)
 
-	# FIXED: Total RM Cost was previously pulling every Delivery Note whose
-	# own `project` field matched — but a DN's project can be blank/wrong
-	# even when it's genuinely the one that fulfilled this project's Sales
-	# Invoice. Correct source of truth: walk from this project's Sales
-	# Invoice(s) -> Sales Invoice Item.delivery_note (the actual DN each
-	# invoiced row was billed against) -> GL Entries posted for those
-	# specific Delivery Notes.
-	dn_names = frappe.db.sql(
-		"""
-		select distinct sii.delivery_note
-		from `tabSales Invoice Item` sii
-		inner join `tabSales Invoice` si on si.name = sii.parent
-		where si.project = %s and si.docstatus = 1
-			and sii.delivery_note is not null and sii.delivery_note != ''
-		""",
-		project,
-		pluck=True,
-	)
+	so_currency = company_currency
+	foreign_revenue = 0.0
+	if so_names:
+		so_res = frappe.db.sql(
+			"""
+			select currency, sum(net_total) as foreign_total
+			from `tabSales Order`
+			where name in %s and docstatus = 1
+			group by currency
+			""",
+			(tuple(so_names),),
+			as_dict=True,
+		)
+		if so_res:
+			so_currency = so_res[0].currency or company_currency
+			foreign_revenue = flt(so_res[0].foreign_total)
 
+	# Total RM Cost: from Delivery Notes connected to this project
 	rm_cost = 0.0
 	if dn_names:
 		rm_cost = flt(frappe.db.sql(
 			"""
-			select sum(debit_in_account_currency)
-			from `tabGL Entry`
-			where voucher_type = 'Delivery Note'
-				and voucher_no in %s
+			SELECT SUM(CASE WHEN debit > 0 THEN debit ELSE debit_in_account_currency END)
+			FROM `tabGL Entry`
+			WHERE voucher_type = 'Delivery Note'
+				AND voucher_no IN %s
+				AND is_cancelled = 0
+				AND (debit > 0 OR debit_in_account_currency > 0)
 			""",
-			(dn_names,),
+			(tuple(dn_names),),
+		)[0][0] or 0)
+		if not rm_cost and doctype_installed("Delivery Note Item"):
+			rm_cost = flt(frappe.db.sql(
+				"""
+				SELECT SUM(dni.qty * dni.incoming_rate)
+				FROM `tabDelivery Note Item` dni
+				INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+				WHERE dn.name IN %s AND dn.docstatus = 1 AND dni.incoming_rate > 0
+				""",
+				(tuple(dn_names),),
+			)[0][0] or 0)
+
+	# If no Delivery Note RM cost yet, check Stock Entries (Material Issue/Manufacture)
+	if not rm_cost and doctype_installed("Stock Entry Detail"):
+		se_where = ["se.docstatus = 1", "se.purpose in ('Material Issue', 'Manufacture', 'Material Transfer for Manufacture')"]
+		se_params = []
+		proj_clauses = ["se.project = %s"]
+		se_params.append(project)
+		if so_names:
+			if field_exists("Stock Entry", "sales_order"):
+				proj_clauses.append("se.sales_order in %s")
+				se_params.append(tuple(so_names))
+			if field_exists("Stock Entry Detail", "against_sales_order"):
+				proj_clauses.append("sed.against_sales_order in %s")
+				se_params.append(tuple(so_names))
+		se_where.append("({0})".format(" OR ".join(proj_clauses)))
+		rm_cost = flt(frappe.db.sql(
+			"""
+			select sum(sed.qty * sed.valuation_rate)
+			from `tabStock Entry Detail` sed
+			inner join `tabStock Entry` se on se.name = sed.parent
+			where {0}
+			""".format(" AND ".join(se_where)),
+			tuple(se_params),
 		)[0][0] or 0)
 
-	# Total Indirect Expense = Purchase Invoice net_value, this project's
-	# Purchase Invoices only, non-stock items only, "Is Subcontracted"
-	# unchecked.
-	has_is_subcontracted = field_exists("Purchase Invoice", "is_subcontracted")
-	subcontract_clause = "and pi.is_subcontracted = 0" if has_is_subcontracted else ""
-	indirect = flt(frappe.db.sql(
-		"""
-		select sum(pii.net_amount)
-		from `tabPurchase Invoice Item` pii
-		inner join `tabPurchase Invoice` pi on pi.name = pii.parent
-		inner join `tabItem` it on it.name = pii.item_code
-		where pi.project = %s and pi.docstatus = 1
-			and it.is_stock_item = 0
-			{subcontract_clause}
-		""".format(subcontract_clause=subcontract_clause),
-		project,
-	)[0][0] or 0)
+	indirect = 0.0
+	if pi_names:
+		has_is_subcontracted = field_exists("Purchase Invoice", "is_subcontracted")
+		subcontract_clause = "and pi.is_subcontracted = 0" if has_is_subcontracted else ""
+		indirect = flt(frappe.db.sql(
+			"""
+			select sum(pii.base_net_amount)
+			from `tabPurchase Invoice Item` pii
+			inner join `tabPurchase Invoice` pi on pi.name = pii.parent
+			inner join `tabItem` it on it.name = pii.item_code
+			where pi.name in %s and pi.docstatus = 1
+				and it.is_stock_item = 0
+				{subcontract_clause}
+			""".format(subcontract_clause=subcontract_clause),
+			(tuple(pi_names),),
+		)[0][0] or 0)
 
 	profit = revenue - rm_cost - indirect
 	profit_pct = (profit / revenue * 100) if revenue else 0
@@ -658,43 +977,200 @@ def compute_overview(project):
 		"indirect": indirect,
 		"profit": profit,
 		"profit_pct": profit_pct,
+		"currency": company_currency,
+		"foreign_revenue": foreign_revenue if so_currency != company_currency else None,
+		"foreign_currency": so_currency if so_currency != company_currency else None,
 	}
+
+
+def get_item_valuation_rate(item_code, project=None, so_names=None, dn_names=None, po_names=None):
+	"""Resolves the valuation rate from the Delivery Note's Stock Ledger Entry (SLE) in Indian Currency."""
+	if not item_code:
+		return None
+
+	is_stock = frappe.db.get_value("Item", item_code, "is_stock_item")
+	if is_stock is not None and not is_stock:
+		return None
+
+	# 1. Primary: Find from the Delivery Note's Stock Ledger Entry (SLE) for this AO/Sales Order
+	if dn_names and doctype_installed("Stock Ledger Entry"):
+		sle_rate = frappe.db.sql(
+			"""
+			SELECT valuation_rate
+			FROM `tabStock Ledger Entry`
+			WHERE voucher_type = 'Delivery Note'
+				AND voucher_no IN %s
+				AND item_code = %s
+				AND is_cancelled = 0
+				AND valuation_rate > 0
+			ORDER BY posting_date DESC, posting_time DESC, creation DESC
+			LIMIT 1
+			""",
+			(tuple(dn_names), item_code),
+		)
+		if sle_rate and sle_rate[0][0]:
+			return flt(sle_rate[0][0])
+
+		sle_calc = frappe.db.sql(
+			"""
+			SELECT ABS(stock_value_difference / actual_qty)
+			FROM `tabStock Ledger Entry`
+			WHERE voucher_type = 'Delivery Note'
+				AND voucher_no IN %s
+				AND item_code = %s
+				AND is_cancelled = 0
+				AND actual_qty != 0
+				AND stock_value_difference != 0
+			ORDER BY posting_date DESC, posting_time DESC, creation DESC
+			LIMIT 1
+			""",
+			(tuple(dn_names), item_code),
+		)
+		if sle_calc and sle_calc[0][0]:
+			return flt(sle_calc[0][0])
+
+	# 2. Check Delivery Note Item (incoming_rate)
+	if dn_names and doctype_installed("Delivery Note Item"):
+		rate = frappe.db.sql(
+			"""
+			SELECT dni.incoming_rate
+			FROM `tabDelivery Note Item` dni
+			INNER JOIN `tabDelivery Note` dn ON dn.name = dni.parent
+			WHERE dni.item_code = %s AND dn.name IN %s AND dn.docstatus = 1 AND dni.incoming_rate > 0
+			ORDER BY dn.posting_date DESC, dn.creation DESC LIMIT 1
+			""",
+			(item_code, tuple(dn_names)),
+		)
+		if rate and rate[0][0]:
+			return flt(rate[0][0])
+
+	# 3. Check Stock Entry Detail for this project
+	if project and doctype_installed("Stock Entry Detail"):
+		rate = frappe.db.sql(
+			"""
+			SELECT CASE WHEN sed.valuation_rate > 0 THEN sed.valuation_rate ELSE sed.basic_rate END
+			FROM `tabStock Entry Detail` sed
+			INNER JOIN `tabStock Entry` se ON se.name = sed.parent
+			WHERE sed.item_code = %s AND se.docstatus = 1 AND se.project = %s
+				AND (sed.valuation_rate > 0 OR sed.basic_rate > 0)
+			ORDER BY se.posting_date DESC, se.creation DESC LIMIT 1
+			""",
+			(item_code, project),
+		)
+		if rate and rate[0][0]:
+			return flt(rate[0][0])
+
+	# 4. Check Purchase Receipt Item (base_rate or valuation_rate) if purchased
+	if po_names and doctype_installed("Purchase Receipt Item"):
+		rate = frappe.db.sql(
+			"""
+			SELECT CASE WHEN pri.valuation_rate > 0 THEN pri.valuation_rate ELSE pri.base_rate END
+			FROM `tabPurchase Receipt Item` pri
+			INNER JOIN `tabPurchase Receipt` pr ON pr.name = pri.parent
+			WHERE pri.item_code = %s AND pr.docstatus = 1 AND pri.purchase_order IN %s
+				AND (pri.valuation_rate > 0 OR pri.base_rate > 0)
+			ORDER BY pr.posting_date DESC, pr.creation DESC LIMIT 1
+			""",
+			(item_code, tuple(po_names)),
+		)
+		if rate and rate[0][0]:
+			return flt(rate[0][0])
+
+	# 5. Check latest Stock Ledger Entry for this item (global)
+	if doctype_installed("Stock Ledger Entry"):
+		rate = frappe.db.sql(
+			"""
+			SELECT valuation_rate
+			FROM `tabStock Ledger Entry`
+			WHERE item_code = %s AND valuation_rate > 0 AND is_cancelled = 0
+			ORDER BY posting_date DESC, posting_time DESC, creation DESC LIMIT 1
+			""",
+			(item_code,),
+		)
+		if rate and rate[0][0]:
+			return flt(rate[0][0])
+
+	# 6. Check Bin (current warehouse valuation rate)
+	if doctype_installed("Bin"):
+		rate = frappe.db.sql(
+			"""
+			SELECT valuation_rate
+			FROM `tabBin`
+			WHERE item_code = %s AND valuation_rate > 0
+			ORDER BY actual_qty DESC, modified DESC LIMIT 1
+			""",
+			(item_code,),
+		)
+		if rate and rate[0][0]:
+			return flt(rate[0][0])
+
+	# 7. Check Item Master (valuation_rate, last_purchase_rate, standard_rate)
+	item_vals = frappe.db.get_value("Item", item_code, ["valuation_rate", "last_purchase_rate", "standard_rate"], as_dict=True)
+	if item_vals:
+		for fld in ("valuation_rate", "last_purchase_rate", "standard_rate"):
+			val = flt(item_vals.get(fld))
+			if val > 0:
+				return val
+
+	return 0.0
 
 
 def get_items_and_consumption(project):
 	"""Returns Sales Order items paired with their BOM raw materials, plus
 	the flat lists kept for backward compatibility with older callers."""
+	doc_map = get_project_document_map(project)
+	so_names = list(doc_map.get("so") or [])
+	po_names = list(doc_map.get("po") or [])
+	dn_names = list(doc_map.get("dn") or [])
+	company_currency = frappe.db.get_default("currency") or "INR"
+
+	if not so_names:
+		return {"order_items": [], "rows": [], "material_consumption": []}
 
 	order_items = frappe.db.sql(
 		"""
-		select soi.item_code, soi.item_name, soi.qty, soi.delivered_qty, soi.rate, soi.parent as sales_order
+		select soi.item_code, soi.item_name, soi.qty, soi.delivered_qty,
+			soi.rate, soi.base_rate, soi.parent as sales_order, so.currency
 		from `tabSales Order Item` soi
 		inner join `tabSales Order` so on so.name = soi.parent
-		where so.project = %s and so.docstatus = 1
+		where so.name in %s and so.docstatus = 1
 		order by soi.idx
 		""",
-		project,
+		(tuple(so_names),),
 		as_dict=True,
 	)
 
-	consumption_map = {
-		r.item_code: r
-		for r in frappe.db.sql(
-			"""
-			select sed.item_code, sum(sed.qty) as qty_consumed, avg(sed.valuation_rate) as valuation_rate
-			from `tabStock Entry Detail` sed
-			inner join `tabStock Entry` se on se.name = sed.parent
-			where se.project = %s and se.docstatus = 1
-				and se.purpose in ('Material Issue', 'Manufacture', 'Material Transfer for Manufacture')
-			group by sed.item_code
-			""",
-			project,
-			as_dict=True,
-		)
-	}
+	consumption_map = {}
+	if doctype_installed("Stock Entry Detail"):
+		se_where = ["se.docstatus = 1", "se.purpose in ('Material Issue', 'Manufacture', 'Material Transfer for Manufacture')"]
+		se_params = []
+		proj_clauses = ["se.project = %s"]
+		se_params.append(project)
+		if so_names:
+			if field_exists("Stock Entry", "sales_order"):
+				proj_clauses.append("se.sales_order in %s")
+				se_params.append(tuple(so_names))
+			if field_exists("Stock Entry Detail", "against_sales_order"):
+				proj_clauses.append("sed.against_sales_order in %s")
+				se_params.append(tuple(so_names))
+		se_where.append("({0})".format(" OR ".join(proj_clauses)))
+		consumption_map = {
+			r.item_code: r
+			for r in frappe.db.sql(
+				"""
+				select sed.item_code, sum(sed.qty) as qty_consumed, avg(sed.valuation_rate) as valuation_rate
+				from `tabStock Entry Detail` sed
+				inner join `tabStock Entry` se on se.name = sed.parent
+				where {0}
+				group by sed.item_code
+				""".format(" AND ".join(se_where)),
+				tuple(se_params),
+				as_dict=True,
+			)
+		}
 
 	ordered_map = {}
-	if doctype_installed("Purchase Order") and field_exists("Purchase Order", "project"):
+	if po_names and doctype_installed("Purchase Order Item"):
 		ordered_map = {
 			r.item_code: r.total_ordered
 			for r in frappe.db.sql(
@@ -702,10 +1178,10 @@ def get_items_and_consumption(project):
 				select poi.item_code, sum(poi.qty) as total_ordered
 				from `tabPurchase Order Item` poi
 				inner join `tabPurchase Order` po on po.name = poi.parent
-				where po.project = %s and po.docstatus = 1
+				where po.name in %s and po.docstatus = 1
 				group by poi.item_code
 				""",
-				project,
+				(tuple(po_names),),
 				as_dict=True,
 			)
 		}
@@ -733,9 +1209,18 @@ def get_items_and_consumption(project):
 					as_dict=True,
 				)
 
+		is_stock = frappe.db.get_value("Item", it.item_code, "is_stock_item")
+
+		# Selling price in Indian Currency (base_rate)
+		fg_selling_price = flt(it.base_rate) if (it.base_rate and flt(it.base_rate) > 0) else flt(it.rate)
+
 		if not components:
-			# No BOM found for this item — still show the finished good on
-			# its own row rather than silently dropping it.
+			cons = consumption_map.get(it.item_code)
+			valuation_rate = cons.valuation_rate if (cons and cons.valuation_rate) else None
+			if valuation_rate is None or valuation_rate == 0:
+				valuation_rate = get_item_valuation_rate(
+					it.item_code, project=project, so_names=so_names, dn_names=dn_names, po_names=po_names
+				)
 			rows.append({
 				"order_item": it.item_name or it.item_code,
 				"item_code": it.item_code,
@@ -743,21 +1228,34 @@ def get_items_and_consumption(project):
 				"component_name": None,
 				"component_code": None,
 				"qty_needed": it.qty,
-				"total_ordered": None,
-				"consumed": None,
+				"total_ordered": ordered_map.get(it.item_code),
+				"consumed": cons.qty_consumed if cons else None,
 				"fg_delivered": it.delivered_qty,
-				"selling_price": it.rate,
-				"valuation_rate": None,
+				"selling_price": fg_selling_price,
+				"currency": "INR",
+				"company_currency": "INR",
+				"valuation_rate": valuation_rate,
+				"is_stock_item": 1 if is_stock else 0,
 				"group_start": True,
 			})
+			if cons:
+				flat_consumption.append({
+					"item_code": it.item_code,
+					"item_name": it.item_name or it.item_code,
+					"qty_consumed": cons.qty_consumed,
+					"valuation_rate": cons.valuation_rate,
+				})
 			continue
 
 		for i, comp in enumerate(components):
 			cons = consumption_map.get(comp.item_code)
-			valuation_rate = (cons.valuation_rate if cons else None)
-			if valuation_rate is None:
-				valuation_rate = frappe.db.get_value("Item", comp.item_code, "valuation_rate")
+			valuation_rate = (cons.valuation_rate if (cons and cons.valuation_rate) else None)
+			if valuation_rate is None or valuation_rate == 0:
+				valuation_rate = get_item_valuation_rate(
+					comp.item_code, project=project, so_names=so_names, dn_names=dn_names, po_names=po_names
+				)
 
+			comp_is_stock = frappe.db.get_value("Item", comp.item_code, "is_stock_item")
 			rows.append({
 				"order_item": (it.item_name or it.item_code) if i == 0 else None,
 				"item_code": it.item_code if i == 0 else None,
@@ -768,8 +1266,11 @@ def get_items_and_consumption(project):
 				"total_ordered": ordered_map.get(comp.item_code),
 				"consumed": cons.qty_consumed if cons else None,
 				"fg_delivered": it.delivered_qty if i == 0 else None,
-				"selling_price": it.rate if i == 0 else None,
+				"selling_price": fg_selling_price if i == 0 else None,
+				"currency": "INR",
+				"company_currency": "INR",
 				"valuation_rate": valuation_rate,
+				"is_stock_item": 1 if (is_stock if i == 0 else comp_is_stock) else 0,
 				"group_start": i == 0,
 			})
 			flat_consumption.append({
@@ -778,6 +1279,7 @@ def get_items_and_consumption(project):
 				"qty_consumed": cons.qty_consumed if cons else 0,
 				"valuation_rate": cons.valuation_rate if cons else 0,
 			})
+
 
 	return {
 		"order_items": order_items,
@@ -805,7 +1307,123 @@ def get_doc_summary(doctype, name):
 			name,
 		)
 		project = row[0][0] if row else None
+	elif not project and doctype == "Non - Conformance":
+		project = doc.get("ao_reference_no")
 
+	status_field = None
+	if doc.meta.has_field("status"):
+		status_field = "status"
+	elif doc.meta.has_field("workflow_state"):
+		status_field = "workflow_state"
+	elif doc.meta.has_field("qc_status"):
+		status_field = "qc_status"
+
+	# 1. Payment Entry (No items row, show payment details and allocated references)
+	if doctype == "Payment Entry":
+		references = []
+		for ref in doc.get("references") or []:
+			references.append({
+				"reference_doctype": ref.reference_doctype,
+				"reference_name": ref.reference_name,
+				"allocated_amount": flt(ref.allocated_amount),
+				"total_amount": flt(ref.total_amount),
+				"outstanding_amount": flt(ref.outstanding_amount),
+			})
+		return {
+			"doctype": doctype,
+			"name": doc.name,
+			"status": doc.get(status_field) if status_field else doc.get("status"),
+			"project": project,
+			"is_payment": True,
+			"party": doc.get("party_name") or doc.get("party"),
+			"paid_amount": flt(doc.get("paid_amount") or doc.get("received_amount")),
+			"payment_type": doc.get("payment_type"),
+			"mode_of_payment": doc.get("mode_of_payment"),
+			"posting_date": str(doc.get("posting_date") or ""),
+			"references": references,
+			"items": [],
+			"total_qty": 0,
+		}
+
+	# 2. Journal Entry (Accounting entries, no item rows)
+	if doctype == "Journal Entry":
+		accounts = []
+		for acc in doc.get("accounts") or []:
+			accounts.append({
+				"account": acc.account,
+				"debit": flt(acc.debit_in_account_currency or acc.debit),
+				"credit": flt(acc.credit_in_account_currency or acc.credit),
+				"party": acc.party,
+			})
+		return {
+			"doctype": doctype,
+			"name": doc.name,
+			"status": "Submitted" if doc.docstatus == 1 else "Draft",
+			"project": project,
+			"is_journal": True,
+			"total_debit": flt(doc.total_debit),
+			"posting_date": str(doc.get("posting_date") or ""),
+			"accounts": accounts,
+			"items": [],
+			"total_qty": 0,
+		}
+
+	# 3. QC Report (Item and item_name directly on document header, no child table)
+	if doctype == "QC Report":
+		item_code = doc.get("item")
+		item_name = doc.get("item_name") or (frappe.db.get_value("Item", item_code, "item_name") if item_code else None) or item_code
+		qty = flt(doc.get("received_quantity") or doc.get("accepted_quantity") or doc.get("rejected_quantity") or 1.0)
+		uom = (frappe.db.get_value("Item", item_code, "stock_uom") if item_code else "Nos") or "Nos"
+		ref = None
+		if doc.get("reference_type") and doc.get("reference_name"):
+			ref = {"doctype": doc.get("reference_type"), "name": doc.get("reference_name")}
+		elif doc.get("so_no"):
+			ref = {"doctype": "Sales Order", "name": doc.get("so_no")}
+		elif doc.get("po_no"):
+			ref = {"doctype": "Purchase Order", "name": doc.get("po_no")}
+		items = [{
+			"item_code": item_code,
+			"item_name": item_name,
+			"qty": qty,
+			"uom": uom,
+			"reference": ref,
+		}] if item_code else []
+		return {
+			"doctype": doctype,
+			"name": doc.name,
+			"status": doc.get(status_field) if status_field else doc.get("status"),
+			"project": project,
+			"items": items,
+			"total_qty": sum(i["qty"] for i in items),
+		}
+
+	# 4. Non - Conformance (product_name directly on header, no child table)
+	if doctype in ("Non - Conformance", "Non-Conformance"):
+		prod = doc.get("product_name")
+		item_name = (frappe.db.get_value("Item", prod, "item_name") if prod else None) or prod
+		uom = (frappe.db.get_value("Item", prod, "stock_uom") if prod else "Nos") or "Nos"
+		ref = None
+		if doc.get("reference_type") and doc.get("reference_name"):
+			ref = {"doctype": doc.get("reference_type"), "name": doc.get("reference_name")}
+		elif doc.get("po_reference_no"):
+			ref = {"doctype": "Purchase Order", "name": doc.get("po_reference_no")}
+		items = [{
+			"item_code": prod,
+			"item_name": item_name,
+			"qty": 1.0,
+			"uom": uom,
+			"reference": ref,
+		}] if prod else []
+		return {
+			"doctype": doctype,
+			"name": doc.name,
+			"status": doc.get(status_field) if status_field else doc.get("status"),
+			"project": project,
+			"items": items,
+			"total_qty": sum(i["qty"] for i in items),
+		}
+
+	# 5. Standard item child table documents
 	child_fieldname = None
 	for df in doc.meta.get_table_fields():
 		if df.fieldname == "items":
@@ -816,14 +1434,15 @@ def get_doc_summary(doctype, name):
 	if child_fieldname:
 		for row in doc.get(child_fieldname):
 			reference = None
-			for ref_field, ref_doctype in (
-				("against_sales_order", "Sales Order"),
-				("sales_order", "Sales Order"),
-				("material_request", "Material Request"),
-			):
-				if row.get(ref_field):
-					reference = {"doctype": ref_doctype, "name": row.get(ref_field)}
-					break
+			if doctype != "Delivery Note":
+				for ref_field, ref_doctype in (
+					("against_sales_order", "Sales Order"),
+					("sales_order", "Sales Order"),
+					("material_request", "Material Request"),
+				):
+					if row.get(ref_field):
+						reference = {"doctype": ref_doctype, "name": row.get(ref_field)}
+						break
 			items.append({
 				"item_code": row.get("item_code"),
 				"item_name": row.get("item_name") or row.get("item_code"),
@@ -831,12 +1450,6 @@ def get_doc_summary(doctype, name):
 				"uom": row.get("uom") or row.get("stock_uom"),
 				"reference": reference,
 			})
-
-	status_field = None
-	if doc.meta.has_field("status"):
-		status_field = "status"
-	elif doc.meta.has_field("workflow_state"):
-		status_field = "workflow_state"
 
 	return {
 		"doctype": doctype,

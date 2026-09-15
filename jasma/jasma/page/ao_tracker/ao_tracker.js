@@ -427,7 +427,7 @@ class AOTracker {
 							<th>${__('AO Number')}</th>
 							<th class="aot-so-col">${__('Sales Order')}</th>
 							<th>${__('Customer')}</th>
-							<th>${__('Pending At')}</th>
+							<th>${__('Status')}</th>
 							${this.doc_columns.map(c => `
 								<th class="aot-grp-start" style="border-top:3px solid ${c.color};">${__(c.label)}</th>
 								<th>${__(c.label)} ${__('Status')}</th>
@@ -798,7 +798,7 @@ class AOTracker {
 			</td>
 			<td class="aot-so-col">${ao.so ? `<span class="aot-doc-link aot-so-link" data-doctype="Sales Order" data-name="${frappe.utils.escape_html(ao.so)}">${frappe.utils.escape_html(ao.so)}</span>` : ''}</td>
 			<td class="aot-customer-cell" title="${frappe.utils.escape_html(ao.customer || '')}">${ao.customer ? `<span class="aot-doc-link aot-customer-link" data-doctype="Customer" data-name="${frappe.utils.escape_html(ao.customer)}">${frappe.utils.escape_html(ao.customer)}</span>` : ''}</td>
-			<td class="aot-pending-cell">${ao.pending_at ? `<span class="aot-pending-chip" title="${frappe.utils.escape_html(ao.pending_at)}">${frappe.utils.escape_html(this.format_pending_at(ao.pending_at))}</span>` : ''}</td>
+			<td class="aot-pending-cell">${ao.pending_at ? `<span class="aot-pending-chip ${ao.pending_at === 'Completed' ? 'aot-chip-completed' : ''}" title="${frappe.utils.escape_html(ao.pending_at)}">${frappe.utils.escape_html(this.format_pending_at(ao.pending_at))}</span>` : ''}</td>
 			${this.doc_columns.map(col => docPair(col)).join('')}
 			<td class="aot-grp-start aot-priority-col">${ao.priority ? `<span class="aot-pri-badge ${priorityClass}">${frappe.utils.escape_html(ao.priority)}</span>` : ''}</td>
 			<td><button class="aot-view-btn" data-project="${frappe.utils.escape_html(ao.project)}" title="${__('Detailed view')}">${frappe.utils.icon('right', 'sm')}</button></td>
@@ -877,9 +877,14 @@ class AOTracker {
 	}
 
 	render_overview(o) {
-		const inr = (n) => format_currency(n || 0);
+		const cur = o.currency || 'INR';
+		const inr = (n) => format_currency(n || 0, cur);
+		const revSub = (o.foreign_currency && o.foreign_currency !== cur && o.foreign_revenue)
+			? `${format_currency(o.foreign_revenue, o.foreign_currency)} \u00b7 ${__('Converted to')} ${cur}`
+			: __('From Sales Invoice, or Sales Order if none yet');
+
 		const cards = [
-			[__('Est. Revenue'), inr(o.revenue), __('From Sales Invoice, or Sales Order if none yet'), undefined, '#0284C7'],
+			[__('Est. Revenue'), inr(o.revenue), revSub, undefined, '#0284C7'],
 			[__('Total RM Cost'), inr(o.rm_cost), __('Valuation rate \u00d7 qty consumed'), undefined, '#D97706'],
 			[__('Total Indirect Expense'), inr(o.indirect), __('Overheads allocated to this AO'), undefined, '#E11D48'],
 			[__('Profitability %'), (o.profit_pct || 0).toFixed(1) + '%', __('Profit \u00f7 estimated revenue'), o.profit_pct >= 0, '#7C3AED'],
@@ -903,10 +908,26 @@ class AOTracker {
 		}
 
 		const num = (v) => (v === null || v === undefined) ? '' : format_number(v);
-		const money = (v) => (v === null || v === undefined) ? '' : format_currency(v);
 
 		rows.forEach((row) => {
 			const typeClass = row.type === 'FG' ? 'aot-type-fg' : 'aot-type-rm';
+
+			// Selling price in order currency (e.g. USD, EUR, INR)
+			let sellingPriceHtml = '—';
+			if (row.selling_price !== null && row.selling_price !== undefined) {
+				const orderCurr = row.currency || row.company_currency || 'INR';
+				sellingPriceHtml = format_currency(row.selling_price, orderCurr);
+			}
+
+			// Valuation rate in company base currency (e.g. INR)
+			let valRateHtml = '<span style="color:var(--aot-ink-faint);">—</span>';
+			if (row.valuation_rate !== null && row.valuation_rate !== undefined && row.valuation_rate > 0) {
+				const baseCurr = row.company_currency || 'INR';
+				valRateHtml = format_currency(row.valuation_rate, baseCurr);
+			} else if (row.is_stock_item === 0) {
+				valRateHtml = '<span style="color:var(--aot-ink-faint);" title="Non-stock item">—</span>';
+			}
+
 			$tbody.append(`
 				<tr class="${row.group_start ? 'aot-group-start' : ''}">
 					<td>
@@ -920,8 +941,8 @@ class AOTracker {
 					<td class="aot-num">${num(row.total_ordered)}</td>
 					<td class="aot-num">${num(row.consumed)}</td>
 					<td class="aot-num">${num(row.fg_delivered)}</td>
-					<td class="aot-num">${money(row.selling_price)}</td>
-					<td class="aot-num">${money(row.valuation_rate)}</td>
+					<td class="aot-num">${sellingPriceHtml}</td>
+					<td class="aot-num">${valRateHtml}</td>
 				</tr>
 			`);
 		});
@@ -1017,12 +1038,87 @@ class AOTracker {
 		this.$wrap.find('.aot-modal-title').text(d.name);
 
 		const [bg, ink] = this.tone(d.status);
+
+		// Payment Entry special view (financial transaction, no item rows)
+		if (d.is_payment) {
+			const stats = [
+				[__('Status'), `<span class="aot-mini-pill" style="background:${bg};color:${ink};">${frappe.utils.escape_html(d.status || '')}</span>`, true],
+				[__('Party'), frappe.utils.escape_html(d.party || '')],
+				[__('Amount'), format_currency(d.paid_amount || 0)],
+				[__('Payment Type'), frappe.utils.escape_html(d.payment_type || d.mode_of_payment || '')]
+			];
+			this.$wrap.find('.aot-modal-stats').html(stats.map(([label, value, isHtml]) => `
+				<div class="aot-modal-stat">
+					<div class="aot-modal-stat-label">${label}</div>
+					<div class="aot-modal-stat-value">${isHtml ? value : frappe.utils.escape_html(String(value))}</div>
+				</div>
+			`).join(''));
+
+			this.$wrap.find('.aot-modal-items-label').text(__('Allocated References'));
+			const $items = this.$wrap.find('.aot-modal-items').empty();
+			if (!d.references || !d.references.length) {
+				$items.html(`<div class="aot-empty-row">${__('No allocated references on this payment.')}</div>`);
+			} else {
+				d.references.forEach((ref) => {
+					$items.append(`
+						<div class="aot-modal-item-row">
+							<div>
+								<div class="aot-fg-name">${frappe.utils.escape_html(ref.reference_doctype)}: <span class="aot-doc-link" data-doctype="${frappe.utils.escape_html(ref.reference_doctype)}" data-name="${frappe.utils.escape_html(ref.reference_name)}">${frappe.utils.escape_html(ref.reference_name)}</span></div>
+								<div class="aot-fg-code">${__('Total')}: ${format_currency(ref.total_amount || 0)}</div>
+							</div>
+							<div class="aot-modal-item-qty">${__('Allocated')}: ${format_currency(ref.allocated_amount || 0)}</div>
+						</div>
+					`);
+				});
+			}
+			this.$wrap.find('.aot-modal-backdrop').addClass('open');
+			return;
+		}
+
+		// Journal Entry special view (accounting transaction, no item rows)
+		if (d.is_journal) {
+			const stats = [
+				[__('Status'), `<span class="aot-mini-pill" style="background:${bg};color:${ink};">${frappe.utils.escape_html(d.status || '')}</span>`, true],
+				[__('Total Debit'), format_currency(d.total_debit || 0)],
+				[__('Posting Date'), frappe.utils.escape_html(d.posting_date || '')],
+				[__('Reference AO'), frappe.utils.escape_html(d.project || '')]
+			];
+			this.$wrap.find('.aot-modal-stats').html(stats.map(([label, value, isHtml]) => `
+				<div class="aot-modal-stat">
+					<div class="aot-modal-stat-label">${label}</div>
+					<div class="aot-modal-stat-value">${isHtml ? value : frappe.utils.escape_html(String(value))}</div>
+				</div>
+			`).join(''));
+
+			this.$wrap.find('.aot-modal-items-label').text(__('Accounting Entries'));
+			const $items = this.$wrap.find('.aot-modal-items').empty();
+			if (!d.accounts || !d.accounts.length) {
+				$items.html(`<div class="aot-empty-row">${__('No accounting entries on this journal.')}</div>`);
+			} else {
+				d.accounts.forEach((acc) => {
+					const amt = acc.debit > 0 ? `${__('Dr')}: ${format_currency(acc.debit)}` : `${__('Cr')}: ${format_currency(acc.credit)}`;
+					$items.append(`
+						<div class="aot-modal-item-row">
+							<div>
+								<div class="aot-fg-name">${frappe.utils.escape_html(acc.account)}</div>
+								${acc.party ? `<div class="aot-fg-code">${frappe.utils.escape_html(acc.party)}</div>` : ''}
+							</div>
+							<div class="aot-modal-item-qty">${amt}</div>
+						</div>
+					`);
+				});
+			}
+			this.$wrap.find('.aot-modal-backdrop').addClass('open');
+			return;
+		}
+
+		// Standard document view
+		this.$wrap.find('.aot-modal-items-label').text(__('Items in this document'));
 		const stats = [
 			[__('Status'), `<span class="aot-mini-pill" style="background:${bg};color:${ink};">${frappe.utils.escape_html(d.status || '')}</span>`, true],
-			// FIX: blank instead of "—" when there's no reference AO.
 			[__('Reference AO'), frappe.utils.escape_html(d.project || '')],
-			[__('Items'), d.items.length],
-			[__('Total Qty'), format_number(d.total_qty)]
+			[__('Items'), (d.items || []).length],
+			[__('Total Qty'), format_number(d.total_qty || 0)]
 		];
 		this.$wrap.find('.aot-modal-stats').html(stats.map(([label, value, isHtml]) => `
 			<div class="aot-modal-stat">
@@ -1032,13 +1128,10 @@ class AOTracker {
 		`).join(''));
 
 		const $items = this.$wrap.find('.aot-modal-items').empty();
-		if (!d.items.length) {
+		if (!d.items || !d.items.length) {
 			$items.html(`<div class="aot-empty-row">${__('No item rows on this document.')}</div>`);
 		} else {
 			d.items.forEach((it) => {
-				const refHtml = it.reference
-					? `<span class="aot-modal-item-ref" data-doctype="${frappe.utils.escape_html(it.reference.doctype)}" data-name="${frappe.utils.escape_html(it.reference.name)}">${frappe.utils.escape_html(it.reference.doctype)} ${frappe.utils.icon('right', 'xs')}</span>`
-					: '';
 				$items.append(`
 					<div class="aot-modal-item-row">
 						<div>
@@ -1046,7 +1139,6 @@ class AOTracker {
 							<div class="aot-fg-code">${frappe.utils.escape_html(it.item_code || '')}</div>
 						</div>
 						<div class="aot-modal-item-qty">${format_number(it.qty)} ${frappe.utils.escape_html(it.uom || '')}</div>
-						${refHtml}
 					</div>
 				`);
 			});
@@ -1279,6 +1371,7 @@ class AOTracker {
 		.ao-tracker-wrap .aot-customer-cell{font-weight:500; color:var(--aot-ink-soft); max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 		.ao-tracker-wrap .aot-pending-cell{color:var(--aot-ink-soft); font-size:12.5px; max-width:200px;}
 		.ao-tracker-wrap .aot-pending-chip{display:inline-block; max-width:190px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:middle; background:var(--aot-amber-bg); color:var(--aot-amber-ink); padding:4px 10px; border-radius:999px; font-size:11.5px; font-weight:700;}
+		.ao-tracker-wrap .aot-pending-chip.aot-chip-completed{background:var(--aot-green-bg); color:var(--aot-green-ink);}
 		.ao-tracker-wrap .aot-doc-link{font-weight:700; font-size:12px; cursor:pointer;}
 		.ao-tracker-wrap .aot-doc-link:hover{text-decoration:underline;}
 		/* NEW: the "N Sales Invoices" chip shown when a project has more
@@ -1334,11 +1427,62 @@ class AOTracker {
 		.ao-tracker-wrap .aot-stat-value.aot-positive{color:var(--aot-green-ink);}
 		.ao-tracker-wrap .aot-stat-value.aot-negative{color:var(--aot-red-ink);}
 		.ao-tracker-wrap .aot-stat-sub{font-size:11px; color:var(--aot-ink-faint); margin-top:4px;}
-		.ao-tracker-wrap .aot-table-x-scroll{overflow-x:auto;}
-		.ao-tracker-wrap table.aot-flat-table{width:100%; border-collapse:collapse; font-size:13px; min-width:760px;}
-		.ao-tracker-wrap .aot-flat-table thead th{text-align:left; font-size:10.5px; font-weight:700; color:var(--aot-ink-faint); text-transform:uppercase; padding:9px 10px; border-bottom:1px solid var(--aot-line);}
-		.ao-tracker-wrap .aot-flat-table thead th.aot-num, .ao-tracker-wrap .aot-flat-table td.aot-num{text-align:right;}
-		.ao-tracker-wrap .aot-flat-table tbody td{padding:9px 10px; border-bottom:1px solid var(--aot-line-soft);}
+		/* Enhanced scrollable table with styled scrollbars and comfortable column widths */
+		.ao-tracker-wrap .aot-table-x-scroll{
+			overflow-x: auto;
+			-webkit-overflow-scrolling: touch;
+			padding-bottom: 8px;
+		}
+		.ao-tracker-wrap .aot-table-x-scroll::-webkit-scrollbar,
+		.ao-tracker-wrap .aot-table-scroll::-webkit-scrollbar {
+			height: 8px;
+			width: 8px;
+		}
+		.ao-tracker-wrap .aot-table-x-scroll::-webkit-scrollbar-track,
+		.ao-tracker-wrap .aot-table-scroll::-webkit-scrollbar-track {
+			background: #F1F4F9;
+			border-radius: 4px;
+		}
+		.ao-tracker-wrap .aot-table-x-scroll::-webkit-scrollbar-thumb,
+		.ao-tracker-wrap .aot-table-scroll::-webkit-scrollbar-thumb {
+			background: #CBD5E1;
+			border-radius: 4px;
+		}
+		.ao-tracker-wrap .aot-table-x-scroll::-webkit-scrollbar-thumb:hover,
+		.ao-tracker-wrap .aot-table-scroll::-webkit-scrollbar-thumb:hover {
+			background: #94A3B8;
+		}
+		.ao-tracker-wrap table.aot-flat-table{
+			width: 100%;
+			border-collapse: collapse;
+			font-size: 13px;
+			min-width: 1100px;
+		}
+		.ao-tracker-wrap .aot-flat-table thead th{
+			text-align: left;
+			font-size: 11px;
+			font-weight: 700;
+			color: var(--aot-ink-soft);
+			text-transform: uppercase;
+			letter-spacing: .02em;
+			padding: 11px 12px;
+			border-bottom: 1.5px solid var(--aot-line);
+			white-space: nowrap;
+			background: #FAFBFC;
+		}
+		.ao-tracker-wrap .aot-flat-table thead th.aot-num,
+		.ao-tracker-wrap .aot-flat-table td.aot-num{
+			text-align: right;
+			white-space: nowrap;
+		}
+		.ao-tracker-wrap .aot-flat-table tbody td{
+			padding: 11px 12px;
+			border-bottom: 1px solid var(--aot-line-soft);
+			vertical-align: middle;
+		}
+		.ao-tracker-wrap .aot-flat-table tbody tr:hover{
+			background: var(--aot-accent-soft);
+		}
 		.ao-tracker-wrap .aot-items-tbody tr.aot-group-start td{border-top:1px solid var(--aot-line-soft);}
 		.ao-tracker-wrap .aot-type-badge{display:inline-flex; padding:3px 9px; border-radius:999px; font-size:10.5px; font-weight:800;}
 		.ao-tracker-wrap .aot-type-fg{background:var(--aot-accent-soft); color:var(--aot-accent);}
