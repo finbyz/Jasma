@@ -798,12 +798,21 @@ class AOTracker {
 			</td>
 			<td class="aot-so-col">${ao.so ? `<span class="aot-doc-link aot-so-link" data-doctype="Sales Order" data-name="${frappe.utils.escape_html(ao.so)}">${frappe.utils.escape_html(ao.so)}</span>` : ''}</td>
 			<td class="aot-customer-cell" title="${frappe.utils.escape_html(ao.customer || '')}">${ao.customer ? `<span class="aot-doc-link aot-customer-link" data-doctype="Customer" data-name="${frappe.utils.escape_html(ao.customer)}">${frappe.utils.escape_html(ao.customer)}</span>` : ''}</td>
-			<td class="aot-pending-cell">${ao.pending_at ? `<span class="aot-pending-chip ${ao.pending_at === 'Completed' ? 'aot-chip-completed' : ''}" title="${frappe.utils.escape_html(ao.pending_at)}">${frappe.utils.escape_html(this.format_pending_at(ao.pending_at))}</span>` : ''}</td>
+			<td class="aot-pending-cell">${ao.pending_at ? `<span class="aot-pending-chip ${this.status_chip_class(ao.pending_at)}" title="${frappe.utils.escape_html(ao.pending_at)}">${frappe.utils.escape_html(this.format_pending_at(ao.pending_at))}</span>` : ''}</td>
 			${this.doc_columns.map(col => docPair(col)).join('')}
 			<td class="aot-grp-start aot-priority-col">${ao.priority ? `<span class="aot-pri-badge ${priorityClass}">${frappe.utils.escape_html(ao.priority)}</span>` : ''}</td>
 			<td><button class="aot-view-btn" data-project="${frappe.utils.escape_html(ao.project)}" title="${__('Detailed view')}">${frappe.utils.icon('right', 'sm')}</button></td>
 		</tr>
 		`;
+	}
+
+	status_chip_class(status) {
+		if (!status) return '';
+		const s = status.toLowerCase().trim();
+		if (s === 'completed') return 'aot-chip-completed';
+		if (s === 'closed') return 'aot-chip-closed';
+		if (s.includes('hold')) return 'aot-chip-on-hold';
+		return '';
 	}
 
 	// NEW: maps a priority label (from the backend) to its badge color
@@ -1372,6 +1381,8 @@ class AOTracker {
 		.ao-tracker-wrap .aot-pending-cell{color:var(--aot-ink-soft); font-size:12.5px; max-width:200px;}
 		.ao-tracker-wrap .aot-pending-chip{display:inline-block; max-width:190px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:middle; background:var(--aot-amber-bg); color:var(--aot-amber-ink); padding:4px 10px; border-radius:999px; font-size:11.5px; font-weight:700;}
 		.ao-tracker-wrap .aot-pending-chip.aot-chip-completed{background:var(--aot-green-bg); color:var(--aot-green-ink);}
+		.ao-tracker-wrap .aot-pending-chip.aot-chip-closed{background:var(--aot-gray-bg); color:var(--aot-gray-ink);}
+		.ao-tracker-wrap .aot-pending-chip.aot-chip-on-hold{background:var(--aot-red-bg); color:var(--aot-red-ink);}
 		.ao-tracker-wrap .aot-doc-link{font-weight:700; font-size:12px; cursor:pointer;}
 		.ao-tracker-wrap .aot-doc-link:hover{text-decoration:underline;}
 		/* NEW: the "N Sales Invoices" chip shown when a project has more

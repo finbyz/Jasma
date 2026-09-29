@@ -273,47 +273,69 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, li
 	return result
 
 
-def determine_pending(docs):
+def determine_current_status(docs):
+	"""Returns the current status of the AO / Project based on:
+	1. If Sales Order is Completed, Closed, or On Hold -> Show that Sales Order status.
+	2. If Sales Invoice is created -> Consider as "Completed".
+	3. Only consider entries/documents shown in the table row:
+	   (Sales Order, Material Request, Purchase Order, Subcontracting Order,
+	    Subcontracting Receipt, Purchase Receipt, Purchase Invoice, Delivery Note).
+	   JV (Journal Entry), Payment Entry, QC, etc. are excluded.
+	4. Otherwise, show the latest created document among the row entries.
+	"""
 	so = docs.get("so")
-	if not so:
-		return "Sales Order", "so"
-	if so.get("status") in PENDING_STATUSES:
-		return "Sales Order approval", "so"
+	if so:
+		so_status = (so.get("status") or "").strip()
+		so_status_lower = so_status.lower()
+		if so_status_lower == "completed":
+			return "Completed", "so"
+		elif so_status_lower == "closed":
+			return "Closed", "so"
+		elif so_status_lower in ("on hold", "hold"):
+			return "On Hold", "so"
 
-	mr = docs.get("mr")
-	if not mr:
-		return "Material Request creation", "mr"
-	if mr.get("status") in PENDING_STATUSES:
-		return "Material Request approval", "mr"
+	# If Sales Invoice is created, consider cycle as Completed
+	if docs.get("si"):
+		return "Completed", "si"
 
-	# A project may go through a regular Purchase Order or a Subcontracting
-	# Order (or both) — either counts as "procurement started".
-	po = docs.get("po")
-	sco = docs.get("sco")
-	if not po and not sco:
-		return "Purchase Order / Subcontracting Order creation", "po"
-	if (po and po.get("status") in PENDING_STATUSES) and not (sco and sco.get("status") not in PENDING_STATUSES):
-		return "Purchase Order approval", "po"
-	if (sco and sco.get("status") in PENDING_STATUSES) and not (po and po.get("status") not in PENDING_STATUSES):
-		return "Subcontracting Order approval", "sco"
+	# Only consider document types shown in the table row
+	ROW_DOC_KEYS = ["so", "mr", "po", "sco", "scr", "pr", "pi", "dn"]
+	STAGE_ORDER = ["so", "mr", "po", "sco", "scr", "pr", "pi", "dn"]
 
-	# Likewise, goods can land via a Purchase Receipt or a Subcontracting
-	# Receipt.
-	pr = docs.get("pr")
-	scr = docs.get("scr")
-	if not pr and not scr:
-		return "Purchase Receipt / Subcontracting Receipt", "pr"
+	latest_key = None
+	latest_time = None
+	latest_weight = -1
 
-	dn = docs.get("dn")
-	if not dn:
-		return "Delivery Note", "dn"
+	for key in ROW_DOC_KEYS:
+		doc = docs.get(key)
+		if not doc:
+			continue
+		doc_creation = doc.get("creation")
+		if not doc_creation:
+			continue
 
-	si = docs.get("si")
-	if not si:
-		return "Sales Invoice", "si"
+		try:
+			dt = frappe.utils.get_datetime(doc_creation)
+		except Exception:
+			continue
 
-	# When Sales Invoice is created, procurement and invoicing cycle is Completed
-	return "Completed", "si"
+		weight = STAGE_ORDER.index(key) if key in STAGE_ORDER else 0
+
+		if latest_time is None or dt > latest_time or (dt == latest_time and weight > latest_weight):
+			latest_time = dt
+			latest_key = key
+			latest_weight = weight
+
+	if latest_key:
+		cfg = DOC_CONFIG.get(latest_key, {})
+		label = cfg.get("label") or latest_key
+		return label, latest_key
+
+	return "Sales Order", "so"
+
+
+def determine_pending(docs):
+	return determine_current_status(docs)
 
 def determine_priority(docs):
 	"""Priority = urgency of the still-pending delivery, based on how many
@@ -868,29 +890,36 @@ def compute_overview(project):
 	company_currency = frappe.db.get_default("currency") or "INR"
 
 	revenue = 0.0
+	foreign_currency = company_currency
+	foreign_revenue = 0.0
+
+	# 1. Primary: From Sales Invoices if available
 	if si_names:
-		revenue = flt(frappe.db.sql(
+		si_res = frappe.db.sql(
 			"""
-			select sum(base_net_total) from `tabSales Invoice`
+			select currency, sum(net_total) as foreign_total, sum(base_net_total) as base_total
+			from `tabSales Invoice`
 			where name in %s and docstatus = 1
+			group by currency
 			""",
 			(tuple(si_names),),
-		)[0][0] or 0)
-	if not revenue and so_names:
-		revenue = flt(frappe.db.sql(
-			"""
-			select sum(base_net_total) from `tabSales Order`
-			where name in %s and docstatus = 1
-			""",
-			(tuple(so_names),),
-		)[0][0] or 0)
+			as_dict=True,
+		)
+		if si_res:
+			revenue = sum(flt(r.base_total) for r in si_res)
+			foreign_res = [r for r in si_res if r.currency and r.currency != company_currency]
+			if foreign_res:
+				foreign_currency = foreign_res[0].currency
+				foreign_revenue = sum(flt(r.foreign_total) for r in foreign_res)
+			else:
+				foreign_currency = si_res[0].currency or company_currency
+				foreign_revenue = sum(flt(r.foreign_total) for r in si_res)
 
-	so_currency = company_currency
-	foreign_revenue = 0.0
-	if so_names:
+	# 2. Fallback: From Sales Orders if no Sales Invoice revenue yet
+	if not revenue and so_names:
 		so_res = frappe.db.sql(
 			"""
-			select currency, sum(net_total) as foreign_total
+			select currency, sum(net_total) as foreign_total, sum(base_net_total) as base_total
 			from `tabSales Order`
 			where name in %s and docstatus = 1
 			group by currency
@@ -899,8 +928,14 @@ def compute_overview(project):
 			as_dict=True,
 		)
 		if so_res:
-			so_currency = so_res[0].currency or company_currency
-			foreign_revenue = flt(so_res[0].foreign_total)
+			revenue = sum(flt(r.base_total) for r in so_res)
+			foreign_res = [r for r in so_res if r.currency and r.currency != company_currency]
+			if foreign_res:
+				foreign_currency = foreign_res[0].currency
+				foreign_revenue = sum(flt(r.foreign_total) for r in foreign_res)
+			else:
+				foreign_currency = so_res[0].currency or company_currency
+				foreign_revenue = sum(flt(r.foreign_total) for r in so_res)
 
 	# Total RM Cost: from Delivery Notes connected to this project
 	rm_cost = 0.0
@@ -978,8 +1013,8 @@ def compute_overview(project):
 		"profit": profit,
 		"profit_pct": profit_pct,
 		"currency": company_currency,
-		"foreign_revenue": foreign_revenue if so_currency != company_currency else None,
-		"foreign_currency": so_currency if so_currency != company_currency else None,
+		"foreign_revenue": foreign_revenue if foreign_currency != company_currency else None,
+		"foreign_currency": foreign_currency if foreign_currency != company_currency else None,
 	}
 
 
