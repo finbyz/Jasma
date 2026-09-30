@@ -105,8 +105,17 @@ class AOTracker {
 			// Executive Dashboard ("exd_theme" -> "aot_theme").
 			theme: localStorage.getItem('aot_theme') || 'light',
 			// NEW: which date-range preset is active. Defaults to Monthly.
-			period: 'monthly'
+			period: 'monthly',
+			status: 'All'
 		};
+
+		// Labels + menu order for the status dropdown.
+		this.status_options = [
+			{ value: 'All', label: __('All') },
+			{ value: 'Ongoing', label: __('Ongoing') },
+			{ value: 'On Hold', label: __('On Hold') },
+			{ value: 'Completed', label: __('Completed') }
+		];
 
 		// Labels + menu order for the period dropdown.
 		this.period_options = [
@@ -164,6 +173,8 @@ class AOTracker {
 		$(this.page.body).empty().append(this.$wrap);
 		this.render_period_menu();
 		this.apply_period('monthly', { silent: true });
+		this.render_status_menu();
+		this.apply_status('All', { silent: true });
 		// NEW: Project / Sales Order / Company are real Frappe Link fields
 		// now - they need to be created after the wrapper is in the DOM.
 		// _initializing suppresses the auto-reload-on-change behaviour
@@ -226,6 +237,28 @@ class AOTracker {
 			render_input: true
 		});
 		this.so_control.refresh();
+	}
+
+	// ------------------------------------------------------------ status
+	render_status_menu() {
+		const $menu = this.$wrap.find('.aot-status-menu').empty();
+		this.status_options.forEach((opt) => {
+			$menu.append(`<div class="aot-status-item" data-status="${opt.value}">${opt.label}</div>`);
+		});
+	}
+
+	apply_status(status, opts) {
+		opts = opts || {};
+		this.state.status = status;
+
+		const chosen = this.status_options.find((o) => o.value.toLowerCase() === (status || '').toLowerCase());
+		const label = chosen ? chosen.label : (status || __('All'));
+		this.$wrap.find('.aot-status-label').text(label);
+		this.$wrap.find('.aot-status-item').removeClass('active');
+		this.$wrap.find(`.aot-status-item[data-status="${chosen ? chosen.value : status}"]`).addClass('active');
+
+		this.$wrap.find('.aot-status-menu').removeClass('open');
+		if (!opts.silent) this.load_list();
 	}
 
 	// ------------------------------------------------------------ period
@@ -342,6 +375,10 @@ class AOTracker {
 		return `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="5" width="17" height="16" rx="2.2"/><path d="M8 3v4M16 3v4M3.5 10h17"/></svg>`;
 	}
 
+	status_icon() {
+		return `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="M22 4 12 14.01l-3-3"/></svg>`;
+	}
+
 	chevron_icon() {
 		return `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
 	}
@@ -377,40 +414,53 @@ class AOTracker {
 
 		<div class="aot-view aot-view-1 active" data-view="1">
 			<div class="aot-filters">
-				<div class="aot-pill-field">
-					<span class="aot-pill-icon">${this.home_icon()}</span>
-					<div class="aot-f-company-wrap aot-pill-input"></div>
+				<div class="aot-filters-row">
+					<div class="aot-pill-field">
+						<span class="aot-pill-icon">${this.home_icon()}</span>
+						<div class="aot-f-company-wrap aot-pill-input"></div>
+					</div>
+
+					<div class="aot-period-dropdown aot-pill-field">
+						<button type="button" class="aot-period-btn">
+							${this.calendar_icon()}
+							<span class="aot-period-label">${__('Monthly')}</span>
+							${this.chevron_icon()}
+						</button>
+						<div class="aot-period-menu"></div>
+					</div>
+
+					<div class="aot-daterange-box">
+						<input type="date" class="aot-f-from aot-locked" readonly>
+					</div>
+					<span class="aot-date-sep">${__('to')}</span>
+					<div class="aot-daterange-box">
+						<input type="date" class="aot-f-to aot-locked" readonly>
+					</div>
+
+					<div class="aot-pill-field">
+						<span class="aot-pill-icon">${this.project_icon()}</span>
+						<div class="aot-f-project-wrap aot-pill-input"></div>
+					</div>
+
+					<div class="aot-filter-actions">
+						<button class="btn btn-default btn-sm aot-reset">${__('Reset')}</button>
+						<button class="aot-icon-btn aot-theme-toggle" title="${__('Switch to Dark Mode')}">${this.theme_icon()}</button>
+					</div>
 				</div>
 
-				<div class="aot-period-dropdown aot-pill-field">
-					<button type="button" class="aot-period-btn">
-						${this.calendar_icon()}
-						<span class="aot-period-label">${__('Monthly')}</span>
-						${this.chevron_icon()}
-					</button>
-					<div class="aot-period-menu"></div>
-				</div>
-
-				<div class="aot-daterange-box">
-					<input type="date" class="aot-f-from aot-locked" readonly>
-				</div>
-				<span class="aot-date-sep">${__('to')}</span>
-				<div class="aot-daterange-box">
-					<input type="date" class="aot-f-to aot-locked" readonly>
-				</div>
-
-				<div class="aot-pill-field">
-					<span class="aot-pill-icon">${this.project_icon()}</span>
-					<div class="aot-f-project-wrap aot-pill-input"></div>
-				</div>
-				<div class="aot-pill-field">
-					<span class="aot-pill-icon">${this.sales_order_icon()}</span>
-					<div class="aot-f-so-wrap aot-pill-input"></div>
-				</div>
-
-				<div class="aot-filter-actions">
-					<button class="btn btn-default btn-sm aot-reset">${__('Reset')}</button>
-					<button class="aot-icon-btn aot-theme-toggle" title="${__('Switch to Dark Mode')}">${this.theme_icon()}</button>
+				<div class="aot-filters-row aot-filters-row-bottom">
+					<div class="aot-pill-field">
+						<span class="aot-pill-icon">${this.sales_order_icon()}</span>
+						<div class="aot-f-so-wrap aot-pill-input"></div>
+					</div>
+					<div class="aot-status-dropdown aot-pill-field">
+						<button type="button" class="aot-status-btn">
+							${this.status_icon()}
+							<span class="aot-status-label">${__('All')}</span>
+							${this.chevron_icon()}
+						</button>
+						<div class="aot-status-menu"></div>
+					</div>
 				</div>
 			</div>
 
@@ -463,15 +513,15 @@ class AOTracker {
 					<span class="aot-caret">${frappe.utils.icon('small-down', 'sm')}</span>
 				</div>
 				<div class="aot-panel-body">
-					<div class="aot-stat-grid aot-overview-grid"></div>
+					<div class="aot-overview-grid"></div>
 				</div>
 			</div>
 
 			<div class="aot-panel">
 				<div class="aot-panel-head aot-collapsible">
 					<div class="aot-panel-head-left">
-						<div class="aot-panel-title">${__('Order items & material consumption')}</div>
-						<div class="aot-panel-desc">${__('Every finished item and every raw material / component consumed against it.')}</div>
+						<div class="aot-panel-title">${__('Order items')}</div>
+						<div class="aot-panel-desc">${__('Finished goods and main items from the linked Sales Order.')}</div>
 					</div>
 					<span class="aot-caret">${frappe.utils.icon('small-down', 'sm')}</span>
 				</div>
@@ -481,12 +531,10 @@ class AOTracker {
 							<thead>
 								<tr>
 									<th>${__('Order Item')}</th>
-									<th>${__('Type')}</th>
-									<th>${__('Component / RM Consumed')}</th>
-									<th class="aot-num">${__('Qty Needed')}</th>
-									<th class="aot-num">${__('Total Ordered')}</th>
-									<th class="aot-num">${__('Consumed')}</th>
-									<th class="aot-num">${__('FG Delivered')}</th>
+									<th style="min-width:180px; max-width:280px;">${__('Comments')}</th>
+									<th class="aot-num">${__('Ordered Qty')}</th>
+									<th class="aot-num">${__('Delivered Qty')}</th>
+									<th class="aot-num">${__('Billed Qty')}</th>
 									<th class="aot-num">${__('Selling Price')}</th>
 									<th class="aot-num">${__('Valuation Rate')}</th>
 								</tr>
@@ -553,6 +601,7 @@ class AOTracker {
 	bind_events() {
 		this.$wrap.on('click', '.aot-reset', () => {
 			this.apply_period('monthly', { silent: true });
+			this.apply_status('All', { silent: true });
 			const default_company = frappe.defaults.get_default('company') || frappe.sys_defaults?.company || '';
 			if (this.company_control) this.company_control.set_value(default_company);
 			if (this.project_control) this.project_control.set_value('');
@@ -561,10 +610,24 @@ class AOTracker {
 			this.load_list();
 		});
 
+		// status dropdown (All / Ongoing / On Hold / Completed)
+		this.$wrap.on('click', '.aot-status-btn', (e) => {
+			e.stopPropagation();
+			this.$wrap.find('.aot-period-menu').removeClass('open');
+			this.$wrap.find('.aot-status-menu').toggleClass('open');
+		});
+		this.$wrap.on('click', '.aot-status-item', (e) => {
+			this.apply_status($(e.currentTarget).data('status'));
+		});
+		$(document).on('click.aotStatus', () => {
+			if (this.$wrap) this.$wrap.find('.aot-status-menu').removeClass('open');
+		});
+
 		// NEW: period dropdown (Date Range: This Financial Year / Previous
 		// Financial Year / Quarterly / Monthly / Weekly / Custom Range).
 		this.$wrap.on('click', '.aot-period-btn', (e) => {
 			e.stopPropagation();
+			this.$wrap.find('.aot-status-menu').removeClass('open');
 			this.$wrap.find('.aot-period-menu').toggleClass('open');
 		});
 		this.$wrap.on('click', '.aot-period-item', (e) => {
@@ -608,13 +671,12 @@ class AOTracker {
 			this.open_detail(project);
 		});
 
-		// FIX: the MR/PO/DN/SI status pills in the list table previously had
-		// no handler at all, despite being styled as clickable links.
+		// Document links open in a new browser tab
 		this.$wrap.on('click', '.aot-doc-link', (e) => {
 			e.stopPropagation();
 			const doctype = $(e.currentTarget).data('doctype');
 			const name = $(e.currentTarget).data('name');
-			if (doctype && name) frappe.set_route('Form', doctype, name);
+			if (doctype && name) this.open_doc_in_new_tab(doctype, name);
 		});
 
 		// NEW: "N Sales Invoices" style chip, shown when a project has more
@@ -644,13 +706,13 @@ class AOTracker {
 		this.$wrap.on('click', '.aot-modal-open', () => {
 			const doctype = this.$wrap.find('.aot-modal').data('doctype');
 			const name = this.$wrap.find('.aot-modal').data('name');
-			if (doctype && name) frappe.set_route('Form', doctype, name);
+			if (doctype && name) this.open_doc_in_new_tab(doctype, name);
 		});
 		this.$wrap.on('click', '.aot-modal-item-ref', (e) => {
 			e.stopPropagation();
 			const doctype = $(e.currentTarget).data('doctype');
 			const name = $(e.currentTarget).data('name');
-			if (doctype && name) frappe.set_route('Form', doctype, name);
+			if (doctype && name) this.open_doc_in_new_tab(doctype, name);
 		});
 
 		// NEW: doc-list modal (the "N Sales Invoices" browser)
@@ -705,7 +767,8 @@ class AOTracker {
 			to_date: this.$wrap.find('.aot-f-to').val(),
 			company: this.company_control ? this.company_control.get_value() : '',
 			project: this.project_control ? this.project_control.get_value() : '',
-			sales_order: this.so_control ? this.so_control.get_value() : ''
+			sales_order: this.so_control ? this.so_control.get_value() : '',
+			status: this.state.status || 'All'
 		};
 		frappe.call({
 			method: this.method.list,
@@ -840,6 +903,19 @@ class AOTracker {
 		return text.split(/\s*\/\s*/)[0];
 	}
 
+	open_doc_in_new_tab(doctype, name) {
+		if (!doctype || !name) return;
+		let url = '';
+		if (frappe.utils && frappe.utils.get_form_link) {
+			url = frappe.utils.get_form_link(doctype, name);
+		} else if (frappe.router && frappe.router.slug) {
+			url = `/app/${frappe.router.slug(doctype)}/${encodeURIComponent(name)}`;
+		} else {
+			url = `/app/${encodeURIComponent(doctype.toLowerCase().replace(/\s+/g, '-'))}/${encodeURIComponent(name)}`;
+		}
+		window.open(url, '_blank');
+	}
+
 	tone(status) {
 		const TONE = {
 			'Partially Ordered': 'amber', Submitted: 'amber', Expired: 'red', 'To Receive and Bill': 'amber',
@@ -892,40 +968,59 @@ class AOTracker {
 			? `${format_currency(o.foreign_revenue, o.foreign_currency)} \u00b7 ${__('Converted to')} ${cur}`
 			: __('From Sales Invoice, or Sales Order if none yet');
 
-		const cards = [
+		const profitPctVal = (o.profit_pct || 0).toFixed(1);
+		const profitPositive = o.profit >= 0;
+		const pctBg = profitPositive ? 'var(--aot-green-bg)' : 'var(--aot-red-bg)';
+		const pctColor = profitPositive ? 'var(--aot-green-ink)' : 'var(--aot-red-ink)';
+		const profitValHtml = `${inr(o.profit)} <span style="display:inline-flex;align-items:center;font-size:13.5px;font-weight:700;padding:2px 8px;border-radius:6px;background:${pctBg};color:${pctColor};margin-left:6px;vertical-align:middle;">(${profitPctVal}%)</span>`;
+
+		const mainCards = [
 			[__('Est. Revenue'), inr(o.revenue), revSub, undefined, '#0284C7'],
 			[__('Total RM Cost'), inr(o.rm_cost), __('Valuation rate \u00d7 qty consumed'), undefined, '#D97706'],
 			[__('Total Indirect Expense'), inr(o.indirect), __('Overheads allocated to this AO'), undefined, '#E11D48'],
-			[__('Profitability %'), (o.profit_pct || 0).toFixed(1) + '%', __('Profit \u00f7 estimated revenue'), o.profit_pct >= 0, '#7C3AED'],
-			[__('Profit'), inr(o.profit), __('Revenue \u2212 RM cost \u2212 indirect expense'), o.profit >= 0, '#059669']
+			[__('Profit / Profitability'), profitValHtml, '', undefined, '#059669']
 		];
-		this.$wrap.find('.aot-overview-grid').html(cards.map(([label, value, sub, positive, color]) => `
+
+		const incentiveCards = [
+			[__('RODTEP Value'), inr(o.rodtep), __('From RODTEP / MEIS JV'), undefined, '#0D9488'],
+			[__('Duty Drawback Value'), inr(o.duty_drawback), __('From Duty Drawback JV'), undefined, '#EA580C'],
+			[__('IGST Refund Value'), inr(o.igst_refund), __('From IGST Refund JV'), undefined, '#2563EB']
+		];
+
+		const cardHtml = ([label, value, sub, positive, color]) => `
 			<div class="aot-stat-card" style="border-top:3px solid ${color};">
 				<div class="aot-stat-label" style="color:${color};">${label}</div>
 				<div class="aot-stat-value ${positive === true ? 'aot-positive' : positive === false ? 'aot-negative' : ''}">${value}</div>
-				<div class="aot-stat-sub">${sub}</div>
+				${sub ? `<div class="aot-stat-sub">${sub}</div>` : ''}
 			</div>
-		`).join(''));
+		`;
+
+		this.$wrap.find('.aot-overview-grid').html(`
+			<div class="aot-stat-grid aot-stat-grid-4">
+				${mainCards.map(cardHtml).join('')}
+			</div>
+			<div class="aot-stat-grid aot-stat-grid-3" style="margin-top:14px;">
+				${incentiveCards.map(cardHtml).join('')}
+			</div>
+		`);
 	}
 
-	// Combined FG -> RM breakdown, replacing the old two disconnected tables.
+	// Renders FG / main items from the Sales Order
 	render_items_table(rows) {
 		const $tbody = this.$wrap.find('.aot-items-tbody').empty();
 		if (!rows.length) {
-			$tbody.html(`<tr><td colspan="9" class="aot-empty-row">${__('No Sales Order items linked to this Project.')}</td></tr>`);
+			$tbody.html(`<tr><td colspan="7" class="aot-empty-row">${__('No Sales Order items linked to this Project.')}</td></tr>`);
 			return;
 		}
 
 		const num = (v) => (v === null || v === undefined) ? '' : format_number(v);
 
 		rows.forEach((row) => {
-			const typeClass = row.type === 'FG' ? 'aot-type-fg' : 'aot-type-rm';
-
-			// Selling price in order currency (e.g. USD, EUR, INR)
+			// Selling price in order / base currency (e.g. INR)
 			let sellingPriceHtml = '—';
 			if (row.selling_price !== null && row.selling_price !== undefined) {
-				const orderCurr = row.currency || row.company_currency || 'INR';
-				sellingPriceHtml = format_currency(row.selling_price, orderCurr);
+				const curr = row.company_currency || row.currency || 'INR';
+				sellingPriceHtml = format_currency(row.selling_price, curr);
 			}
 
 			// Valuation rate in company base currency (e.g. INR)
@@ -937,19 +1032,21 @@ class AOTracker {
 				valRateHtml = '<span style="color:var(--aot-ink-faint);" title="Non-stock item">—</span>';
 			}
 
+			const comm = (row.comments || row.remarks || '').trim();
+			const commentsHtml = comm
+				? `<div class="aot-item-comments">${frappe.utils.escape_html(comm)}</div>`
+				: '<span style="color:var(--aot-ink-faint);">—</span>';
+
 			$tbody.append(`
-				<tr class="${row.group_start ? 'aot-group-start' : ''}">
+				<tr>
 					<td>
-						${row.order_item ? `<div class="aot-fg-name">${frappe.utils.escape_html(row.order_item)}</div><div class="aot-fg-code">${frappe.utils.escape_html(row.item_code || '')}</div>` : ''}
+						<div class="aot-fg-name">${frappe.utils.escape_html(row.order_item || row.item_name || '')}</div>
+						<div class="aot-fg-code">${row.item_code ? `<span class="aot-doc-link aot-item-link" data-doctype="Item" data-name="${frappe.utils.escape_html(row.item_code)}">${frappe.utils.escape_html(row.item_code)}</span>` : ''}</div>
 					</td>
-					<td><span class="aot-type-badge ${typeClass}">${row.type}</span></td>
-					<td>
-						${row.component_name ? `<div class="aot-fg-name">${frappe.utils.escape_html(row.component_name)}</div><div class="aot-fg-code">${frappe.utils.escape_html(row.component_code || '')}</div>` : ''}
-					</td>
-					<td class="aot-num">${num(row.qty_needed)}</td>
-					<td class="aot-num">${num(row.total_ordered)}</td>
-					<td class="aot-num">${num(row.consumed)}</td>
-					<td class="aot-num">${num(row.fg_delivered)}</td>
+					<td>${commentsHtml}</td>
+					<td class="aot-num">${num(row.ordered_qty)}</td>
+					<td class="aot-num">${num(row.delivered_qty)}</td>
+					<td class="aot-num">${num(row.billed_qty)}</td>
 					<td class="aot-num">${sellingPriceHtml}</td>
 					<td class="aot-num">${valRateHtml}</td>
 				</tr>
@@ -988,17 +1085,15 @@ class AOTracker {
 
 			const [bg, ink] = this.tone(d.status);
 
-			// NEW: if there's more than one of this doc type, the card opens
-			// the same "go through them one by one" list as the Tab 1 chip,
-			// instead of jumping straight to the (arbitrarily-picked) latest one.
 			if (d.count && d.count > 1) {
+				const plural = meta.label.endsWith('y') ? (meta.label.slice(0, -1) + 'ies') : (meta.label + 's');
 				grid.append(`
 					<div class="aot-doc-card aot-doc-card-multi" style="border-top:3px solid ${accent};"
 						data-project="${frappe.utils.escape_html(ao.project)}" data-key="${frappe.utils.escape_html(key)}"
-						data-label="${frappe.utils.escape_html(meta.label + 's')}" data-color="${frappe.utils.escape_html(accent)}">
+						data-label="${frappe.utils.escape_html(plural)}" data-color="${frappe.utils.escape_html(accent)}">
 						<div class="aot-doc-count-badge aot-count-pos">${d.count}</div>
 						<div class="aot-doc-type-label" style="color:${accent};">${meta.short} \u00b7 ${meta.label}</div>
-						<div class="aot-doc-code">${d.count} ${frappe.utils.escape_html(meta.label)}s</div>
+						<div class="aot-doc-code">${d.count} ${frappe.utils.escape_html(plural)}</div>
 						<div class="aot-mini-pill" style="background:${bg};color:${ink};">${__('Latest')}: ${frappe.utils.escape_html(d.status || '')}</div>
 						<div class="aot-open-link">${__('Click to view all')}</div>
 					</div>
@@ -1145,7 +1240,7 @@ class AOTracker {
 					<div class="aot-modal-item-row">
 						<div>
 							<div class="aot-fg-name">${frappe.utils.escape_html(it.item_name)}</div>
-							<div class="aot-fg-code">${frappe.utils.escape_html(it.item_code || '')}</div>
+							<div class="aot-fg-code">${it.item_code ? `<span class="aot-doc-link aot-item-link" data-doctype="Item" data-name="${frappe.utils.escape_html(it.item_code)}">${frappe.utils.escape_html(it.item_code)}</span>` : ''}</div>
 						</div>
 						<div class="aot-modal-item-qty">${format_number(it.qty)} ${frappe.utils.escape_html(it.uom || '')}</div>
 					</div>
@@ -1239,7 +1334,27 @@ class AOTracker {
 		.ao-tracker-wrap[data-theme="dark"] input[type="text"]{ color-scheme:dark; }
 		/* the handful of hardcoded (non-variable) colors in this file */
 		.ao-tracker-wrap[data-theme="dark"] .aot-status-table thead th{
-			background:linear-gradient(180deg,#20232f 0%,#1c1f2b 100%);
+			background:#1c1f2b;
+		}
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table thead th:nth-child(1),
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table thead th:nth-child(2),
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table thead th:nth-child(3){
+			background:#1c1f2b; border-right-color:var(--aot-line);
+		}
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody td:nth-child(1),
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody td:nth-child(2),
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody td:nth-child(3){
+			background:#1c1f2b; border-right-color:var(--aot-line);
+		}
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:nth-child(even) td:nth-child(1),
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:nth-child(even) td:nth-child(2),
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:nth-child(even) td:nth-child(3){
+			background:#191c26;
+		}
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:hover td:nth-child(1),
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:hover td:nth-child(2),
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:hover td:nth-child(3){
+			background:#262a45;
 		}
 		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:nth-child(even){ background:#191c26; }
 		.ao-tracker-wrap[data-theme="dark"] .aot-doc-card.empty,
@@ -1286,35 +1401,49 @@ class AOTracker {
 		.ao-tracker-wrap .aot-view.active{display:block;}
 		.ao-tracker-wrap .aot-filters{
 			background:var(--aot-panel); border:1px solid var(--aot-line); border-radius:var(--aot-radius);
-			padding:10px 14px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+			padding:12px 16px; display:flex; flex-direction:column; gap:10px;
 			box-shadow:var(--aot-shadow); margin-bottom:18px;
 		}
+		.ao-tracker-wrap .aot-filters-row{
+			display:flex; align-items:center; gap:10px; flex-wrap:wrap; width:100%;
+		}
+		.ao-tracker-wrap .aot-filters-row-bottom{
+			padding-top:10px; border-top:1px solid var(--aot-line-soft);
+		}
 		/* Shared "pill" look for Company / Date Range / Project / Sales
-		   Order - icon + control, single flat box, all sitting on one
-		   baseline like the reference dashboard's topbar. */
+		   Order - uniform width across all filter inputs */
 		.ao-tracker-wrap .aot-pill-field{
-			display:flex; align-items:center; gap:7px; height:36px; padding:0 12px;
+			display:flex; align-items:center; gap:8px; height:36px; padding:0 12px;
 			border:1px solid var(--aot-line); border-radius:9px; background:var(--aot-bg);
-			position:relative;
+			position:relative; width:220px; min-width:220px; box-sizing:border-box;
+			overflow:visible;
 		}
-		.ao-tracker-wrap .aot-pill-icon{ display:flex; color:var(--aot-ink-faint); flex-shrink:0; }
-		.ao-tracker-wrap .aot-pill-input{ display:flex; align-items:center; }
-		.ao-tracker-wrap .aot-pill-input .frappe-control{ margin:0; }
+		.ao-tracker-wrap .aot-pill-icon{ display:flex; align-items:center; justify-content:center; color:var(--aot-ink-faint); flex-shrink:0; line-height:1; }
+		.ao-tracker-wrap .aot-pill-input{ display:flex; align-items:center; width:100%; height:100%; min-width:0; overflow:visible; position:relative; }
+		.ao-tracker-wrap .aot-pill-input .frappe-control{ margin:0 !important; padding:0 !important; width:100%; height:100%; min-width:0; overflow:visible; display:flex; align-items:center; }
+		.ao-tracker-wrap .aot-pill-input .form-group{ margin:0 !important; padding:0 !important; width:100%; height:100%; display:flex; align-items:center; }
+		.ao-tracker-wrap .aot-pill-input .control-input-wrapper{ margin:0 !important; padding:0 !important; width:100%; height:100%; display:flex; align-items:center; overflow:visible; }
+		.ao-tracker-wrap .aot-pill-input .control-input{ margin:0 !important; padding:0 !important; width:100%; height:100%; display:flex; align-items:center; }
+		.ao-tracker-wrap .aot-pill-input .awesomplete{ width:100%; height:100%; display:flex; align-items:center; overflow:visible; position:relative; }
+		.ao-tracker-wrap .aot-pill-input .awesomplete > ul{ z-index:1000 !important; min-width:220px; top:calc(100% + 4px) !important; }
 		.ao-tracker-wrap .aot-pill-input input{
-			border:none; background:transparent; padding:0; font-size:13px; font-weight:700;
-			color:var(--aot-ink); min-width:130px; box-shadow:none !important;
+			border:none !important; background:transparent !important; padding:0 !important; margin:0 !important;
+			font-size:13px; font-weight:700; color:var(--aot-ink); width:100%; height:100% !important; min-width:0;
+			box-shadow:none !important; line-height:36px; vertical-align:middle;
 		}
-		.ao-tracker-wrap .aot-pill-input input::placeholder{ font-weight:600; color:var(--aot-ink-faint); }
-		.ao-tracker-wrap .aot-pill-input input:focus{ outline:none; box-shadow:none; }
+		.ao-tracker-wrap .aot-pill-input input::placeholder{ font-weight:600; color:var(--aot-ink-faint); line-height:36px; }
+		.ao-tracker-wrap .aot-pill-input input:focus{ outline:none !important; box-shadow:none !important; }
+		.ao-tracker-wrap .aot-pill-input .link-btn{ display:none !important; }
 
-		/* Date Range dropdown button reuses the pill shell as its own element */
-		.ao-tracker-wrap .aot-period-dropdown{ padding:0; }
+		/* Date Range dropdown button reuses the pill shell as its own element with matching width */
+		.ao-tracker-wrap .aot-period-dropdown{ padding:0; width:220px; min-width:220px; }
 		.ao-tracker-wrap .aot-period-btn{
-			display:flex; align-items:center; gap:7px; height:36px; padding:0 12px; border:none; background:none;
-			font-size:13px; font-weight:700; color:var(--aot-ink); cursor:pointer; white-space:nowrap;
+			display:flex; align-items:center; gap:8px; height:36px; padding:0 12px; border:none; background:none;
+			font-size:13px; font-weight:700; color:var(--aot-ink); cursor:pointer; white-space:nowrap; width:100%;
+			line-height:36px;
 		}
 		.ao-tracker-wrap .aot-period-btn svg{ color:var(--aot-ink-faint); flex-shrink:0; }
-		.ao-tracker-wrap .aot-period-label{ flex:1; text-align:left; }
+		.ao-tracker-wrap .aot-period-label{ flex:1; text-align:left; overflow:hidden; text-overflow:ellipsis; }
 		.ao-tracker-wrap .aot-period-menu{
 			display:none; position:absolute; top:calc(100% + 6px); left:0; min-width:220px; z-index:50;
 			background:var(--aot-panel); border:1px solid var(--aot-line); border-radius:9px;
@@ -1327,19 +1456,38 @@ class AOTracker {
 		.ao-tracker-wrap .aot-period-item:hover{ background:var(--aot-accent-soft); }
 		.ao-tracker-wrap .aot-period-item.active{ background:var(--aot-accent); color:#fff; }
 
-		/* Plain From/To date boxes (locked/read-only for every preset
-		   except Custom Range), with a bare "to" label between them —
-		   matches the reference screenshot's flat, unbordered look. */
+		/* Status dropdown button reuses the pill shell as its own element with matching width */
+		.ao-tracker-wrap .aot-status-dropdown{ padding:0; width:220px; min-width:220px; }
+		.ao-tracker-wrap .aot-status-btn{
+			display:flex; align-items:center; gap:8px; height:36px; padding:0 12px; border:none; background:none;
+			font-size:13px; font-weight:700; color:var(--aot-ink); cursor:pointer; white-space:nowrap; width:100%;
+			line-height:36px;
+		}
+		.ao-tracker-wrap .aot-status-btn svg{ color:var(--aot-ink-faint); flex-shrink:0; }
+		.ao-tracker-wrap .aot-status-label{ flex:1; text-align:left; margin-right:6px; overflow:hidden; text-overflow:ellipsis; }
+		.ao-tracker-wrap .aot-status-menu{
+			display:none; position:absolute; top:calc(100% + 6px); left:0; min-width:220px; z-index:50;
+			background:var(--aot-panel); border:1px solid var(--aot-line); border-radius:9px;
+			box-shadow:0 12px 32px -8px rgba(20,24,40,.25); overflow:hidden; padding:4px;
+		}
+		.ao-tracker-wrap .aot-status-menu.open{ display:block; }
+		.ao-tracker-wrap .aot-status-item{
+			padding:8px 12px; font-size:13px; font-weight:600; color:var(--aot-ink); border-radius:6px; cursor:pointer;
+		}
+		.ao-tracker-wrap .aot-status-item:hover{ background:var(--aot-accent-soft); }
+		.ao-tracker-wrap .aot-status-item.active{ background:var(--aot-accent); color:#fff; }
+
+		/* Plain From/To date boxes with increased width for readability */
 		.ao-tracker-wrap .aot-daterange-box{
-			height:36px; display:flex; align-items:center; padding:0 12px; border-radius:9px;
-			background:var(--aot-bg); border:1px solid var(--aot-line);
+			height:36px; display:flex; align-items:center; padding:0 14px; border-radius:9px;
+			background:var(--aot-bg); border:1px solid var(--aot-line); width:170px; min-width:170px; box-sizing:border-box;
 		}
 		.ao-tracker-wrap .aot-daterange-box input{
-			border:none; background:transparent; padding:0; font-size:13px; font-weight:600;
-			color:var(--aot-ink-soft); width:100px; box-shadow:none !important;
+			border:none; background:transparent; padding:0; font-size:13.5px; font-weight:600;
+			color:var(--aot-ink-soft); width:100%; box-shadow:none !important; text-align:center;
 		}
 		.ao-tracker-wrap .aot-daterange-box input:focus{ outline:none; }
-		.ao-tracker-wrap .aot-date-sep{ font-size:13px; color:var(--aot-ink-faint); font-weight:600; }
+		.ao-tracker-wrap .aot-date-sep{ font-size:13px; color:var(--aot-ink-faint); font-weight:600; margin:0 2px; }
 
 		.ao-tracker-wrap .aot-filter-actions{display:flex; align-items:center; gap:8px; margin-left:auto;}
 		/* "Apply filters" (and the modal's "Open full record") use the
@@ -1356,13 +1504,47 @@ class AOTracker {
 		.ao-tracker-wrap .aot-section-head{display:flex; align-items:baseline; justify-content:space-between; margin-bottom:10px;}
 		.ao-tracker-wrap .aot-section-title{font-size:12.5px; font-weight:700; color:var(--aot-ink-faint); text-transform:uppercase; letter-spacing:.05em;}
 		.ao-tracker-wrap .aot-result-count{font-size:12.5px; color:var(--aot-ink-faint);}
-		.ao-tracker-wrap .aot-table-scroll{background:var(--aot-panel); border:1px solid var(--aot-line); border-radius:var(--aot-radius); box-shadow:var(--aot-shadow); overflow-x:auto;}
-		.ao-tracker-wrap table.aot-status-table{width:100%; border-collapse:collapse; font-size:13px; min-width:2180px;}
+		.ao-tracker-wrap .aot-table-scroll{background:var(--aot-panel); border:1px solid var(--aot-line); border-radius:var(--aot-radius); box-shadow:var(--aot-shadow); overflow:auto; max-height:calc(100vh - 220px); position:relative;}
+		.ao-tracker-wrap table.aot-status-table{width:100%; border-collapse:separate; border-spacing:0; font-size:13px; min-width:2180px;}
 		.ao-tracker-wrap .aot-status-table thead th{
 			text-align:left; font-size:10.5px; font-weight:700; color:var(--aot-ink-soft); text-transform:uppercase;
 			letter-spacing:.03em; padding:12px; border-bottom:1px solid var(--aot-line); white-space:nowrap;
-			background:linear-gradient(180deg,#F3F5FC 0%,#FAFBFC 100%);
+			background:#F3F5FC; position:sticky; top:0; z-index:10;
 		}
+		/* Frozen / Sticky columns: Checkbox, AO Number, Sales Order */
+		.ao-tracker-wrap .aot-status-table thead th:nth-child(1){
+			position:sticky; top:0; left:0; z-index:30; width:36px; min-width:36px; max-width:36px; background:#F3F5FC;
+		}
+		.ao-tracker-wrap .aot-status-table tbody td:nth-child(1){
+			position:sticky; left:0; z-index:5; width:36px; min-width:36px; max-width:36px; background:#FFFFFF;
+		}
+		.ao-tracker-wrap .aot-status-table thead th:nth-child(2){
+			position:sticky; top:0; left:36px; z-index:30; width:140px; min-width:140px; max-width:140px; background:#F3F5FC;
+		}
+		.ao-tracker-wrap .aot-status-table tbody td:nth-child(2){
+			position:sticky; left:36px; z-index:5; width:140px; min-width:140px; max-width:140px; background:#FFFFFF;
+		}
+		.ao-tracker-wrap .aot-status-table thead th:nth-child(3){
+			position:sticky; top:0; left:176px; z-index:30; width:160px; min-width:160px; max-width:160px; background:#F3F5FC;
+			box-shadow:3px 0 6px -2px rgba(0,0,0,0.08); border-right:1px solid var(--aot-line);
+		}
+		.ao-tracker-wrap .aot-status-table tbody td:nth-child(3){
+			position:sticky; left:176px; z-index:5; width:160px; min-width:160px; max-width:160px; background:#FFFFFF;
+			box-shadow:3px 0 6px -2px rgba(0,0,0,0.08); border-right:1px solid var(--aot-line);
+		}
+
+		/* Backgrounds for sticky columns across even & hover states */
+		.ao-tracker-wrap .aot-status-table tbody tr:nth-child(even) td:nth-child(1),
+		.ao-tracker-wrap .aot-status-table tbody tr:nth-child(even) td:nth-child(2),
+		.ao-tracker-wrap .aot-status-table tbody tr:nth-child(even) td:nth-child(3){
+			background:#FBFCFE;
+		}
+		.ao-tracker-wrap .aot-status-table tbody tr:hover td:nth-child(1),
+		.ao-tracker-wrap .aot-status-table tbody tr:hover td:nth-child(2),
+		.ao-tracker-wrap .aot-status-table tbody tr:hover td:nth-child(3){
+			background:var(--aot-accent-soft);
+		}
+
 		/* NEW: "Sales Order" column widened so SO numbers no longer clip
 		   or wrap awkwardly. */
 		.ao-tracker-wrap .aot-so-col{ min-width:160px; }
@@ -1430,7 +1612,13 @@ class AOTracker {
 		.ao-tracker-wrap .aot-panel-title{font-size:14px; font-weight:700;}
 		.ao-tracker-wrap .aot-panel-desc{font-size:12px; color:var(--aot-ink-faint); margin-top:2px;}
 		.ao-tracker-wrap .aot-panel-body{padding:16px;}
-		.ao-tracker-wrap .aot-stat-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px;}
+		.ao-tracker-wrap .aot-stat-grid{display:grid; gap:14px; width:100%;}
+		.ao-tracker-wrap .aot-stat-grid-4{grid-template-columns:repeat(4, 1fr);}
+		.ao-tracker-wrap .aot-stat-grid-3{grid-template-columns:repeat(3, 1fr);}
+		@media (max-width: 1200px) {
+			.ao-tracker-wrap .aot-stat-grid-4{grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));}
+			.ao-tracker-wrap .aot-stat-grid-3{grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));}
+		}
 		.ao-tracker-wrap .aot-stat-card{background:#FBFBFD; border:1px solid var(--aot-line); border-radius:11px; padding:14px 15px;}
 		.ao-tracker-wrap .aot-stat-card.aot-highlight{background:var(--aot-accent-soft); border-color:#C9D3F5;}
 		.ao-tracker-wrap .aot-stat-label{font-size:10.5px; font-weight:700; color:var(--aot-ink-faint); text-transform:uppercase; margin-bottom:6px;}
@@ -1500,6 +1688,17 @@ class AOTracker {
 		.ao-tracker-wrap .aot-type-rm{background:var(--aot-purple-bg); color:var(--aot-purple-ink);}
 		.ao-tracker-wrap .aot-fg-name{font-weight:600; font-size:13px;}
 		.ao-tracker-wrap .aot-fg-code{font-size:11px; color:var(--aot-ink-faint); margin-top:1px;}
+		.ao-tracker-wrap .aot-fg-code .aot-item-link{color:var(--aot-accent); font-weight:600; cursor:pointer;}
+		.ao-tracker-wrap .aot-fg-code .aot-item-link:hover{text-decoration:underline;}
+		.ao-tracker-wrap .aot-item-comments{
+			font-size: 12.5px;
+			color: var(--aot-ink);
+			line-height: 1.4;
+			max-width: 280px;
+			min-width: 150px;
+			word-break: break-word;
+			white-space: normal;
+		}
 		.ao-tracker-wrap .aot-doc-catalog-grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:14px;}
 		.ao-tracker-wrap .aot-doc-card{position:relative; background:var(--aot-panel); border:1.5px solid var(--aot-line); border-radius:11px; padding:14px; cursor:pointer; transition:.15s;}
 		.ao-tracker-wrap .aot-doc-card:hover{transform:translateY(-2px); box-shadow:var(--aot-shadow);}

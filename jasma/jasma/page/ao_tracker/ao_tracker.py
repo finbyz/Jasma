@@ -203,17 +203,35 @@ def field_exists(doctype, fieldname):
 	return _FIELD_EXISTS_CACHE[key]
 
 
-# ---------------------------------------------------------------------------
-# List view (Tab 1 — Status Overview)
-# ---------------------------------------------------------------------------
+def is_matching_status(status_value, status_filter):
+	if not status_filter or status_filter.strip().lower() in ("all", ""):
+		return True
+
+	s = (status_value or "").strip().lower()
+	sf = status_filter.strip().lower()
+
+	if sf in ("on hold", "hold", "on_hold"):
+		return "hold" in s
+	elif sf == "completed":
+		# Completed includes Closed as well
+		return s in ("completed", "closed")
+	elif sf == "closed":
+		return s == "closed"
+	elif sf == "ongoing":
+		# ongoing: Show all which is not in Completed, Closed, and On Hold
+		return s not in ("completed", "closed") and ("hold" not in s)
+	return True
+
 
 @frappe.whitelist()
-def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, limit=200):
+def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, status=None, company=None, limit=200, **kwargs):
 	filters = {}
 	if from_date and to_date:
 		filters["creation"] = ["between", [from_date, to_date]]
 	if project:
 		filters["name"] = ["like", "%{0}%".format(project)]
+	if company and field_exists("Project", "company"):
+		filters["company"] = company
 
 	# NEW: Customer no longer comes from Project.customer — it's read from
 	# the linked Sales Order instead (Project.customer can be blank/stale
@@ -256,6 +274,10 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, li
 		if so_doc:
 			customer = frappe.db.get_value("Sales Order", so_doc["name"], "customer")
 		pending_at, _stage_key = determine_pending(docs)
+
+		if status and not is_matching_status(pending_at, status):
+			continue
+
 		priority = determine_priority(docs)
 		result.append({
 			"project": p.name,
@@ -791,6 +813,28 @@ def get_project_document_map(project):
 				pluck=True,
 			)
 			je_names.update(je_ref)
+
+	# NEW: Include Duty Drawback JV, MEIS JV, and IGST Refund JV from linked Sales Invoices
+	if doc_map["si"]:
+		si_jv_fields = ["duty_drawback_jv", "meis_jv", "igst_refund_jv"]
+		for jv_field in si_jv_fields:
+			if field_exists("Sales Invoice", jv_field):
+				jvs = frappe.db.sql(
+					"""
+					SELECT DISTINCT `{0}` FROM `tabSales Invoice`
+					WHERE name IN %s AND `{0}` IS NOT NULL AND `{0}` != '' AND docstatus = 1
+					""".format(jv_field),
+					(tuple(doc_map["si"]),),
+					pluck=True,
+				)
+				if jvs:
+					submitted_jvs = frappe.get_all(
+						"Journal Entry",
+						filters={"name": ["in", list(jvs)], "docstatus": 1},
+						pluck="name",
+					)
+					je_names.update(submitted_jvs)
+
 	doc_map["je"] = je_names
 
 	return doc_map
@@ -1003,6 +1047,37 @@ def compute_overview(project):
 			(tuple(pi_names),),
 		)[0][0] or 0)
 
+	# RODTEP, Duty Drawback, and IGST Refund values from linked Sales Invoices' JVs
+	rodtep_val = 0.0
+	duty_drawback_val = 0.0
+	igst_refund_val = 0.0
+
+	if si_names:
+		def get_jv_total(fieldname):
+			if not field_exists("Sales Invoice", fieldname):
+				return 0.0
+			jvs = frappe.db.sql(
+				"""
+				SELECT DISTINCT `{0}` FROM `tabSales Invoice`
+				WHERE name IN %s AND `{0}` IS NOT NULL AND `{0}` != '' AND docstatus = 1
+				""".format(fieldname),
+				(tuple(si_names),),
+				pluck=True,
+			)
+			if not jvs:
+				return 0.0
+			return flt(frappe.db.sql(
+				"""
+				SELECT SUM(total_debit) FROM `tabJournal Entry`
+				WHERE name IN %s AND docstatus = 1
+				""",
+				(tuple(jvs),),
+			)[0][0] or 0)
+
+		duty_drawback_val = get_jv_total("duty_drawback_jv")
+		rodtep_val = get_jv_total("meis_jv")
+		igst_refund_val = get_jv_total("igst_refund_jv")
+
 	profit = revenue - rm_cost - indirect
 	profit_pct = (profit / revenue * 100) if revenue else 0
 
@@ -1012,6 +1087,9 @@ def compute_overview(project):
 		"indirect": indirect,
 		"profit": profit,
 		"profit_pct": profit_pct,
+		"rodtep": rodtep_val,
+		"duty_drawback": duty_drawback_val,
+		"igst_refund": igst_refund_val,
 		"currency": company_currency,
 		"foreign_revenue": foreign_revenue if foreign_currency != company_currency else None,
 		"foreign_currency": foreign_currency if foreign_currency != company_currency else None,
@@ -1151,12 +1229,14 @@ def get_item_valuation_rate(item_code, project=None, so_names=None, dn_names=Non
 
 
 def get_items_and_consumption(project):
-	"""Returns Sales Order items paired with their BOM raw materials, plus
-	the flat lists kept for backward compatibility with older callers."""
+	"""Returns Finished Goods / main Sales Order items linked to the project with
+	Ordered Qty (Sales Order), Delivered Qty (Delivery Note + Sales Invoice with update_stock),
+	and Billed Qty (Sales Invoice)."""
 	doc_map = get_project_document_map(project)
 	so_names = list(doc_map.get("so") or [])
 	po_names = list(doc_map.get("po") or [])
 	dn_names = list(doc_map.get("dn") or [])
+	si_names = list(doc_map.get("si") or [])
 	company_currency = frappe.db.get_default("currency") or "INR"
 
 	if not so_names:
@@ -1164,8 +1244,9 @@ def get_items_and_consumption(project):
 
 	order_items = frappe.db.sql(
 		"""
-		select soi.item_code, soi.item_name, soi.qty, soi.delivered_qty,
-			soi.rate, soi.base_rate, soi.parent as sales_order, so.currency
+		select soi.name as so_detail, soi.item_code, soi.item_name, soi.qty as ordered_qty,
+			soi.delivered_qty, soi.billed_amt, soi.rate, soi.base_rate, soi.amount,
+			soi.is_stock_item, soi.parent as sales_order, so.currency
 		from `tabSales Order Item` soi
 		inner join `tabSales Order` so on so.name = soi.parent
 		where so.name in %s and so.docstatus = 1
@@ -1175,151 +1256,187 @@ def get_items_and_consumption(project):
 		as_dict=True,
 	)
 
-	consumption_map = {}
-	if doctype_installed("Stock Entry Detail"):
-		se_where = ["se.docstatus = 1", "se.purpose in ('Material Issue', 'Manufacture', 'Material Transfer for Manufacture')"]
-		se_params = []
-		proj_clauses = ["se.project = %s"]
-		se_params.append(project)
-		if so_names:
-			if field_exists("Stock Entry", "sales_order"):
-				proj_clauses.append("se.sales_order in %s")
-				se_params.append(tuple(so_names))
-			if field_exists("Stock Entry Detail", "against_sales_order"):
-				proj_clauses.append("sed.against_sales_order in %s")
-				se_params.append(tuple(so_names))
-		se_where.append("({0})".format(" OR ".join(proj_clauses)))
-		consumption_map = {
-			r.item_code: r
-			for r in frappe.db.sql(
-				"""
-				select sed.item_code, sum(sed.qty) as qty_consumed, avg(sed.valuation_rate) as valuation_rate
-				from `tabStock Entry Detail` sed
-				inner join `tabStock Entry` se on se.name = sed.parent
-				where {0}
-				group by sed.item_code
-				""".format(" AND ".join(se_where)),
-				tuple(se_params),
-				as_dict=True,
-			)
-		}
+	# 1. Delivered Qty from Delivery Notes
+	dn_delivered_by_so_detail = {}
+	dn_delivered_by_item = {}
+	if dn_names and doctype_installed("Delivery Note Item"):
+		dn_rows = frappe.db.sql(
+			"""
+			select dni.so_detail, dni.item_code, sum(dni.qty) as qty
+			from `tabDelivery Note Item` dni
+			inner join `tabDelivery Note` dn on dn.name = dni.parent
+			where dn.name in %s and dn.docstatus = 1
+			group by dni.so_detail, dni.item_code
+			""",
+			(tuple(dn_names),),
+			as_dict=True,
+		)
+		for r in dn_rows:
+			if r.so_detail:
+				dn_delivered_by_so_detail[r.so_detail] = dn_delivered_by_so_detail.get(r.so_detail, 0.0) + flt(r.qty)
+			if r.item_code:
+				dn_delivered_by_item[r.item_code] = dn_delivered_by_item.get(r.item_code, 0.0) + flt(r.qty)
 
-	ordered_map = {}
-	if po_names and doctype_installed("Purchase Order Item"):
-		ordered_map = {
-			r.item_code: r.total_ordered
-			for r in frappe.db.sql(
-				"""
-				select poi.item_code, sum(poi.qty) as total_ordered
-				from `tabPurchase Order Item` poi
-				inner join `tabPurchase Order` po on po.name = poi.parent
-				where po.name in %s and po.docstatus = 1
-				group by poi.item_code
-				""",
-				(tuple(po_names),),
-				as_dict=True,
-			)
-		}
+	# 2. Delivered Qty from Sales Invoices with update_stock = 1 & Billed Qty + Selling Price (base_rate) from Sales Invoices
+	si_delivered_by_so_detail = {}
+	si_delivered_by_item = {}
+	si_billed_by_so_detail = {}
+	si_billed_by_item = {}
+	si_base_rate_by_so_detail = {}
+	si_base_rate_by_item = {}
+	if si_names and doctype_installed("Sales Invoice Item"):
+		si_rows = frappe.db.sql(
+			"""
+			select sii.so_detail, sii.item_code, si.update_stock, sum(sii.qty) as qty,
+				max(sii.base_rate) as base_rate, max(sii.base_net_rate) as base_net_rate
+			from `tabSales Invoice Item` sii
+			inner join `tabSales Invoice` si on si.name = sii.parent
+			where si.name in %s and si.docstatus = 1
+			group by sii.so_detail, sii.item_code, si.update_stock
+			order by si.posting_date desc, si.creation desc
+			""",
+			(tuple(si_names),),
+			as_dict=True,
+		)
+		for r in si_rows:
+			qty = flt(r.qty)
+			rate = flt(r.base_rate) if flt(r.base_rate) > 0 else flt(r.base_net_rate)
 
-	bom_available = doctype_installed("BOM") and doctype_installed("BOM Item")
+			# Billed Qty & Selling Price from all submitted Sales Invoices
+			if r.so_detail:
+				si_billed_by_so_detail[r.so_detail] = si_billed_by_so_detail.get(r.so_detail, 0.0) + qty
+				if rate > 0 and r.so_detail not in si_base_rate_by_so_detail:
+					si_base_rate_by_so_detail[r.so_detail] = rate
+			if r.item_code:
+				si_billed_by_item[r.item_code] = si_billed_by_item.get(r.item_code, 0.0) + qty
+				if rate > 0 and r.item_code not in si_base_rate_by_item:
+					si_base_rate_by_item[r.item_code] = rate
+
+			# If Sales Invoice has update_stock = 1, it also delivered the stock
+			if r.update_stock:
+				if r.so_detail:
+					si_delivered_by_so_detail[r.so_detail] = si_delivered_by_so_detail.get(r.so_detail, 0.0) + qty
+				if r.item_code:
+					si_delivered_by_item[r.item_code] = si_delivered_by_item.get(r.item_code, 0.0) + qty
+
+	# Fetch comments/remarks from AO (Project) item_details child table or Sales Order Item
+	item_comments_map = {}
+	try:
+		ao_item_details = frappe.db.sql(
+			"""
+			select item_code, sales_order, comments, parent
+			from `tabItem Details`
+			where parent = %s or (sales_order is not null and sales_order in %s)
+			""",
+			(project, tuple(so_names)),
+			as_dict=True,
+		)
+		for d in ao_item_details:
+			comm = (d.get("comments") or "").strip()
+			if comm:
+				if d.get("sales_order") and d.get("item_code"):
+					item_comments_map[(d.sales_order, d.item_code)] = comm
+				if d.get("item_code") and d.item_code not in item_comments_map:
+					item_comments_map[d.item_code] = comm
+	except Exception:
+		pass
+
+	try:
+		soi_comments = frappe.db.sql(
+			"""
+			select parent as sales_order, item_code, comments
+			from `tabSales Order Item`
+			where parent in %s and (comments is not null and comments != '')
+			""",
+			(tuple(so_names),),
+			as_dict=True,
+		)
+		for d in soi_comments:
+			comm = (d.get("comments") or "").strip()
+			if comm:
+				if (d.sales_order, d.item_code) not in item_comments_map:
+					item_comments_map[(d.sales_order, d.item_code)] = comm
+				if d.item_code not in item_comments_map:
+					item_comments_map[d.item_code] = comm
+	except Exception:
+		pass
 
 	rows = []
-	flat_consumption = []
-
 	for it in order_items:
-		components = []
-		if bom_available:
-			bom_name = frappe.db.get_value(
-				"BOM", {"item": it.item_code, "is_default": 1, "docstatus": 1}, "name"
-			)
-			if bom_name:
-				components = frappe.db.sql(
-					"""
-					select bi.item_code, bi.item_name, bi.qty as qty_per_unit
-					from `tabBOM Item` bi
-					where bi.parent = %s
-					order by bi.idx
-					""",
-					bom_name,
-					as_dict=True,
-				)
-
-		is_stock = frappe.db.get_value("Item", it.item_code, "is_stock_item")
-
-		# Selling price in Indian Currency (base_rate)
-		fg_selling_price = flt(it.base_rate) if (it.base_rate and flt(it.base_rate) > 0) else flt(it.rate)
-
-		if not components:
-			cons = consumption_map.get(it.item_code)
-			valuation_rate = cons.valuation_rate if (cons and cons.valuation_rate) else None
-			if valuation_rate is None or valuation_rate == 0:
-				valuation_rate = get_item_valuation_rate(
-					it.item_code, project=project, so_names=so_names, dn_names=dn_names, po_names=po_names
-				)
-			rows.append({
-				"order_item": it.item_name or it.item_code,
-				"item_code": it.item_code,
-				"type": "FG",
-				"component_name": None,
-				"component_code": None,
-				"qty_needed": it.qty,
-				"total_ordered": ordered_map.get(it.item_code),
-				"consumed": cons.qty_consumed if cons else None,
-				"fg_delivered": it.delivered_qty,
-				"selling_price": fg_selling_price,
-				"currency": "INR",
-				"company_currency": "INR",
-				"valuation_rate": valuation_rate,
-				"is_stock_item": 1 if is_stock else 0,
-				"group_start": True,
-			})
-			if cons:
-				flat_consumption.append({
-					"item_code": it.item_code,
-					"item_name": it.item_name or it.item_code,
-					"qty_consumed": cons.qty_consumed,
-					"valuation_rate": cons.valuation_rate,
-				})
+		is_stock = it.get("is_stock_item")
+		if is_stock is None:
+			is_stock = frappe.db.get_value("Item", it.item_code, "is_stock_item")
+		# Exclude Service / Non-stock items
+		if is_stock is not None and not is_stock:
 			continue
 
-		for i, comp in enumerate(components):
-			cons = consumption_map.get(comp.item_code)
-			valuation_rate = (cons.valuation_rate if (cons and cons.valuation_rate) else None)
-			if valuation_rate is None or valuation_rate == 0:
-				valuation_rate = get_item_valuation_rate(
-					comp.item_code, project=project, so_names=so_names, dn_names=dn_names, po_names=po_names
-				)
+		so_detail = it.so_detail
+		item_code = it.item_code
 
-			comp_is_stock = frappe.db.get_value("Item", comp.item_code, "is_stock_item")
-			rows.append({
-				"order_item": (it.item_name or it.item_code) if i == 0 else None,
-				"item_code": it.item_code if i == 0 else None,
-				"type": "FG" if i == 0 else "RM",
-				"component_name": comp.item_name or comp.item_code,
-				"component_code": comp.item_code,
-				"qty_needed": flt(comp.qty_per_unit) * flt(it.qty),
-				"total_ordered": ordered_map.get(comp.item_code),
-				"consumed": cons.qty_consumed if cons else None,
-				"fg_delivered": it.delivered_qty if i == 0 else None,
-				"selling_price": fg_selling_price if i == 0 else None,
-				"currency": "INR",
-				"company_currency": "INR",
-				"valuation_rate": valuation_rate,
-				"is_stock_item": 1 if (is_stock if i == 0 else comp_is_stock) else 0,
-				"group_start": i == 0,
-			})
-			flat_consumption.append({
-				"item_code": comp.item_code,
-				"item_name": comp.item_name,
-				"qty_consumed": cons.qty_consumed if cons else 0,
-				"valuation_rate": cons.valuation_rate if cons else 0,
-			})
+		ordered_qty = flt(it.ordered_qty)
 
+		# Delivered Qty = DN delivered + SI (update_stock) delivered
+		dn_del = dn_delivered_by_so_detail.get(so_detail)
+		if dn_del is None:
+			dn_del = dn_delivered_by_item.get(item_code, 0.0)
+
+		si_del = si_delivered_by_so_detail.get(so_detail)
+		if si_del is None:
+			si_del = si_delivered_by_item.get(item_code, 0.0)
+
+		delivered_qty = dn_del + si_del
+		# Fallback to Sales Order Item delivered_qty if calculated is 0 but SO has delivered_qty
+		if delivered_qty == 0 and flt(it.delivered_qty) > 0:
+			delivered_qty = flt(it.delivered_qty)
+
+		# Billed Qty = Sales Invoice billed qty
+		billed_qty = si_billed_by_so_detail.get(so_detail)
+		if billed_qty is None:
+			billed_qty = si_billed_by_item.get(item_code)
+
+		if billed_qty is None:
+			# Fallback from billed_amt on Sales Order Item
+			if flt(it.billed_amt) > 0 and flt(it.rate) > 0:
+				billed_qty = flt(it.billed_amt) / flt(it.rate)
+			else:
+				billed_qty = 0.0
+
+		# Selling price in Company Currency (INR): from Sales Invoice if available, else from Sales Order
+		fg_selling_price = si_base_rate_by_so_detail.get(so_detail)
+		if not fg_selling_price:
+			fg_selling_price = si_base_rate_by_item.get(item_code)
+		if not fg_selling_price:
+			fg_selling_price = flt(it.base_rate) if (it.base_rate and flt(it.base_rate) > 0) else flt(it.rate)
+
+		valuation_rate = get_item_valuation_rate(
+			it.item_code, project=project, so_names=so_names, dn_names=dn_names, po_names=po_names
+		)
+
+		remarks = item_comments_map.get((it.sales_order, it.item_code))
+		if not remarks:
+			remarks = item_comments_map.get(it.item_code) or ""
+
+		rows.append({
+			"order_item": it.item_name or it.item_code,
+			"item_name": it.item_name or it.item_code,
+			"item_code": it.item_code,
+			"sales_order": it.sales_order,
+			"type": "FG",
+			"ordered_qty": ordered_qty,
+			"delivered_qty": delivered_qty,
+			"billed_qty": billed_qty,
+			"selling_price": fg_selling_price,
+			"currency": it.currency or company_currency,
+			"company_currency": company_currency,
+			"valuation_rate": valuation_rate,
+			"is_stock_item": 1 if is_stock else 0,
+			"remarks": remarks,
+		})
 
 	return {
 		"order_items": order_items,
 		"rows": rows,
-		"material_consumption": flat_consumption,
+		"material_consumption": [],
 	}
 
 
