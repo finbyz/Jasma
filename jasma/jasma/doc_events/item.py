@@ -136,67 +136,89 @@ from frappe.utils import flt
 
 
 def _get_component_ratio_map(item_code):
-	"""For item_code as a raw material, find all Default+Active BOMs where it's
-	used as a component (directly or via nested sub-assemblies), and return
-	{fg_item: qty_per_unit}. Uses BOM Explosion Item (recursive, pre-flattened)
-	as the primary source, with a fallback to BOM Item for any Default+Active
-	BOM whose explosion table hasn't been regenerated yet."""
+	"""For item_code as a raw material or semi-finished good, find all Default/Active BOMs
+	where it is used as a component (directly or via nested sub-assemblies / do_not_explode items / default_bom),
+	and return {fg_item: qty_per_unit}."""
 
-	# Primary: pre-flattened explosion table (handles nested sub-assemblies)
-	rows = frappe.db.sql("""
-		SELECT
-			b.name AS bom_name,
-			b.item AS fg_item,
-			SUM(bei.qty_consumed_per_unit) AS comp_qty
-		FROM `tabBOM Explosion Item` bei
-		JOIN `tabBOM` b ON bei.parent = b.name
-		WHERE bei.item_code = %(item_code)s
-			AND b.docstatus = 1
-			AND b.is_active = 1
-			AND b.is_default = 1
-		GROUP BY b.name, b.item
-	""", {"item_code": item_code}, as_dict=True)
+	def _get_direct_ratio_map(item):
+		# Primary: Explosion table (handles fully exploded standard BOMs)
+		rows = frappe.db.sql("""
+			SELECT
+				b.name AS bom_name,
+				b.item AS fg_item,
+				SUM(bei.qty_consumed_per_unit) AS comp_qty
+			FROM `tabBOM Explosion Item` bei
+			JOIN `tabBOM` b ON bei.parent = b.name
+			WHERE bei.item_code = %(item_code)s
+				AND b.docstatus = 1
+				AND b.is_active = 1
+				AND (
+					b.is_default = 1
+					OR b.name = (SELECT default_bom FROM `tabItem` WHERE name = b.item)
+					OR (SELECT COUNT(*) FROM `tabBOM` b2 WHERE b2.item = b.item AND b2.docstatus = 1 AND b2.is_active = 1) = 1
+				)
+			GROUP BY b.name, b.item
+		""", {"item_code": item}, as_dict=True)
 
-	boms_with_explosion = {r.bom_name for r in rows}
+		boms_found = {r.bom_name: flt(r.comp_qty) for r in rows if flt(r.comp_qty) > 0}
 
-	# Fallback: Default+Active BOMs using this item directly, with no
-	# Explosion Item rows at all (stale/never-regenerated explosion table)
-	candidate_boms = frappe.db.sql("""
-		SELECT DISTINCT b.name AS bom_name, b.item AS fg_item, b.quantity AS bom_qty
-		FROM `tabBOM Item` bi
-		JOIN `tabBOM` b ON bi.parent = b.name
-		WHERE bi.item_code = %(item_code)s
-			AND b.docstatus = 1
-			AND b.is_active = 1
-			AND b.is_default = 1
-	""", {"item_code": item_code}, as_dict=True)
-
-	missing_boms = [r for r in candidate_boms if r.bom_name not in boms_with_explosion]
-
-	fallback_rows = []
-	if missing_boms:
-		missing_names = [r.bom_name for r in missing_boms]
-		fallback_rows = frappe.db.sql("""
+		# Fallback / Do Not Explode: Direct BOM Items where item is listed directly
+		# (e.g., Semi-Finished Goods marked as do_not_explode or where child BOM wasn't exploded)
+		direct_rows = frappe.db.sql("""
 			SELECT
 				bi.parent AS bom_name,
 				b.item AS fg_item,
 				SUM(bi.qty / IFNULL(NULLIF(b.quantity, 0), 1)) AS comp_qty
 			FROM `tabBOM Item` bi
 			JOIN `tabBOM` b ON bi.parent = b.name
-			WHERE bi.parent IN %(bom_names)s
-				AND bi.item_code = %(item_code)s
+			WHERE bi.item_code = %(item_code)s
+				AND b.docstatus = 1
+				AND b.is_active = 1
+				AND (
+					b.is_default = 1
+					OR b.name = (SELECT default_bom FROM `tabItem` WHERE name = b.item)
+					OR (SELECT COUNT(*) FROM `tabBOM` b2 WHERE b2.item = b.item AND b2.docstatus = 1 AND b2.is_active = 1) = 1
+				)
 			GROUP BY bi.parent, b.item
-		""", {"bom_names": tuple(missing_names), "item_code": item_code}, as_dict=True)
+		""", {"item_code": item}, as_dict=True)
 
-	ratio_map = {}
-	for r in rows + fallback_rows:
-		fg_item = r.get("fg_item")
-		comp_qty = flt(r.get("comp_qty"))
-		if not fg_item or comp_qty <= 0:
-			continue
-		ratio_map[fg_item] = ratio_map.get(fg_item, 0.0) + comp_qty
+		res = {}
+		# Add explosion rows first
+		for r in rows:
+			fg_item = r.get("fg_item")
+			comp_qty = flt(r.get("comp_qty"))
+			if fg_item and comp_qty > 0:
+				res[fg_item] = res.get(fg_item, 0.0) + comp_qty
 
-	return ratio_map
+		# Add direct rows for BOMs not already covered by explosion
+		for r in direct_rows:
+			bom_name = r.get("bom_name")
+			fg_item = r.get("fg_item")
+			comp_qty = flt(r.get("comp_qty"))
+			if bom_name not in boms_found and fg_item and comp_qty > 0:
+				res[fg_item] = res.get(fg_item, 0.0) + comp_qty
+
+		return res
+
+	# Expand upward for any intermediate items (Semi-Finished Goods) up to top-level FGs
+	final_ratio_map = {}
+	# queue stores (current_item, multiplier, visited_path_set to prevent infinite cycles)
+	queue = [(item_code, 1.0, {item_code})]
+
+	while queue:
+		current_item, current_mult, path = queue.pop(0)
+		direct_parents = _get_direct_ratio_map(current_item)
+
+		for parent_fg, ratio in direct_parents.items():
+			effective_ratio = current_mult * ratio
+			final_ratio_map[parent_fg] = final_ratio_map.get(parent_fg, 0.0) + effective_ratio
+
+			if parent_fg not in path:
+				new_path = set(path)
+				new_path.add(parent_fg)
+				queue.append((parent_fg, effective_ratio, new_path))
+
+	return final_ratio_map
 
 
 @frappe.whitelist()

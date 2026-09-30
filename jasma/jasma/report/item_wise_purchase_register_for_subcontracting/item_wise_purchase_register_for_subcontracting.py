@@ -25,30 +25,23 @@ def get_columns(filters):
 	group_by = filters.get("group_by")
 	txn_type = filters.get("type") or "All"
 
-	columns = []
-
-	if group_by != "Item":
-		columns += [
-			{
-				"label": _("Item Code"),
-				"fieldname": "item_code",
-				"fieldtype": "Link",
-				"options": "Item",
-				"width": 120,
-			},
-			{"label": _("Item Name"), "fieldname": "item_name", "fieldtype": "Data", "width": 120},
-		]
-
-	if group_by not in ("Item", "Item Group"):
-		columns.append(
-			{
-				"label": _("Item Group"),
-				"fieldname": "item_group",
-				"fieldtype": "Link",
-				"options": "Item Group",
-				"width": 120,
-			}
-		)
+	columns = [
+		{
+			"label": _("Item Code"),
+			"fieldname": "item_code",
+			"fieldtype": "Link",
+			"options": "Item",
+			"width": 120,
+		},
+		{"label": _("Item Name"), "fieldname": "item_name", "fieldtype": "Data", "width": 120},
+		{
+			"label": _("Item Group"),
+			"fieldname": "item_group",
+			"fieldtype": "Link",
+			"options": "Item Group",
+			"width": 120,
+		},
+	]
 
 	if txn_type == "All":
 		columns.append(
@@ -67,9 +60,8 @@ def get_columns(filters):
 		{"label": _("Posting Date"), "fieldname": "posting_date", "fieldtype": "Date", "width": 100},
 	]
 
-	# supplier columns are irrelevant for pure Manufacturing, and are dropped
-	# entirely from the "group by Supplier" view of the report
-	if txn_type != "Manufacturing" and group_by != "Supplier":
+	# supplier columns are irrelevant for pure Manufacturing
+	if txn_type != "Manufacturing":
 		columns += [
 			{
 				"label": _("Supplier"),
