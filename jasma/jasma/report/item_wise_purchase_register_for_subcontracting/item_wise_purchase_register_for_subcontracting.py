@@ -32,32 +32,35 @@ def get_columns(filters):
 			"fieldtype": "Link",
 			"options": "Item",
 			"width": 120,
+			"align": "left",
 		},
-		{"label": _("Item Name"), "fieldname": "item_name", "fieldtype": "Data", "width": 120},
+		{"label": _("Item Name"), "fieldname": "item_name", "fieldtype": "Data", "width": 120, "align": "left"},
 		{
 			"label": _("Item Group"),
 			"fieldname": "item_group",
 			"fieldtype": "Link",
 			"options": "Item Group",
 			"width": 120,
+			"align": "left",
 		},
 	]
 
 	if txn_type == "All":
 		columns.append(
-			{"label": _("Type"), "fieldname": "transaction_type", "fieldtype": "Data", "width": 100}
+			{"label": _("Type"), "fieldname": "transaction_type", "fieldtype": "Data", "width": 100, "align": "left"}
 		)
 
 	columns += [
-		{"label": _("Voucher Type"), "fieldname": "voucher_type", "fieldtype": "Data", "width": 130},
+		{"label": _("Voucher Type"), "fieldname": "voucher_type", "fieldtype": "Data", "width": 130, "align": "left"},
 		{
 			"label": _("Voucher No"),
 			"fieldname": "voucher_no",
 			"fieldtype": "Dynamic Link",
 			"options": "voucher_type",
 			"width": 160,
+			"align": "left",
 		},
-		{"label": _("Posting Date"), "fieldname": "posting_date", "fieldtype": "Date", "width": 100},
+		{"label": _("Posting Date"), "fieldname": "posting_date", "fieldtype": "Date", "width": 100, "align": "left"},
 	]
 
 	# supplier columns are irrelevant for pure Manufacturing
@@ -69,8 +72,9 @@ def get_columns(filters):
 				"fieldtype": "Link",
 				"options": "Supplier",
 				"width": 120,
+				"align": "left",
 			},
-			{"label": _("Supplier Name"), "fieldname": "supplier_name", "fieldtype": "Data", "width": 120},
+			{"label": _("Supplier Name"), "fieldname": "supplier_name", "fieldtype": "Data", "width": 120, "align": "left"},
 		]
 
 	# Expense Account only has meaning for Purchase Invoice rows (it comes
@@ -84,6 +88,7 @@ def get_columns(filters):
 				"fieldtype": "Link",
 				"options": "Account",
 				"width": 140,
+				"align": "left",
 			}
 		)
 
@@ -94,6 +99,7 @@ def get_columns(filters):
 			"fieldtype": "Link",
 			"options": "Company",
 			"width": 100,
+			"align": "left",
 		},
 		{
 			"label": _("Warehouse"),
@@ -101,15 +107,17 @@ def get_columns(filters):
 			"fieldtype": "Link",
 			"options": "Warehouse",
 			"width": 120,
+			"align": "left",
 		},
-		{"label": _("Qty"), "fieldname": "qty", "fieldtype": "Float", "width": 90},
-		{"label": _("UOM"), "fieldname": "uom", "fieldtype": "Link", "options": "UOM", "width": 80},
+		{"label": _("Qty"), "fieldname": "qty", "fieldtype": "Float", "width": 90, "align": "right"},
+		{"label": _("UOM"), "fieldname": "uom", "fieldtype": "Link", "options": "UOM", "width": 80, "align": "left"},
 		{
 			"label": _("Rate"),
 			"fieldname": "rate",
 			"fieldtype": "Currency",
 			"options": "currency",
 			"width": 100,
+			"align": "right",
 		},
 		{
 			"label": _("Amount"),
@@ -117,13 +125,14 @@ def get_columns(filters):
 			"fieldtype": "Currency",
 			"options": "currency",
 			"width": 110,
+			"align": "right",
 		},
 		{"label": _("Currency"), "fieldname": "currency", "fieldtype": "Data", "width": 1, "hidden": 1},
 	]
 
 	if group_by:
 		columns.append(
-			{"label": _("% Of Grand Total"), "fieldname": "percent_gt", "fieldtype": "Float", "width": 100}
+			{"label": _("% Of Grand Total"), "fieldname": "percent_gt", "fieldtype": "Float", "width": 100, "align": "right"}
 		)
 
 	return columns
@@ -337,7 +346,7 @@ def get_subcontracting_data(filters):
 			scr.company,
 			scri.warehouse,
 			scri.qty,
-			scri.stock_uom,
+			scri.stock_uom.as_("uom"),
 			scri.amount,
 		)
 		.where(scr.docstatus == 1)

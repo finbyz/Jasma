@@ -506,13 +506,23 @@ def get_project_document_map(project):
 		)
 		doc_map["quote"].update(direct_quotes)
 
-	# 3. Material Requests (direct project or via Sales Order Item)
+	# 3. Material Requests (direct project or via Sales Order Item or via MR Item project)
 	direct_mr = frappe.get_all(
 		"Material Request",
 		filters={"project": project, "docstatus": 1},
 		pluck="name",
 	)
 	doc_map["mr"].update(direct_mr)
+	if doctype_installed("Material Request Item") and field_exists("Material Request Item", "project"):
+		mr_from_item_proj = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabMaterial Request Item`
+			WHERE project = %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(project,),
+			pluck=True,
+		)
+		doc_map["mr"].update(mr_from_item_proj)
 	if so_names and doctype_installed("Material Request Item") and field_exists("Material Request Item", "sales_order"):
 		mr_connected = frappe.db.sql(
 			"""
@@ -524,13 +534,23 @@ def get_project_document_map(project):
 		)
 		doc_map["mr"].update(mr_connected)
 
-	# 4. Purchase Orders (direct project or via Sales Order or Material Request)
+	# 4. Purchase Orders (direct project or via PO Item project or via Sales Order or Material Request)
 	direct_po = frappe.get_all(
 		"Purchase Order",
 		filters={"project": project, "docstatus": 1},
 		pluck="name",
 	)
 	doc_map["po"].update(direct_po)
+	if doctype_installed("Purchase Order Item") and field_exists("Purchase Order Item", "project"):
+		po_from_item_proj = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabPurchase Order Item`
+			WHERE project = %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(project,),
+			pluck=True,
+		)
+		doc_map["po"].update(po_from_item_proj)
 	if so_names and doctype_installed("Purchase Order Item") and field_exists("Purchase Order Item", "sales_order"):
 		po_from_so = frappe.db.sql(
 			"""
@@ -584,13 +604,23 @@ def get_project_document_map(project):
 			)
 			doc_map["scr"].update(scr_from_sco)
 
-	# 7. Purchase Receipts (direct project or via PO)
+	# 7. Purchase Receipts (direct project or via PR Item project or via PO)
 	direct_pr = frappe.get_all(
 		"Purchase Receipt",
 		filters={"project": project, "docstatus": 1},
 		pluck="name",
 	)
 	doc_map["pr"].update(direct_pr)
+	if doctype_installed("Purchase Receipt Item") and field_exists("Purchase Receipt Item", "project"):
+		pr_from_item_proj = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabPurchase Receipt Item`
+			WHERE project = %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(project,),
+			pluck=True,
+		)
+		doc_map["pr"].update(pr_from_item_proj)
 	if doc_map["po"] and doctype_installed("Purchase Receipt Item") and field_exists("Purchase Receipt Item", "purchase_order"):
 		pr_from_po = frappe.db.sql(
 			"""
@@ -602,13 +632,23 @@ def get_project_document_map(project):
 		)
 		doc_map["pr"].update(pr_from_po)
 
-	# 8. Purchase Invoices (direct project or via PO or via PR)
+	# 8. Purchase Invoices (direct project on header or PI Item project or via PO or via PR)
 	direct_pi = frappe.get_all(
 		"Purchase Invoice",
 		filters={"project": project, "docstatus": 1},
 		pluck="name",
 	)
 	doc_map["pi"].update(direct_pi)
+	if doctype_installed("Purchase Invoice Item") and field_exists("Purchase Invoice Item", "project"):
+		pi_from_item_proj = frappe.db.sql(
+			"""
+			SELECT DISTINCT parent FROM `tabPurchase Invoice Item`
+			WHERE project = %s AND docstatus = 1 AND parent IS NOT NULL
+			""",
+			(project,),
+			pluck=True,
+		)
+		doc_map["pi"].update(pi_from_item_proj)
 	if doc_map["po"] and doctype_installed("Purchase Invoice Item") and field_exists("Purchase Invoice Item", "purchase_order"):
 		pi_from_po = frappe.db.sql(
 			"""
@@ -1031,20 +1071,41 @@ def compute_overview(project):
 		)[0][0] or 0)
 
 	indirect = 0.0
+	has_is_subcontracted = field_exists("Purchase Invoice", "is_subcontracted")
+	subcontract_clause = "and pi.is_subcontracted = 0" if has_is_subcontracted else ""
+	has_item_project = doctype_installed("Purchase Invoice Item") and field_exists("Purchase Invoice Item", "project")
+
+	pi_item_conditions = []
+	pi_params = []
+
+	if has_item_project:
+		pi_item_conditions.append("pii.project = %s")
+		pi_params.append(project)
+
 	if pi_names:
-		has_is_subcontracted = field_exists("Purchase Invoice", "is_subcontracted")
-		subcontract_clause = "and pi.is_subcontracted = 0" if has_is_subcontracted else ""
+		if has_item_project:
+			pi_item_conditions.append("(pi.name in %s and (pii.project is null or pii.project = ''))")
+			pi_params.append(tuple(pi_names))
+		else:
+			pi_item_conditions.append("pi.name in %s")
+			pi_params.append(tuple(pi_names))
+
+	if pi_item_conditions:
 		indirect = flt(frappe.db.sql(
 			"""
 			select sum(pii.base_net_amount)
 			from `tabPurchase Invoice Item` pii
 			inner join `tabPurchase Invoice` pi on pi.name = pii.parent
 			inner join `tabItem` it on it.name = pii.item_code
-			where pi.name in %s and pi.docstatus = 1
+			where pi.docstatus = 1
 				and it.is_stock_item = 0
 				{subcontract_clause}
-			""".format(subcontract_clause=subcontract_clause),
-			(tuple(pi_names),),
+				and ({conditions})
+			""".format(
+				subcontract_clause=subcontract_clause,
+				conditions=" OR ".join(pi_item_conditions),
+			),
+			tuple(pi_params),
 		)[0][0] or 0)
 
 	# RODTEP, Duty Drawback, and IGST Refund values from linked Sales Invoices' JVs
