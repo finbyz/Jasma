@@ -1,13 +1,13 @@
-// jasma/jasma/page/employee_dashboard/employee_dashboard.js
+// jasma/jasma/page/document_dashboard/document_dashboard.js
 
-frappe.pages["employee-dashboard"].on_page_load = function (wrapper) {
+frappe.pages["document-dashboard"].on_page_load = function (wrapper) {
     frappe.ui.make_app_page({
         parent: wrapper,
-        title: __("Documents Dashboard"),
+        title: __("Document Dashboard"),
         single_column: true,
     });
 
-    const methodRoot = "jasma.jasma.page.employee_dashboard.employee_dashboard.";
+    const methodRoot = "jasma.jasma.page.document_dashboard.document_dashboard.";
 
     const state = {
         filters: {
@@ -277,7 +277,7 @@ frappe.pages["employee-dashboard"].on_page_load = function (wrapper) {
                 }
             },
             error: function (err) {
-                console.error("Employee Dashboard: Failed to load data", err);
+                console.error("Document Dashboard: Failed to load data", err);
                 showError();
             }
         });

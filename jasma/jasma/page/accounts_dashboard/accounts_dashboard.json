@@ -1,19 +1,19 @@
 {
  "content": null,
- "creation": "2026-09-14 09:11:38.478029",
+ "creation": "2026-10-05 12:24:24.330318",
  "docstatus": 0,
  "doctype": "Page",
  "idx": 0,
- "modified": "2026-09-14 09:11:38.478029",
+ "modified": "2026-10-05 12:24:24.330318",
  "modified_by": "Administrator",
  "module": "Jasma",
- "name": "employee-dashboard",
+ "name": "accounts-dashboard",
  "owner": "Administrator",
- "page_name": "employee-dashboard",
+ "page_name": "accounts-dashboard",
  "roles": [],
  "script": null,
  "standard": "Yes",
  "style": null,
  "system_page": 0,
- "title": "Employee Dashboard"
+ "title": "Accounts Dashboard"
 }

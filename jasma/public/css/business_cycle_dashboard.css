@@ -32,6 +32,91 @@
 	box-sizing: border-box;
 }
 
+/* Filter Bar (Executive Dashboard Style) */
+.exd-filter-bar {
+	background: #ffffff;
+	border: 1px solid #e3e9f1;
+	border-radius: 12px;
+	padding: 8px 14px;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+	box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+	margin: 0;
+}
+.exd-field { position:relative; display:flex; align-items:center; }
+.exd-field-icon svg { position:absolute; left:14px; color:#64748b; pointer-events:none; }
+.exd-field select {
+	border: 1px solid #e2e8f0;
+	border-radius: 8px;
+	padding: 8px 16px 8px 38px;
+	font-size: 14.5px;
+	font-weight: 600;
+	color: #1e293b;
+	background: #ffffff;
+	height: 40px;
+	outline: none;
+	appearance: none;
+	cursor: pointer;
+	min-width: 170px;
+	transition: background .15s ease, border-color .15s ease;
+	font-family: inherit;
+}
+.exd-field select:hover { border-color: #6366f1; }
+.exd-custom-range {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.exd-custom-range.hidden, .exd-custom-range .hidden { display: none !important; }
+.exd-custom-range span { font-size: 14px; color: #64748b; font-weight: 600; }
+.exd-date-input {
+	padding: 8px 12px;
+	border: 1px solid #e2e8f0;
+	border-radius: 6px;
+	background: #ffffff;
+	font-size: 14px;
+	font-weight: 600;
+	color: #1e293b;
+	outline: none;
+	height: 40px;
+	min-width: 140px;
+	text-align: center;
+	transition: border-color .15s ease, background .15s ease;
+	font-family: inherit;
+}
+.exd-date-input:not(:disabled) { cursor: pointer; }
+.exd-date-input:not(:disabled):hover { border-color: #6366f1; }
+.exd-date-input:focus { border-color: #6366f1; }
+.exd-date-input:disabled {
+	background: #f8fafc;
+	color: #64748b;
+	cursor: default;
+	opacity: 1;
+}
+.exd-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	height: 40px;
+	padding: 0 16px;
+	font-size: 14px;
+	font-weight: 600;
+	border-radius: 8px;
+	border: 1px solid transparent;
+	cursor: pointer;
+	transition: all .15s ease;
+	font-family: inherit;
+}
+.exd-btn-primary {
+	background: #4f46e5;
+	color: #ffffff;
+}
+.exd-btn-primary:hover {
+	background: #4338ca;
+}
+
 /* Header & Section Bar */
 .sec-bar {
 	background: transparent;

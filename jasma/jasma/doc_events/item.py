@@ -140,30 +140,49 @@ def _get_component_ratio_map(item_code):
 	where it is used as a component (directly or via nested sub-assemblies / do_not_explode items / default_bom),
 	and return {fg_item: qty_per_unit}."""
 
-	def _get_direct_ratio_map(item):
-		# Primary: Explosion table (handles fully exploded standard BOMs)
-		rows = frappe.db.sql("""
-			SELECT
-				b.name AS bom_name,
-				b.item AS fg_item,
-				SUM(bei.qty_consumed_per_unit) AS comp_qty
-			FROM `tabBOM Explosion Item` bei
-			JOIN `tabBOM` b ON bei.parent = b.name
-			WHERE bei.item_code = %(item_code)s
-				AND b.docstatus = 1
-				AND b.is_active = 1
-				AND (
-					b.is_default = 1
-					OR b.name = (SELECT default_bom FROM `tabItem` WHERE name = b.item)
-					OR (SELECT COUNT(*) FROM `tabBOM` b2 WHERE b2.item = b.item AND b2.docstatus = 1 AND b2.is_active = 1) = 1
-				)
-			GROUP BY b.name, b.item
-		""", {"item_code": item}, as_dict=True)
+	final_ratio_map = {}
 
-		boms_found = {r.bom_name: flt(r.comp_qty) for r in rows if flt(r.comp_qty) > 0}
+	# 1. Primary: Query tabBOM Explosion Item for item_code.
+	# BOM Explosion is already pre-flattened and recursive in ERPNext,
+	# so it covers all ancestor FGs at all levels where item_code is consumed as a leaf/raw material.
+	explosion_rows = frappe.db.sql("""
+		SELECT
+			b.name AS bom_name,
+			b.item AS fg_item,
+			SUM(bei.qty_consumed_per_unit) AS comp_qty
+		FROM `tabBOM Explosion Item` bei
+		JOIN `tabBOM` b ON bei.parent = b.name
+		WHERE bei.item_code = %(item_code)s
+			AND b.docstatus = 1
+			AND b.is_active = 1
+			AND (
+				b.is_default = 1
+				OR b.name = (SELECT default_bom FROM `tabItem` WHERE name = b.item)
+				OR (SELECT COUNT(*) FROM `tabBOM` b2 WHERE b2.item = b.item AND b2.docstatus = 1 AND b2.is_active = 1) = 1
+			)
+		GROUP BY b.name, b.item
+	""", {"item_code": item_code}, as_dict=True)
 
-		# Fallback / Do Not Explode: Direct BOM Items where item is listed directly
-		# (e.g., Semi-Finished Goods marked as do_not_explode or where child BOM wasn't exploded)
+	boms_with_explosion = set()
+	for r in explosion_rows:
+		fg_item = r.get("fg_item")
+		comp_qty = flt(r.get("comp_qty"))
+		bom_name = r.get("bom_name")
+		if bom_name:
+			boms_with_explosion.add(bom_name)
+		if fg_item and comp_qty > 0:
+			final_ratio_map[fg_item] = final_ratio_map.get(fg_item, 0.0) + comp_qty
+
+	# 2. For items that are sub-assemblies (or in BOMs where explosion table has no rows for this BOM):
+	# If item_code is used in tabBOM Item of a parent BOM not already covered by explosion,
+	# traverse upward through tabBOM Item.
+	# queue stores (current_item, multiplier, visited_items_set)
+	queue = [(item_code, 1.0, {item_code})]
+
+	while queue:
+		curr_item, curr_mult, visited = queue.pop(0)
+
+		# Query direct parent BOMs where curr_item is listed in tabBOM Item
 		direct_rows = frappe.db.sql("""
 			SELECT
 				bi.parent AS bom_name,
@@ -180,43 +199,27 @@ def _get_component_ratio_map(item_code):
 					OR (SELECT COUNT(*) FROM `tabBOM` b2 WHERE b2.item = b.item AND b2.docstatus = 1 AND b2.is_active = 1) = 1
 				)
 			GROUP BY bi.parent, b.item
-		""", {"item_code": item}, as_dict=True)
+		""", {"item_code": curr_item}, as_dict=True)
 
-		res = {}
-		# Add explosion rows first
-		for r in rows:
-			fg_item = r.get("fg_item")
-			comp_qty = flt(r.get("comp_qty"))
-			if fg_item and comp_qty > 0:
-				res[fg_item] = res.get(fg_item, 0.0) + comp_qty
-
-		# Add direct rows for BOMs not already covered by explosion
 		for r in direct_rows:
 			bom_name = r.get("bom_name")
-			fg_item = r.get("fg_item")
+			parent_fg = r.get("fg_item")
 			comp_qty = flt(r.get("comp_qty"))
-			if bom_name not in boms_found and fg_item and comp_qty > 0:
-				res[fg_item] = res.get(fg_item, 0.0) + comp_qty
 
-		return res
+			# Skip if this parent BOM already had the item accounted for in its explosion table
+			if bom_name in boms_with_explosion:
+				continue
 
-	# Expand upward for any intermediate items (Semi-Finished Goods) up to top-level FGs
-	final_ratio_map = {}
-	# queue stores (current_item, multiplier, visited_path_set to prevent infinite cycles)
-	queue = [(item_code, 1.0, {item_code})]
+			if not parent_fg or comp_qty <= 0:
+				continue
 
-	while queue:
-		current_item, current_mult, path = queue.pop(0)
-		direct_parents = _get_direct_ratio_map(current_item)
-
-		for parent_fg, ratio in direct_parents.items():
-			effective_ratio = current_mult * ratio
+			effective_ratio = curr_mult * comp_qty
 			final_ratio_map[parent_fg] = final_ratio_map.get(parent_fg, 0.0) + effective_ratio
 
-			if parent_fg not in path:
-				new_path = set(path)
-				new_path.add(parent_fg)
-				queue.append((parent_fg, effective_ratio, new_path))
+			if parent_fg not in visited:
+				new_visited = set(visited)
+				new_visited.add(parent_fg)
+				queue.append((parent_fg, effective_ratio, new_visited))
 
 	return final_ratio_map
 

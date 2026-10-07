@@ -1,4 +1,4 @@
-# jasma/jasma/page/employee_dashboard/employee_dashboard.py
+# jasma/jasma/page/document_dashboard/document_dashboard.py
 
 import re
 import datetime
