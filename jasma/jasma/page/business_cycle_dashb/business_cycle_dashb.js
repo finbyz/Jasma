@@ -38,6 +38,32 @@ function fmt_date(val) {
 	return s;
 }
 
+function ddmmyyyyToIso(value) {
+	if (!value) return null;
+	const parts = String(value).split("-");
+	if (parts.length !== 3) return value;
+	const [d, m, y] = parts;
+	return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+}
+
+function isoToDdmmyyyy(value) {
+	if (!value) return "";
+	const parts = String(value).split(" ")[0].split("-");
+	if (parts.length !== 3) return value;
+	const [y, m, d] = parts;
+	return `${d.padStart(2, "0")}-${m.padStart(2, "0")}-${y}`;
+}
+
+function iconSvg(name, size) {
+	const I = {
+		home: '<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',
+		calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
+		refresh: '<path d="M21 12a9 9 0 11-9-9c2.5 0 4.7 1 6.4 2.6L21 8M21 3v5h-5"/>',
+	};
+	const s = size || 15;
+	return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;">${I[name] || ""}</svg>`;
+}
+
 class MELBusinessCycleDashboard {
 	constructor(wrapper) {
 		this.wrapper = wrapper;
@@ -54,11 +80,15 @@ class MELBusinessCycleDashboard {
 		this.supplier_data = [];
 		this.current_stage = null;
 		this.current_records = [];
-		this.controls = {};
 		this.loading = false;
 		this.refresh_timer = null;
-		this.suppress_filter_refresh = true;
-		this._control_ready_promises = [];   // ← add this
+		this.filters = {
+			period_preset: "monthly",
+			company: "",
+			from_date: null,
+			to_date: null,
+		};
+		this.companies = [];
 
 		this.colors = {
 			mr_approved: { cls: "clr-cyan", icon: "octicon octicon-file", clr: "#0891b2" },
@@ -75,10 +105,11 @@ class MELBusinessCycleDashboard {
 		};
 
 		this.build();
-		this.suppress_filter_refresh = false;
+		this.setup_date_pickers();
 		this.bind_events();
 		this.configure_page_actions();
-		Promise.all(this._control_ready_promises).then(() => this.refresh());
+		this.load_companies();
+		this.refresh();
 	}
 
 	build() {
@@ -95,11 +126,32 @@ class MELBusinessCycleDashboard {
 						<div class="sec-title">${__("Dashboard Overview")}</div>
 						<div class="sec-sub">${__("Click any card to view detailed stage records")}</div>
 					</div>
-					<div class="mel-filter-grid" style="display:flex;gap:10px;align-items:center;">
-						<div class="mel-filter-control" data-filter="company"></div>
-						<div class="mel-filter-control" data-filter="from_date"></div>
-						<div class="mel-filter-control" data-filter="to_date"></div>
-						<button class="btn btn-default mel-clear-filters" type="button">${__("Clear")}</button>
+
+					<!-- Filter Bar (matching Executive Dashboard & previous layout) -->
+					<div class="exd-filter-bar">
+						<div class="exd-field exd-field-icon">
+							${iconSvg("home")}
+							<select id="mel-company">
+								<option value="">${__("All Companies")}</option>
+							</select>
+						</div>
+						<div class="exd-field exd-field-icon">
+							${iconSvg("calendar")}
+							<select id="mel-period">
+								<option value="monthly" selected>${__("Monthly")}</option>
+								<option value="yearly">${__("This Financial Year")}</option>
+								<option value="previous_fy">${__("Previous Financial Year")}</option>
+								<option value="quarterly">${__("Quarterly (Last 3 Months)")}</option>
+								<option value="weekly">${__("Weekly")}</option>
+								<option value="custom">${__("Custom Range")}</option>
+							</select>
+						</div>
+						<div id="mel-custom-range" class="exd-custom-range">
+							<input type="text" id="mel-date-from" class="exd-date-input" title="From Date" placeholder="DD-MM-YYYY" autocomplete="off" readonly disabled>
+							<span>${__("to")}</span>
+							<input type="text" id="mel-date-to" class="exd-date-input" title="To Date" placeholder="DD-MM-YYYY" autocomplete="off" readonly disabled>
+							<button class="exd-btn exd-btn-primary hidden" id="mel-apply-range">${__("Apply")}</button>
+						</div>
 					</div>
 				</div>
 
@@ -175,31 +227,70 @@ class MELBusinessCycleDashboard {
 				</div>
 			</div>
 		`).appendTo(this.page.main);
-
-		this.make_filter_controls();
 	}
 
-	make_filter_controls() {
-		const today = frappe.datetime.get_today();
-		const from_date = frappe.datetime.add_months(today, -1);
-		const company = frappe.defaults.get_user_default("Company");
+	setup_date_pickers() {
+		const today = new Date();
+		const y = today.getFullYear();
+		const m = today.getMonth() + 1;
+		const lastDay = new Date(y, m, 0).getDate();
+		const mStr = String(m).padStart(2, "0");
+		const dStart = `01-${mStr}-${y}`;
+		const dEnd = `${String(lastDay).padStart(2, "0")}-${mStr}-${y}`;
 
-		this.controls.company = this.make_control("company", {
-			fieldtype: "Link",
-			options: "Company",
-			label: __("Company"),
-			default: company,
-		});
-		this.controls.from_date = this.make_control("from_date", {
-			fieldtype: "Date",
-			label: __("From Date"),
-			default: from_date,
-		});
-		this.controls.to_date = this.make_control("to_date", {
-			fieldtype: "Date",
-			label: __("To Date"),
-			default: today,
-		});
+		this.$main.find("#mel-date-from").val(dStart);
+		this.$main.find("#mel-date-to").val(dEnd);
+
+		const options = {
+			language: "en",
+			autoClose: true,
+			todayButton: true,
+			dateFormat: "dd-mm-yyyy",
+			keyboardNav: false,
+			firstDay: frappe.datetime.get_first_day_of_the_week_index
+				? frappe.datetime.get_first_day_of_the_week_index()
+				: 0,
+		};
+		this.$main.find("#mel-date-from").datepicker(options);
+		this.$main.find("#mel-date-to").datepicker(options);
+	}
+
+	clear_date_picker(selector) {
+		const $el = this.$main.find(selector);
+		const instance = $el.data("datepicker");
+		if (instance) {
+			instance.clear();
+		} else {
+			$el.val("");
+		}
+	}
+
+	async load_companies() {
+		try {
+			const companies = await this.call("get_companies");
+			if (companies && Array.isArray(companies)) {
+				this.companies = companies;
+				let opts = `<option value="">${__("All Companies")}</option>`;
+				this.companies.forEach((c) => {
+					const sel = c === this.filters.company ? "selected" : "";
+					opts += `<option value="${c}" ${sel}>${c}</option>`;
+				});
+				this.$main.find("#mel-company").html(opts);
+				if (this.filters.company) {
+					this.$main.find("#mel-company").val(this.filters.company);
+				}
+			}
+		} catch (e) {
+			console.warn("Could not load companies", e);
+		}
+	}
+
+	sync_date_range_inputs() {
+		if (this.filters.period_preset === "custom") return;
+		const from_d = this.data?.from_date;
+		const to_d = this.data?.to_date;
+		if (from_d) this.$main.find("#mel-date-from").val(isoToDdmmyyyy(from_d));
+		if (to_d) this.$main.find("#mel-date-to").val(isoToDdmmyyyy(to_d));
 	}
 
 	open_supplier_po_list(supplier, from_date, to_date) {
@@ -208,9 +299,6 @@ class MELBusinessCycleDashboard {
 			status: ["not in", ["Draft", "Cancelled", "Completed", "Closed", "On Hold"]],
 		};
 
-		// "Required Date" in this drawer is schedule_date — filter on that to match
-		// what the user is actually looking at. Swap to transaction_date if you'd
-		// rather match PO creation date instead.
 		if (from_date && to_date) {
 			route_options.schedule_date = ["between", [from_date, to_date]];
 		} else if (from_date) {
@@ -223,34 +311,14 @@ class MELBusinessCycleDashboard {
 		frappe.set_route("List", "Purchase Order");
 	}
 
-	make_control(slot, df) {
-		const parent = this.$main.find(`[data-filter="${slot}"]`).empty();
-		const control = frappe.ui.form.make_control({
-			parent,
-			df: {
-				...df,
-				onchange: () => {
-					if (!this.suppress_filter_refresh) this.refresh();
-				},
-			},
-			render_input: true,
-		});
-		control.refresh();
-
-		this._control_ready_promises = this._control_ready_promises || [];
-		if (df.default) {
-			// set_value() resolves asynchronously — track it so we know
-			// exactly when the control's value is actually committed.
-			this._control_ready_promises.push(Promise.resolve(control.set_value(df.default)));
-		}
-		return control;
-	}
-
 	get_filters() {
+		const from_val = this.filters.from_date || (this.filters.period_preset === "custom" ? ddmmyyyyToIso(this.$main.find("#mel-date-from").val()) : null);
+		const to_val = this.filters.to_date || (this.filters.period_preset === "custom" ? ddmmyyyyToIso(this.$main.find("#mel-date-to").val()) : null);
 		return {
-			company: this.controls.company?.get_value() || "",
-			from_date: this.controls.from_date?.get_value() || "",
-			to_date: this.controls.to_date?.get_value() || "",
+			company: this.filters.company || "",
+			period_preset: this.filters.period_preset || "yearly",
+			from_date: from_val || null,
+			to_date: to_val || null,
 		};
 	}
 
@@ -260,7 +328,43 @@ class MELBusinessCycleDashboard {
 
 	bind_events() {
 		this.$main.on("click", ".modal-bg, [data-close-modal]", () => this.close_modal());
-		this.$main.on("click", ".mel-clear-filters", () => this.clear_filters());
+
+		this.$main.on("change", "#mel-company", (e) => {
+			this.filters.company = $(e.currentTarget).val() || "";
+			this.refresh();
+		});
+
+		this.$main.on("change", "#mel-period", (e) => {
+			const preset = $(e.currentTarget).val();
+			this.filters.period_preset = preset;
+
+			if (preset === "custom") {
+				this.$main.find("#mel-date-from, #mel-date-to").prop("disabled", false).prop("readonly", false);
+				this.$main.find("#mel-apply-range").removeClass("hidden");
+				this.clear_date_picker("#mel-date-from");
+				this.clear_date_picker("#mel-date-to");
+				return;
+			}
+
+			this.$main.find("#mel-date-from, #mel-date-to").prop("disabled", true).prop("readonly", true);
+			this.$main.find("#mel-apply-range").addClass("hidden");
+			this.filters.from_date = null;
+			this.filters.to_date = null;
+			this.refresh();
+		});
+
+		this.$main.on("click", "#mel-apply-range", () => {
+			const from_display = this.$main.find("#mel-date-from").val();
+			const to_display = this.$main.find("#mel-date-to").val();
+			if (from_display && to_display) {
+				this.filters.period_preset = "custom";
+				this.filters.from_date = ddmmyyyyToIso(from_display);
+				this.filters.to_date = ddmmyyyyToIso(to_display);
+				this.refresh();
+			} else {
+				frappe.msgprint(__("Please select both from and to dates."));
+			}
+		});
 
 		this.$main.on("input", "#mel-stockSearch", (e) => {
 			const query = $(e.currentTarget).val().toLowerCase();
@@ -274,7 +378,12 @@ class MELBusinessCycleDashboard {
 
 		this.$main.on("click", ".mel-open-supplier-po-list", (e) => {
 			const $t = $(e.currentTarget);
-			this.open_supplier_po_list($t.data("supplier"), $t.data("from"), $t.data("to"));
+			const filters = this.get_filters();
+			this.open_supplier_po_list(
+				$t.data("supplier"),
+				$t.data("from") || filters.from_date || this.data?.from_date,
+				$t.data("to") || filters.to_date || this.data?.to_date
+			);
 		});
 
 		this.$main.on("click", ".dash-card", (e) => {
@@ -289,17 +398,17 @@ class MELBusinessCycleDashboard {
 			this.open_filtered_desk_list(cid, doctype);
 		});
 
-				// Export Forecast → Quotation dialog
-				this.$main.on("click", ".mel-view-export-forecast", (e) => {
-					const $t = $(e.currentTarget);
-					const filters = this.get_filters();
-					this.open_export_forecast_modal(
-						$t.data("item"),
-						$t.data("item-code"),
-						filters.from_date,
-						filters.to_date
-					);
-				});
+		// Export Forecast → Quotation dialog
+		this.$main.on("click", ".mel-view-export-forecast", (e) => {
+			const $t = $(e.currentTarget);
+			const filters = this.get_filters();
+			this.open_export_forecast_modal(
+				$t.data("item"),
+				$t.data("item-code"),
+				filters.from_date || this.data?.from_date,
+				filters.to_date || this.data?.to_date
+			);
+		});
 
 		// Export Commitment → SO dialog with date filter
 		this.$main.on("click", ".mel-view-export-commitment", (e) => {
@@ -308,8 +417,8 @@ class MELBusinessCycleDashboard {
 			this.open_export_commitment_modal(
 				$t.data("item"),
 				$t.data("item-code"),
-				filters.from_date,
-				filters.to_date
+				filters.from_date || this.data?.from_date,
+				filters.to_date || this.data?.to_date
 			);
 		});
 
@@ -335,18 +444,6 @@ class MELBusinessCycleDashboard {
 		});
 	}
 
-	clear_filters() {
-		this.suppress_filter_refresh = true;
-		const p1 = Promise.resolve(this.controls.company.set_value(frappe.defaults.get_user_default("Company") || ""));
-		const p2 = Promise.resolve(this.controls.from_date.set_value(""));
-		const p3 = Promise.resolve(this.controls.to_date.set_value(""));
-
-		Promise.all([p1, p2, p3]).then(() => {
-			this.suppress_filter_refresh = false;
-			this.refresh();
-		});
-	}
-
 	async call(method, args = {}) {
 		const response = await frappe.call({
 			method: `${this.api}.${method}`,
@@ -356,30 +453,31 @@ class MELBusinessCycleDashboard {
 	}
 
 	async refresh() {
-    if (this.loading) return;
-    this.loading = true;
+		if (this.loading) return;
+		this.loading = true;
 
-    try {
-        const filters = this.get_filters();
-        const [dashboard_data, stock, suppliers] = await Promise.all([
-            this.call("get_dashboard", { cycle: "sales", ...filters }),
-            this.call("get_stock_overview", { from_date: filters.from_date, to_date: filters.to_date }),
-            this.call("get_supplier_performance", { from_date: filters.from_date, to_date: filters.to_date }),
-        ]);
-        this.data = dashboard_data;
-        this.procurement_cards = dashboard_data?.procurement_cards || [];
-        this.stock_data = stock || [];
-        this.supplier_data = suppliers || [];
+		try {
+			const filters = this.get_filters();
+			const [dashboard_data, stock, suppliers] = await Promise.all([
+				this.call("get_dashboard", { cycle: "sales", ...filters }),
+				this.call("get_stock_overview", { company: filters.company, from_date: filters.from_date, to_date: filters.to_date, period_preset: filters.period_preset }),
+				this.call("get_supplier_performance", { company: filters.company, from_date: filters.from_date, to_date: filters.to_date, period_preset: filters.period_preset }),
+			]);
+			this.data = dashboard_data;
+			this.procurement_cards = dashboard_data?.procurement_cards || [];
+			this.stock_data = stock || [];
+			this.supplier_data = suppliers || [];
 
-        this.render_overview_cards();
-        this.render_stock_table();
-        this.render_supplier_table();
-    } catch (error) {
-        this.toast(error?.message || __("Could not refresh dashboard."));
-    } finally {
-        this.loading = false;
-    }
-}
+			this.render_overview_cards();
+			this.render_stock_table();
+			this.render_supplier_table();
+			this.sync_date_range_inputs();
+		} catch (error) {
+			this.toast(error?.message || __("Could not refresh dashboard."));
+		} finally {
+			this.loading = false;
+		}
+	}
 
 	render_overview_cards() {
 		const $grid = this.$main.find("#mel-cardGrid").empty();

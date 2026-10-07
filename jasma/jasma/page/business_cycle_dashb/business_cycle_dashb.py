@@ -6,11 +6,104 @@ only sees DocTypes and documents they are already allowed to read in Desk.
 
 from __future__ import annotations
 
+import re
+import datetime
 from typing import Any
 
 import frappe
 from frappe import _
-from frappe.utils import cint, flt, nowdate
+from frappe.utils import (
+    cint, flt, nowdate, getdate, add_days, add_months, add_years, get_first_day, get_last_day, today
+)
+
+
+def get_current_fiscal_year_range(today_date):
+    """(from_date, to_date) of the Fiscal Year that contains `today_date`."""
+    try:
+        fy = frappe.db.get_value(
+            "Fiscal Year",
+            {"year_start_date": ["<=", today_date], "year_end_date": [">=", today_date]},
+            ["year_start_date", "year_end_date"],
+            as_dict=True,
+        )
+        if fy:
+            return getdate(fy.year_start_date), getdate(fy.year_end_date)
+    except Exception:
+        pass
+
+    # Fallback: Apr-Mar fiscal year
+    if today_date.month >= 4:
+        from_date = today_date.replace(month=4, day=1)
+        to_date = today_date.replace(year=today_date.year + 1, month=3, day=31)
+    else:
+        from_date = today_date.replace(year=today_date.year - 1, month=4, day=1)
+        to_date = today_date.replace(month=3, day=31)
+    return from_date, to_date
+
+
+def get_date_range(period_preset="yearly", custom_from_date=None, custom_to_date=None):
+    """
+    Resolve (from_date, to_date) pair for chosen preset.
+    Matches Executive Dashboard options: yearly, previous_fy, quarterly, monthly, weekly, custom
+    """
+    today_date = getdate(today())
+
+    if period_preset in ("custom", "Custom Range") and custom_from_date and custom_to_date:
+        return _parse_custom_date(custom_from_date), _parse_custom_date(custom_to_date)
+
+    if period_preset in ("weekly", "Weekly"):
+        return add_days(today_date, -7), today_date
+
+    if period_preset in ("monthly", "Monthly"):
+        return get_first_day(today_date), get_last_day(today_date)
+
+    if period_preset in ("quarterly", "Quarterly (Last 3 Months)"):
+        quarter_start = add_months(get_first_day(today_date), -2)
+        return quarter_start, get_last_day(today_date)
+
+    if period_preset in ("previous_fy", "Previous Financial Year"):
+        cur_fy_start, _ = get_current_fiscal_year_range(today_date)
+        try:
+            prev_fy = frappe.db.get_value(
+                "Fiscal Year",
+                {"year_end_date": add_days(cur_fy_start, -1)},
+                ["year_start_date", "year_end_date"],
+                as_dict=True,
+            )
+            if prev_fy:
+                return getdate(prev_fy.year_start_date), getdate(prev_fy.year_end_date)
+        except Exception:
+            pass
+        return add_years(cur_fy_start, -1), add_days(cur_fy_start, -1)
+
+    return get_current_fiscal_year_range(today_date)
+
+
+def _parse_custom_date(date_value):
+    """Safely parse custom date string to datetime.date."""
+    if not date_value:
+        return None
+    if isinstance(date_value, (datetime.date, datetime.datetime)):
+        return getdate(date_value)
+    value = str(date_value).strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        return getdate(value)
+    m = re.match(r"^(\d{1,2})-(\d{1,2})-(\d{4})$", value)
+    if m:
+        day, month, year = m.groups()
+        return getdate(f"{year}-{int(month):02d}-{int(day):02d}")
+    return getdate(value)
+
+
+@frappe.whitelist()
+def get_companies() -> list[str]:
+    """Returns company options for dropdown."""
+    try:
+        companies = frappe.get_all("Company", fields=["name"], order_by="name asc")
+        return [c.name for c in companies]
+    except Exception:
+        return ["JASMA Engineering LLP"]
+
 
 
 CYCLE_DEFINITIONS: dict[str, dict[str, Any]] = {
@@ -443,8 +536,13 @@ def get_dashboard(
     from_date: str | None = None,
     to_date: str | None = None,
     party: str | None = None,
+    period_preset: str = "monthly",
 ) -> dict[str, Any]:
     """Return a permission-aware dashboard snapshot for one business cycle."""
+    resolved_from, resolved_to = get_date_range(period_preset, from_date, to_date)
+    from_date_str = str(resolved_from) if resolved_from else None
+    to_date_str = str(resolved_to) if resolved_to else None
+
     cycle = _validate_cycle(cycle)
     definition = CYCLE_DEFINITIONS[cycle]
     stages = [
@@ -453,8 +551,8 @@ def get_dashboard(
             label,
             cycle,
             company,
-            from_date,
-            to_date,
+            from_date_str,
+            to_date_str,
             party,
             preview_limit=6,
         )
@@ -474,11 +572,14 @@ def get_dashboard(
         "description": definition["description"],
         "accent": definition["accent"],
         "as_of": nowdate(),
+        "from_date": from_date_str,
+        "to_date": to_date_str,
+        "period_preset": period_preset,
         "summary": summary,
         "stages": stages,
         "procurement_cards": (
-            _get_procurement_cards(company, from_date, to_date)
-            + _get_production_plan_cards(company, from_date, to_date)
+            _get_procurement_cards(company, from_date_str, to_date_str)
+            + _get_production_plan_cards(company, from_date_str, to_date_str)
         ),
     }
 
@@ -582,6 +683,12 @@ def _get_procurement_cards(
         filters: dict[str, Any] = {"docstatus": 0}
         if company:
             filters["company"] = company
+        if from_date and to_date:
+            filters["transaction_date"] = ["between", [from_date, to_date]]
+        elif from_date:
+            filters["transaction_date"] = [">=", from_date]
+        elif to_date:
+            filters["transaction_date"] = ["<=", to_date]
         records = frappe.get_list(
             "Material Request",
             filters=filters,
@@ -620,6 +727,12 @@ def _get_procurement_cards(
         filters = {"docstatus": 1, "material_request_type": "Purchase"}
         if company:
             filters["company"] = company
+        if from_date and to_date:
+            filters["transaction_date"] = ["between", [from_date, to_date]]
+        elif from_date:
+            filters["transaction_date"] = [">=", from_date]
+        elif to_date:
+            filters["transaction_date"] = ["<=", to_date]
         records = frappe.get_list(
             "Material Request",
             filters=filters,
@@ -659,6 +772,12 @@ def _get_procurement_cards(
         filters = {"docstatus": 1}
         if company:
             filters["company"] = company
+        if from_date and to_date:
+            filters["transaction_date"] = ["between", [from_date, to_date]]
+        elif from_date:
+            filters["transaction_date"] = [">=", from_date]
+        elif to_date:
+            filters["transaction_date"] = ["<=", to_date]
         mr_meta = frappe.get_meta("Material Request")
         mr_fields = ["name", "transaction_date", "material_request_type", "owner", "status", "per_ordered", "project"]
         if mr_meta.has_field("bom_no"):
@@ -711,6 +830,12 @@ def _get_procurement_cards(
         }
         if company:
             filters["company"] = company
+        if from_date and to_date:
+            filters["transaction_date"] = ["between", [from_date, to_date]]
+        elif from_date:
+            filters["transaction_date"] = [">=", from_date]
+        elif to_date:
+            filters["transaction_date"] = ["<=", to_date]
 
         po_meta = frappe.get_meta("Purchase Order")
         po_fields = ["name", "transaction_date", "supplier", "supplier_name", "owner", "status", "per_received"]
@@ -840,6 +965,12 @@ def _get_procurement_cards(
         f: dict[str, Any] = {"docstatus": 0}
         if company:
             f["company"] = company
+        if from_date and to_date:
+            f["posting_date"] = ["between", [from_date, to_date]]
+        elif from_date:
+            f["posting_date"] = [">=", from_date]
+        elif to_date:
+            f["posting_date"] = ["<=", to_date]
         dt_meta = frappe.get_meta(dt)
         qc_fields = ["name", "posting_date", "supplier", "supplier_name", "owner", "status"]
         if dt_meta.has_field("project"):
@@ -888,9 +1019,16 @@ def _get_procurement_cards(
         nc_fields = ["name", "creation", "status", "product_name", "jasma_part_code", "owner"]
         if nc_meta_grouping.has_field("ao_reference_no"):
             nc_fields.append("ao_reference_no")
+        nc_filters: dict[str, Any] = {"docstatus": 0}
+        if from_date and to_date:
+            nc_filters["creation"] = ["between", [f"{from_date} 00:00:00", f"{to_date} 23:59:59"]]
+        elif from_date:
+            nc_filters["creation"] = [">=", f"{from_date} 00:00:00"]
+        elif to_date:
+            nc_filters["creation"] = ["<=", f"{to_date} 23:59:59"]
         records = frappe.get_list(
             nc_doctype,
-            filters={"docstatus": 0},
+            filters=nc_filters,
             fields=nc_fields,
             limit_page_length=30,
             order_by="modified desc",
@@ -938,6 +1076,12 @@ def _get_procurement_cards(
         filters = {"docstatus": 1}
         if company:
             filters["company"] = company
+        if from_date and to_date:
+            filters["transaction_date"] = ["between", [from_date, to_date]]
+        elif from_date:
+            filters["transaction_date"] = [">=", from_date]
+        elif to_date:
+            filters["transaction_date"] = ["<=", to_date]
         po_meta_overdue = frappe.get_meta("Purchase Order")
         overdue_fields = ["name", "transaction_date", "schedule_date", "supplier", "supplier_name", "owner", "status", "per_received"]
         if po_meta_overdue.has_field("project"):
@@ -1029,8 +1173,14 @@ def get_stage_records(
     party: str | None = None,
     search: str | None = None,
     limit: int = 50,
+    period_preset: str | None = None,
 ) -> dict[str, Any]:
     """Return the live records shown in the selected-stage table."""
+    if period_preset:
+        resolved_from, resolved_to = get_date_range(period_preset, from_date, to_date)
+        from_date = str(resolved_from) if resolved_from else None
+        to_date = str(resolved_to) if resolved_to else None
+
     cycle = _validate_cycle(cycle)
     allowed = {stage_doctype for stage_doctype, _label in CYCLE_DEFINITIONS[cycle]["stages"]}
     if doctype not in allowed:
@@ -1270,23 +1420,13 @@ def get_document_preview(doctype: str, name: str) -> dict[str, Any]:
 
 def _get_bom_component_map() -> dict[str, list[dict[str, Any]]]:
     """Return component_item_code -> list of {parent_item, qty_per_unit} from Default+Active BOMs.
-
-    A BOM's OWN is_default flag (the "Default" badge on the BOM form) is the authoritative
-    signal for which BOM to explode — NOT Item.default_bom. The two are supposed to stay in
-    sync (Frappe updates Item.default_bom when a BOM's is_default checkbox is set), but they
-    can drift, e.g. after manually re-defaulting a BOM, leaving Item.default_bom pointing at
-    an older BOM while the BOM doc itself clearly shows "Default"/"Active" on screen. Filtering
-    on b.is_default = 1 directly always matches what's actually visible to the user.
-
-    Primary source is BOM Explosion Item (pre-flattened, recursive), so nested sub-assemblies
-    are included. Explosion Item only regenerates when the BOM is saved, so as a fallback, any
-    Default+Active BOM with zero Explosion Item rows is read straight from BOM Item (the
-    Components table) instead.
+    Handles fully exploded leaf items (from BOM Explosion Item), unexploded/do_not_explode items,
+    and multi-level intermediate sub-assemblies without double counting.
     """
     if not _doctype_exists("BOM"):
         return {}
 
-    # Primary: pre-flattened explosion table.
+    # 1. Primary: pre-flattened explosion table for all active default BOMs.
     bom_items = frappe.db.sql(
         """
         SELECT
@@ -1296,61 +1436,99 @@ def _get_bom_component_map() -> dict[str, list[dict[str, Any]]]:
             SUM(bei.qty_consumed_per_unit) AS qty_per_unit
         FROM `tabBOM Explosion Item` bei
         JOIN `tabBOM` b ON bei.parent = b.name
-        WHERE b.docstatus = 1 AND b.is_active = 1 AND b.is_default = 1
+        WHERE b.docstatus = 1
+          AND b.is_active = 1
+          AND (
+              b.is_default = 1
+              OR b.name = (SELECT default_bom FROM `tabItem` WHERE name = b.item)
+              OR (SELECT COUNT(*) FROM `tabBOM` b2 WHERE b2.item = b.item AND b2.docstatus = 1 AND b2.is_active = 1) = 1
+          )
         GROUP BY b.name, b.item, bei.item_code
         """,
         as_dict=True,
     )
-    boms_with_explosion = {row.get("bom_name") for row in bom_items}
 
-    # Fallback: Default+Active BOMs with no Explosion Item rows at all
-    # (stale/never-regenerated explosion table).
-    default_active_boms = frappe.db.sql(
+    # Track which (bom_name, component_item) pairs are already covered by explosion
+    boms_with_explosion_per_item = set()
+    comp_to_parents: dict[str, dict[str, float]] = {}
+
+    for row in bom_items:
+        comp = row.get("component_item")
+        parent_item = row.get("parent_item")
+        bom_name = row.get("bom_name")
+        qty = flt(row.get("qty_per_unit"))
+        if not comp or not parent_item or qty <= 0:
+            continue
+        if bom_name:
+            boms_with_explosion_per_item.add((bom_name, comp))
+        comp_to_parents.setdefault(comp, {})
+        comp_to_parents[comp][parent_item] = comp_to_parents[comp].get(parent_item, 0.0) + qty
+
+    # 2. Direct BOM items (for sub-assemblies or unexploded BOMs)
+    direct_bom_items = frappe.db.sql(
         """
-        SELECT b.name AS bom_name, b.item AS parent_item
-        FROM `tabBOM` b
-        WHERE b.docstatus = 1 AND b.is_active = 1 AND b.is_default = 1
+        SELECT
+            bi.parent AS bom_name,
+            b.item AS parent_item,
+            bi.item_code AS component_item,
+            SUM(bi.qty / IFNULL(NULLIF(b.quantity, 0), 1)) AS qty_per_unit
+        FROM `tabBOM Item` bi
+        JOIN `tabBOM` b ON bi.parent = b.name
+        WHERE b.docstatus = 1
+          AND b.is_active = 1
+          AND (
+              b.is_default = 1
+              OR b.name = (SELECT default_bom FROM `tabItem` WHERE name = b.item)
+              OR (SELECT COUNT(*) FROM `tabBOM` b2 WHERE b2.item = b.item AND b2.docstatus = 1 AND b2.is_active = 1) = 1
+          )
+        GROUP BY bi.parent, b.item, bi.item_code
         """,
         as_dict=True,
     )
-    missing_boms = [
-        row for row in default_active_boms
-        if row.get("bom_name") not in boms_with_explosion
-    ]
 
-    fallback_items: list[dict[str, Any]] = []
-    if missing_boms:
-        missing_names = [row.get("bom_name") for row in missing_boms]
-        parent_item_by_bom = {row.get("bom_name"): row.get("parent_item") for row in missing_boms}
-
-        raw_fallback = frappe.db.sql(
-            """
-            SELECT
-                bi.parent AS bom_name,
-                bi.item_code AS component_item,
-                SUM(bi.qty / IFNULL(NULLIF(b.quantity, 0), 1)) AS qty_per_unit
-            FROM `tabBOM Item` bi
-            JOIN `tabBOM` b ON bi.parent = b.name
-            WHERE bi.parent IN %(bom_names)s
-            GROUP BY bi.parent, bi.item_code
-            """,
-            {"bom_names": tuple(missing_names)},
-            as_dict=True,
-        )
-        for row in raw_fallback:
-            row["parent_item"] = parent_item_by_bom.get(row.get("bom_name"))
-            fallback_items.append(row)
-
-    comp_map: dict[str, list[dict[str, Any]]] = {}
-    for row in bom_items + fallback_items:
+    # Build direct parent adjacency for sub-assemblies: comp -> {parent_item: qty}
+    direct_adj: dict[str, dict[str, float]] = {}
+    for row in direct_bom_items:
+        bom_name = row.get("bom_name")
         comp = row.get("component_item")
         parent_item = row.get("parent_item")
-        if not comp or not parent_item:
+        qty = flt(row.get("qty_per_unit"))
+        if not comp or not parent_item or qty <= 0:
             continue
-        comp_map.setdefault(comp, []).append({
-            "parent_item": parent_item,
-            "qty_per_unit": flt(row.get("qty_per_unit")),
-        })
+        # Skip if this component is already accounted for in this BOM's explosion table
+        if (bom_name, comp) in boms_with_explosion_per_item:
+            continue
+        direct_adj.setdefault(comp, {})
+        direct_adj[comp][parent_item] = direct_adj[comp].get(parent_item, 0.0) + qty
+
+    # Propagate direct subassemblies upwards to higher-level parents
+    for start_comp, parents in direct_adj.items():
+        queue = [(p, q, {start_comp, p}) for p, q in parents.items()]
+        for p, q in parents.items():
+            comp_to_parents.setdefault(start_comp, {})
+            comp_to_parents[start_comp][p] = comp_to_parents[start_comp].get(p, 0.0) + q
+
+        while queue:
+            curr_parent, curr_mult, visited = queue.pop(0)
+            higher_parents = direct_adj.get(curr_parent, {})
+            for hp, hq in higher_parents.items():
+                effective_qty = curr_mult * hq
+                comp_to_parents.setdefault(start_comp, {})
+                comp_to_parents[start_comp][hp] = comp_to_parents[start_comp].get(hp, 0.0) + effective_qty
+                if hp not in visited:
+                    new_visited = set(visited)
+                    new_visited.add(hp)
+                    queue.append((hp, effective_qty, new_visited))
+
+    # Convert comp_to_parents dict to comp_map list format
+    comp_map: dict[str, list[dict[str, Any]]] = {}
+    for comp, p_dict in comp_to_parents.items():
+        comp_map[comp] = [
+            {"parent_item": p_item, "qty_per_unit": round(ratio, 6)}
+            for p_item, ratio in p_dict.items()
+            if ratio > 0
+        ]
+
     return comp_map
 
 def _get_overdue_po_qty_by_item() -> dict[str, dict[str, Any]]:
@@ -1483,6 +1661,8 @@ def get_stock_overview(
     search: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
+    company: str | None = None,
+    period_preset: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return stock overview with Bin valuation, Sales Order + BOM commitments, Quotation + BOM forecasts,
     and overdue PO qty (not yet received past required date).
@@ -1492,6 +1672,10 @@ def get_stock_overview(
     get_pending_so_details, so the badge total shown here always matches the
     drill-down modal's total for the same date range.
     """
+    if period_preset:
+        resolved_from, resolved_to = get_date_range(period_preset, from_date, to_date)
+        from_date = str(resolved_from) if resolved_from else None
+        to_date = str(resolved_to) if resolved_to else None
     if not frappe.has_permission("Item", "read"):
         return []
 
@@ -1681,6 +1865,8 @@ def get_supplier_performance(
     search: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
+    company: str | None = None,
+    period_preset: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return permission-aware supplier performance analysis with:
     - NC count filtered per supplier
@@ -1692,6 +1878,10 @@ def get_supplier_performance(
     Purchase Orders whose transaction_date falls within from_date..to_date
     when provided.
     """
+    if period_preset:
+        resolved_from, resolved_to = get_date_range(period_preset, from_date, to_date)
+        from_date = str(resolved_from) if resolved_from else None
+        to_date = str(resolved_to) if resolved_to else None
     if not frappe.has_permission("Supplier", "read"):
         return []
 
@@ -1979,67 +2169,10 @@ def get_pending_so_details(
 
     # ── Indirect (via-BOM) rows ────────────────────────────────────────────
     if _doctype_exists("BOM"):
-        # Primary: pre-flattened Explosion Item (handles nested sub-assemblies).
-        bom_parents = frappe.db.sql(
-            """
-            SELECT
-                b.name AS bom_name,
-                b.item AS parent_item,
-                SUM(bei.qty_consumed_per_unit) AS qty_per_unit
-            FROM `tabBOM Explosion Item` bei
-            JOIN `tabBOM` b ON bei.parent = b.name
-            WHERE bei.item_code = %s
-              AND b.docstatus = 1
-              AND b.is_active = 1
-              AND b.is_default = 1
-            GROUP BY b.name, b.item
-            """,
-            (item_code,),
-            as_dict=True,
-        )
-        boms_with_explosion = {row.get("bom_name") for row in bom_parents}
+        from jasma.jasma.doc_events.item import _get_component_ratio_map
+        bom_ratio_map = _get_component_ratio_map(item_code)
 
-        # Fallback: Default+Active BOMs where this item sits directly in BOM Item
-        # (Components tab) but Explosion Item has no rows for that BOM at all.
-        candidate_boms = frappe.db.sql(
-            """
-            SELECT DISTINCT b.name AS bom_name, b.item AS parent_item
-            FROM `tabBOM Item` bi
-            JOIN `tabBOM` b ON bi.parent = b.name
-            WHERE bi.item_code = %s
-              AND b.docstatus = 1
-              AND b.is_active = 1
-              AND b.is_default = 1
-            """,
-            (item_code,),
-            as_dict=True,
-        )
-        missing_boms = [
-            row for row in candidate_boms
-            if row.get("bom_name") not in boms_with_explosion
-        ]
-
-        if missing_boms:
-            missing_names = [row.get("bom_name") for row in missing_boms]
-            fallback_parents = frappe.db.sql(
-                """
-                SELECT
-                    b.name AS bom_name,
-                    b.item AS parent_item,
-                    SUM(bi.qty / IFNULL(NULLIF(b.quantity, 0), 1)) AS qty_per_unit
-                FROM `tabBOM Item` bi
-                JOIN `tabBOM` b ON bi.parent = b.name
-                WHERE bi.parent IN %(bom_names)s
-                  AND bi.item_code = %(item_code)s
-                GROUP BY b.name, b.item
-                """,
-                {"bom_names": tuple(missing_names), "item_code": item_code},
-                as_dict=True,
-            )
-            bom_parents = bom_parents + fallback_parents
-
-        # Resolve parent item display names in one batch query.
-        parent_codes = [bp.get("parent_item") for bp in bom_parents if bp.get("parent_item")]
+        parent_codes = list(bom_ratio_map.keys())
         parent_name_by_code: dict[str, str] = {}
         if parent_codes and _doctype_exists("Item"):
             parent_rows = frappe.get_all(
@@ -2049,9 +2182,7 @@ def get_pending_so_details(
             )
             parent_name_by_code = {row.name: row.item_name or row.name for row in parent_rows}
 
-        for bp in bom_parents:
-            p_item = bp.get("parent_item")
-            ratio = flt(bp.get("qty_per_unit"))
+        for p_item, ratio in bom_ratio_map.items():
             if not p_item or ratio <= 0:
                 continue
             p_label = parent_name_by_code.get(p_item, p_item)
@@ -2254,21 +2385,23 @@ def get_export_forecast_details(
 
     # BOM-indirect: find parent items that use this item_code
     if _doctype_exists("BOM"):
-        bom_parents = frappe.db.sql(
-            """
-            SELECT b.item AS parent_item, (bi.qty / IFNULL(NULLIF(b.quantity, 0), 1)) AS qty_per_unit
-            FROM `tabBOM Item` bi
-            JOIN `tabBOM` b ON bi.parent = b.name
-            WHERE bi.item_code = %s AND b.docstatus = 1 AND b.is_active = 1
-            """,
-            (item_code,),
-            as_dict=True,
-        )
-        for bp in bom_parents:
-            p_item = bp.get("parent_item")
-            ratio = flt(bp.get("qty_per_unit"))
+        from jasma.jasma.doc_events.item import _get_component_ratio_map
+        bom_ratio_map = _get_component_ratio_map(item_code)
+
+        parent_codes = list(bom_ratio_map.keys())
+        parent_name_by_code: dict[str, str] = {}
+        if parent_codes and _doctype_exists("Item"):
+            parent_rows = frappe.get_all(
+                "Item",
+                filters={"name": ["in", parent_codes]},
+                fields=["name", "item_name"],
+            )
+            parent_name_by_code = {row.name: row.item_name or row.name for row in parent_rows}
+
+        for p_item, ratio in bom_ratio_map.items():
             if not p_item or ratio <= 0:
                 continue
+            p_label = parent_name_by_code.get(p_item, p_item)
 
             p_q_rows = frappe.db.sql(
                 f"""
@@ -2300,7 +2433,7 @@ def get_export_forecast_details(
                     "qty": round(needed, 2),
                     "uom": item_uom,
                     "date": str(q.get("transaction_date") or "—"),
-                    "via": p_item,
+                    "via": p_label,
                 })
 
     return result
