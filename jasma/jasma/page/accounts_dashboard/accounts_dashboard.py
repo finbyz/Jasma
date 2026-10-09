@@ -223,6 +223,7 @@ def get_treasury_balances(period_preset="yearly", company=None, from_date=None, 
 def get_receivables_balances(period_preset="yearly", company=None, from_date=None, to_date=None):
     """
     Outstanding customer receivables as of `to_date`, grouped by currency.
+    Includes mapping of corresponding Receivable Account for each currency.
     """
     from erpnext.accounts.report.accounts_receivable.accounts_receivable import (
         execute as run_accounts_receivable,
@@ -240,6 +241,28 @@ def get_receivables_balances(period_preset="yearly", company=None, from_date=Non
         base_currency = frappe.defaults.get_global_default("currency") or "INR"
 
     currency_totals = {}
+    currency_accounts = {}
+
+    account_conditions = "account_type = 'Receivable' AND is_group = 0"
+    params = {}
+    if company:
+        account_conditions += " AND company = %(company)s"
+        params["company"] = company
+    receivable_accs = frappe.db.sql(
+        f"""
+        SELECT name, account_name, account_currency, company
+        FROM `tabAccount`
+        WHERE {account_conditions}
+        ORDER BY name
+        """,
+        params,
+        as_dict=True,
+    )
+    acc_by_currency = {}
+    for acc in receivable_accs:
+        cur = acc.account_currency or base_currency
+        if cur not in acc_by_currency or (company and acc.company == company):
+            acc_by_currency[cur] = acc.name
 
     for cmp in companies:
         party_filters = frappe._dict({
@@ -253,8 +276,10 @@ def get_receivables_balances(period_preset="yearly", company=None, from_date=Non
                 outstanding = flt(r.outstanding)
                 if outstanding <= 0:
                     continue
-                cur = r.currency or base_currency
+                cur = r.currency or r.get("account_currency") or base_currency
                 currency_totals[cur] = currency_totals.get(cur, 0) + outstanding
+                if r.get("party_account") and cur not in currency_accounts:
+                    currency_accounts[cur] = r.get("party_account")
         except Exception as e:
             frappe.log_error(f"Accounts Dashboard Receivables Error: {e}")
 
@@ -263,6 +288,7 @@ def get_receivables_balances(period_preset="yearly", company=None, from_date=Non
             "currency": cur,
             "balance": bal,
             "balance_fmt": fmt_money_full(bal, get_symbol(cur)),
+            "account": currency_accounts.get(cur) or acc_by_currency.get(cur) or "",
         }
         for cur, bal in sorted(currency_totals.items())
     ]
@@ -1151,6 +1177,323 @@ def get_modal_drilldown(card_key, period_preset="yearly", company=None, from_dat
     }
 
 
+@frappe.whitelist()
+def get_pending_drawback_list(period_preset="yearly", company=None, from_date=None, to_date=None, limit=10):
+    """
+    Returns pending duty drawback records from Sales Invoices with docstatus = 1 and drawback_received is not checked.
+    """
+    from_date, to_date = get_date_range(period_preset, from_date, to_date)
+    conditions = ["si.docstatus = 1", "(si.drawback_received = 0 OR si.drawback_received IS NULL)"]
+    params = {}
+    if from_date and to_date:
+        conditions.append("si.posting_date BETWEEN %(from_date)s AND %(to_date)s")
+        params["from_date"] = from_date
+        params["to_date"] = to_date
+    if company:
+        conditions.append("si.company = %(company)s")
+        params["company"] = company
+
+    where_clause = " AND ".join(conditions)
+    query = f"""
+        SELECT 
+            si.name,
+            si.posting_date,
+            si.customer,
+            si.total_duty_drawback,
+            si.currency,
+            si.grand_total,
+            si.base_grand_total
+        FROM `tabSales Invoice` si
+        WHERE {where_clause}
+        ORDER BY si.posting_date DESC, si.creation DESC
+        LIMIT {int(limit)}
+    """
+    records = frappe.db.sql(query, params, as_dict=True) or []
+    drawback_rows = []
+    for r in records:
+        dt = format_date(r.posting_date, "dd MMM yyyy") if r.posting_date else "—"
+        amt = flt(r.total_duty_drawback)
+        drawback_rows.append({
+            "name": r.name,
+            "date": dt,
+            "customer": r.customer or "—",
+            "type": "Sales Invoice",
+            "drawback_amt": f"₹ {amt:,.2f}",
+            "raw_amount": amt,
+            "status": "Pending Drawback",
+        })
+    return drawback_rows
+
+
+@frappe.whitelist()
+def get_future_purchase_invoices_due(period_preset="yearly", company=None, from_date=None, to_date=None):
+    """
+    Computes upcoming and future purchase invoice payables grouped by calendar periods:
+    - Today: Invoices due today
+    - This Week: Invoices due in current week (Mon - Sun, includes Today)
+    - Next Week: Invoices due in next week (Mon - Sun)
+    - This Month: Invoices due in current month (1st - Last day, includes Today & This Week)
+    - Next Month: Invoices due in next month (1st - Last day)
+    - This Quarter: Invoices due in current quarter (includes This Month)
+    - Above Period: Invoices due after current quarter
+    """
+    today_date = getdate(today())
+
+    # 1. Today
+    today_start = today_date
+    today_end = today_date
+
+    # 2. This Week (From Today to Sunday of current week)
+    weekday = today_date.isoweekday()  # Mon=1, Sun=7
+    days_to_sunday = 7 - weekday
+    this_week_start = today_date
+    this_week_end = add_days(today_date, days_to_sunday) if days_to_sunday >= 0 else today_date
+
+    # 3. Next Week (Monday to Sunday)
+    next_week_start = add_days(this_week_end, 1)
+    next_week_end = add_days(next_week_start, 6)
+
+    # 4. This Month (From Today to last day of current month)
+    this_month_start = today_date
+    this_month_end = get_last_day(today_date)
+
+    # 5. Next Month (1st to last day of next month)
+    next_month_first = add_months(get_first_day(today_date), 1)
+    next_month_start = next_month_first
+    next_month_end = get_last_day(next_month_first)
+
+    # 6. This Quarter (From Today to last day of current quarter)
+    m = today_date.month
+    if m in (4, 5, 6):
+        this_quarter_end = getdate(f"{today_date.year}-06-30")
+    elif m in (7, 8, 9):
+        this_quarter_end = getdate(f"{today_date.year}-09-30")
+    elif m in (10, 11, 12):
+        this_quarter_end = getdate(f"{today_date.year}-12-31")
+    else:
+        this_quarter_end = getdate(f"{today_date.year}-03-31")
+
+    this_quarter_start = today_date
+
+    # 7. Above Period
+    above_start = add_days(this_quarter_end, 1)
+
+    this_week_label = format_date(today_date, "dd MMM yyyy") if this_week_start == this_week_end else f"{format_date(this_week_start, 'dd MMM')} - {format_date(this_week_end, 'dd MMM')}"
+    this_month_label = format_date(today_date, "dd MMM yyyy") if this_month_start == this_month_end else f"{format_date(this_month_start, 'dd MMM')} - {format_date(this_month_end, 'dd MMM')}"
+    this_quarter_label = f"{format_date(this_quarter_start, 'dd MMM')} - {format_date(this_quarter_end, 'dd MMM yyyy')}"
+
+    bucket_defs = [
+        {
+            "key": "today",
+            "label": "Today",
+            "short_label": "Today",
+            "from_date": str(today_start),
+            "to_date": str(today_end),
+            "op": "between",
+            "date_range_label": format_date(today_date, "dd MMM yyyy"),
+            "color": "#3b82f6",
+        },
+        {
+            "key": "this_week",
+            "label": "This Week",
+            "short_label": "This Week",
+            "from_date": str(this_week_start),
+            "to_date": str(this_week_end),
+            "op": "between",
+            "date_range_label": this_week_label,
+            "color": "#6366f1",
+        },
+        {
+            "key": "next_week",
+            "label": "Next Week",
+            "short_label": "Next Week",
+            "from_date": str(next_week_start),
+            "to_date": str(next_week_end),
+            "op": "between",
+            "date_range_label": f"{format_date(next_week_start, 'dd MMM')} - {format_date(next_week_end, 'dd MMM')}",
+            "color": "#8b5cf6",
+        },
+        {
+            "key": "this_month",
+            "label": "This Month",
+            "short_label": "This Month",
+            "from_date": str(this_month_start),
+            "to_date": str(this_month_end),
+            "op": "between",
+            "date_range_label": this_month_label,
+            "color": "#10b981",
+        },
+        {
+            "key": "next_month",
+            "label": "Next Month",
+            "short_label": "Next Month",
+            "from_date": str(next_month_start),
+            "to_date": str(next_month_end),
+            "op": "between",
+            "date_range_label": format_date(next_month_first, "MMMM yyyy"),
+            "color": "#06b6d4",
+        },
+        {
+            "key": "this_quarter",
+            "label": "This Quarter",
+            "short_label": "This Quarter",
+            "from_date": str(this_quarter_start),
+            "to_date": str(this_quarter_end),
+            "op": "between",
+            "date_range_label": this_quarter_label,
+            "color": "#f59e0b",
+        },
+        {
+            "key": "above",
+            "label": "Above Period",
+            "short_label": "Above Period",
+            "from_date": str(above_start),
+            "to_date": "9999-12-31",
+            "op": ">=",
+            "date_range_label": f"After {format_date(this_quarter_end, 'dd MMM yyyy')}",
+            "color": "#ec4899",
+        },
+    ]
+
+    conditions = "pi.docstatus = 1 AND pi.outstanding_amount > 0"
+    params = {}
+    if company:
+        conditions += " AND pi.company = %(company)s"
+        params["company"] = company
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT
+            pi.name,
+            pi.due_date,
+            pi.posting_date,
+            pi.outstanding_amount,
+            pi.grand_total,
+            pi.base_grand_total,
+            pi.conversion_rate
+        FROM `tabPurchase Invoice` pi
+        WHERE {conditions}
+        ORDER BY pi.due_date ASC
+        """,
+        params,
+        as_dict=True,
+    )
+
+    if not rows:
+        return {
+            "total_amount": 0.0,
+            "total_amount_fmt": "₹ 0",
+            "total_count": 0,
+            "today_date": str(today_date),
+            "buckets": [dict(b, count=0, amount=0.0, amount_fmt="₹ 0", amount_full_fmt="₹ 0.00", invoice_names=[]) for b in bucket_defs],
+        }
+
+    inv_names = [r.name for r in rows]
+    schedules = frappe.db.sql(
+        """
+        SELECT
+            parent,
+            due_date,
+            payment_amount,
+            outstanding,
+            paid_amount,
+            base_payment_amount,
+            base_outstanding
+        FROM `tabPayment Schedule`
+        WHERE parenttype = 'Purchase Invoice'
+          AND parent IN %(inv_names)s
+        ORDER BY parent, idx ASC
+        """,
+        {"inv_names": inv_names},
+        as_dict=True,
+    )
+
+    schedules_by_parent = {}
+    for s in schedules:
+        schedules_by_parent.setdefault(s.parent, []).append(s)
+
+    schedule_items = []
+    for inv in rows:
+        conv = flt(inv.conversion_rate) or 1.0
+        inv_sched = schedules_by_parent.get(inv.name, [])
+
+        if inv_sched:
+            for s in inv_sched:
+                due = getdate(s.due_date or inv.due_date or inv.posting_date)
+                if not due or due < today_date:
+                    continue
+
+                if flt(s.base_outstanding) > 0:
+                    s_amt = flt(s.base_outstanding)
+                elif flt(s.outstanding) > 0:
+                    s_amt = flt(s.outstanding) * conv
+                elif flt(inv.outstanding_amount) == flt(inv.grand_total):
+                    s_amt = flt(s.base_payment_amount) or (flt(s.payment_amount) * conv)
+                else:
+                    if flt(inv.grand_total) > 0:
+                        ratio = flt(s.payment_amount) / flt(inv.grand_total)
+                        s_amt = flt(inv.outstanding_amount) * ratio * conv
+                    else:
+                        s_amt = flt(s.base_payment_amount) or (flt(s.payment_amount) * conv)
+
+                if s_amt > 0:
+                    schedule_items.append({
+                        "parent": inv.name,
+                        "due_date": due,
+                        "amount": s_amt,
+                    })
+        else:
+            due = getdate(inv.due_date or inv.posting_date)
+            if due and due >= today_date:
+                inv_amt = flt(inv.outstanding_amount) * conv
+                if inv_amt > 0:
+                    schedule_items.append({
+                        "parent": inv.name,
+                        "due_date": due,
+                        "amount": inv_amt,
+                    })
+
+    bucket_unique_invoices = {b["key"]: set() for b in bucket_defs}
+    buckets = [dict(b, count=0, amount=0.0) for b in bucket_defs]
+
+    for item in schedule_items:
+        due = item["due_date"]
+        amt = item["amount"]
+        parent = item["parent"]
+
+        for b in buckets:
+            b_key = b["key"]
+            if b["op"] == "between":
+                f_d = getdate(b["from_date"])
+                t_d = getdate(b["to_date"])
+                if f_d <= due <= t_d:
+                    b["amount"] += amt
+                    bucket_unique_invoices[b_key].add(parent)
+            elif b["op"] == ">=":
+                f_d = getdate(b["from_date"])
+                if due >= f_d:
+                    b["amount"] += amt
+                    bucket_unique_invoices[b_key].add(parent)
+
+    for b in buckets:
+        b_key = b["key"]
+        b["count"] = len(bucket_unique_invoices[b_key])
+        b["invoice_names"] = list(bucket_unique_invoices[b_key])
+        b["amount_fmt"] = fmt_inr(b["amount"])
+        b["amount_full_fmt"] = f"₹ {b['amount']:,.2f}"
+
+    all_future_invoices = set(item["parent"] for item in schedule_items)
+    total_amount = sum(item["amount"] for item in schedule_items)
+
+    return {
+        "total_amount": total_amount,
+        "total_amount_fmt": fmt_inr(total_amount),
+        "total_count": len(all_future_invoices),
+        "today_date": str(today_date),
+        "buckets": buckets,
+    }
+
+
 # ============================================================
 # FULL PAGE DATA AGGREGATOR
 # ============================================================
@@ -1163,19 +1506,23 @@ def get_page_data(period_preset="yearly", company=None, from_date=None, to_date=
     treasury = get_treasury_balances(period_preset, company, from_date, to_date)
     receivables = get_receivables_balances(period_preset, company, from_date, to_date)
     aging_payables = get_aging_payables(period_preset, company, from_date, to_date)
+    future_pi_due = get_future_purchase_invoices_due(period_preset, company, from_date, to_date)
     pending_approvals = get_pending_approvals(period_preset, company, from_date, to_date)
     pending_payment_entries = get_pending_payment_entries(period_preset, company, from_date, to_date)
     pending_purchase_invoices = get_pending_purchase_invoices(period_preset, company, from_date, to_date)
     financial_compliance = get_financial_compliance_pending(period_preset, company, from_date, to_date)
+    pending_drawback_list = get_pending_drawback_list(period_preset, company, from_date, to_date, limit=10)
     ebrc_pending_list = get_ebrc_pending_list(period_preset, company, from_date, to_date, limit=10)
 
     return {
         "treasury": treasury,
         "receivables": receivables,
         "aging_payables": aging_payables,
+        "future_pi_due": future_pi_due,
         "pending_approvals": pending_approvals,
         "pending_payment_entries": pending_payment_entries,
         "pending_purchase_invoices": pending_purchase_invoices,
         "financial_compliance": financial_compliance,
+        "pending_drawback_list": pending_drawback_list,
         "ebrc_pending_list": ebrc_pending_list,
     }

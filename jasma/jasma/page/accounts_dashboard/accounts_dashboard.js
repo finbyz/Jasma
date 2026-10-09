@@ -228,6 +228,7 @@ frappe.pages["accounts-dashboard"].on_page_load = function (wrapper) {
         window.openAcdPendingPurchaseInvoicesModal = openPendingPurchaseInvoicesModal;
         window.openAcdPaymentEntryList = openPaymentEntryList;
         window.openAcdPurchaseInvoiceList = openPurchaseInvoiceList;
+        window.openAcdFuturePiList = openAcdFuturePiList;
         window.openAcdDrilldownModal = openDrilldownModal;
         window.setAcdAgingView = setAgingView;
         window.setAcdAgingSupplierGroup = setAgingSupplierGroup;
@@ -412,7 +413,7 @@ frappe.pages["accounts-dashboard"].on_page_load = function (wrapper) {
                     <div class="acd-card-label">${iconSvg("download")} RECEIVABLES</div>
                     <div class="acd-currency-section">
                         <div class="acd-currency-grid">
-                            ${renderCurrencyBalances(d.receivables)}
+                            ${renderCurrencyBalances(d.receivables, true)}
                         </div>
                     </div>
                 </div>
@@ -438,8 +439,31 @@ frappe.pages["accounts-dashboard"].on_page_load = function (wrapper) {
                     </div>
                 </div>
 
-                <!-- SECTION 6: EBRC PENDING LIST (At the Last) -->
+                <!-- SECTION 6: PURCHASE INVOICE FUTURE OVERDUE & DUE SCHEDULE -->
+                <div class="acd-bento-span-12 acd-card acd-anim" style="--delay:7.5;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:10px;">
+                        <div class="acd-card-label" style="margin-bottom:0;">
+                            ${iconSvg("calendar")} PURCHASE INVOICE OVERDUE & FUTURE SCHEDULE
+                        </div>
+                    </div>
+                    <div id="acd-future-pi-container">
+                        ${renderFuturePiDueChart(d.future_pi_due)}
+                    </div>
+                </div>
+
+                <!-- SECTION 7: PENDING DUTY DRAWBACK DETAILS -->
                 <div class="acd-bento-span-12 acd-card acd-anim" style="--delay:8;">
+                    <div class="acd-card-label" style="margin-bottom:16px; display:flex; justify-content:space-between; align-items:center;">
+                        <span>${iconSvg("refresh")} PENDING DUTY DRAWBACK DETAILS</span>
+                        <a href="javascript:void(0)" onclick="openAcdDrilldownModal('pending_drawback')" class="acd-link" style="color:var(--acd-primary); font-weight:800; font-size:12.5px; letter-spacing:0.6px; text-decoration:none; text-transform:uppercase;">VIEW ALL →</a>
+                    </div>
+                    <div class="acd-table-wrapper">
+                        ${renderDutyDrawbackTable(d.pending_drawback_list)}
+                    </div>
+                </div>
+
+                <!-- SECTION 7: EBRC PENDING LIST (At the Last) -->
+                <div class="acd-bento-span-12 acd-card acd-anim" style="--delay:9;">
                     <div class="acd-card-label" style="margin-bottom:16px; display:flex; justify-content:space-between; align-items:center;">
                         <span>${iconSvg("file")} EBRC PENDING LIST</span>
                         <a href="javascript:void(0)" onclick="openAcdDrilldownModal('ebrc_all')" class="acd-link" style="color:var(--acd-primary); font-weight:800; font-size:12.5px; letter-spacing:0.6px; text-decoration:none; text-transform:uppercase;">VIEW ALL →</a>
@@ -461,6 +485,90 @@ frappe.pages["accounts-dashboard"].on_page_load = function (wrapper) {
     function setAgingView(view) {
         state.agingView = view;
         render();
+    }
+
+    function renderFuturePiDueChart(data) {
+        const buckets = (data && data.buckets) || [];
+        if (!buckets.length) {
+            return '<div style="padding:30px; text-align:center; color:var(--acd-text-3); font-weight:600;">No purchase invoice due schedule data available.</div>';
+        }
+
+        const totalDueFmt = data.total_amount_fmt || "₹ 0";
+        const totalCount = data.total_count || 0;
+        const maxVal = Math.max(...buckets.map(b => b.amount || 0), 1);
+
+        return `
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; flex-wrap:wrap; gap:8px;">
+                <span style="font-size:13px; font-weight:600; color:var(--acd-text-3);">
+                    Upcoming & Overdue Payables by Due Date Period (${totalCount} Unpaid Invoices)
+                </span>
+                <span style="font-size:16px; font-weight:800; color:var(--acd-text);">
+                    Total Scheduled: ${totalDueFmt}
+                </span>
+            </div>
+
+            <!-- BAR CHART CONTAINER -->
+            <div class="acd-chart-container" style="height:210px; margin-bottom:8px;">
+                <div class="acd-bar-chart" style="height:calc(100% - 32px); align-items:flex-end;">
+                    ${buckets.map(b => {
+                        const hasVal = b.amount > 0;
+                        const barHeightPct = hasVal ? Math.max(Math.round((b.amount / maxVal) * 100), 6) : 0;
+                        const valColor = hasVal ? (b.key === "overdue" ? "#dc2626" : "var(--acd-text)") : "var(--acd-text-3)";
+                        const tooltip = `${b.label}: ${b.amount_fmt} (${b.count} Invoices) • Due: ${b.date_range_label}`;
+
+                        return `
+                        <div class="acd-bar-item is-clickable" style="justify-content:flex-end; flex:1; cursor:pointer;"
+                             onclick="openAcdFuturePiList('${b.key}')"
+                             data-tooltip="${tooltip}"
+                             title="Click to open ${b.label} Purchase Invoices (${b.count})">
+                            <span class="acd-bar-value" style="color:${valColor}; font-weight:${hasVal ? '800' : '600'}; font-size:11.5px; white-space:nowrap;">
+                                ${b.amount_fmt}
+                            </span>
+                            <div class="acd-bar" style="height:${hasVal ? barHeightPct + '%' : '4px'}; width:100%; max-width:54px; border-radius:6px 6px 0 0; background:${hasVal ? b.color : 'rgba(148, 163, 184, 0.2)'}; box-shadow:${hasVal ? '0 3px 8px rgba(0,0,0,0.12)' : 'none'}; transition:all 0.25s ease;">
+                            </div>
+                            <div style="display:flex; flex-direction:column; align-items:center; margin-top:8px;">
+                                <span class="acd-bar-label" style="font-weight:700; color:${hasVal ? 'var(--acd-text)' : 'var(--acd-text-3)'}; font-size:11px; text-transform:uppercase; letter-spacing:0.3px; white-space:nowrap;">
+                                    ${b.short_label || b.label}
+                                </span>
+                                <span style="font-size:9.5px; font-weight:600; color:var(--acd-text-3); white-space:nowrap; margin-top:2px;">
+                                    ${b.date_range_label}
+                                </span>
+                            </div>
+                        </div>
+                        `;
+                    }).join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    function openAcdFuturePiList(bucketKey) {
+        const data = (state.data && state.data.future_pi_due) || {};
+        const bucket = (data.buckets || []).find(b => b.key === bucketKey);
+        if (!bucket) return;
+
+        const routeOptions = {
+            docstatus: 1,
+            outstanding_amount: [">", 0],
+        };
+        if (state.filters.company) {
+            routeOptions.company = state.filters.company;
+        }
+
+        if (bucket.invoice_names && bucket.invoice_names.length > 0) {
+            routeOptions.name = ["in", bucket.invoice_names];
+        } else {
+            if (bucket.op === "between") {
+                routeOptions.due_date = ["between", [bucket.from_date, bucket.to_date]];
+            } else if (bucket.op === ">=") {
+                routeOptions.due_date = [">=", bucket.from_date];
+            } else if (bucket.op === "<=") {
+                routeOptions.due_date = ["<=", bucket.to_date];
+            }
+        }
+
+        frappe.route_options = routeOptions;
+        frappe.set_route("List", "Purchase Invoice");
     }
 
     function setAgingSupplierGroup(groupName) {
@@ -907,17 +1015,59 @@ frappe.pages["accounts-dashboard"].on_page_load = function (wrapper) {
         `;
     }
 
-    function renderCurrencyBalances(data) {
+    function renderDutyDrawbackTable(rows) {
+        if (!rows || !rows.length) {
+            return `<div style="padding:28px; text-align:center; color:var(--acd-text-3); font-weight:600;">No pending duty drawback records found.</div>`;
+        }
+
+        let bodyRows = rows.map(r => {
+            return `
+                <tr class="acd-table-row acd-modal-row-clickable" data-name="${r.name}" data-doctype="Sales Invoice" style="cursor:pointer;" onclick="frappe.set_route('Form', 'Sales Invoice', '${r.name}')" title="Click to open Sales Invoice ${r.name}">
+                    <td><strong style="color:var(--acd-primary); font-weight:700;">${r.name}</strong></td>
+                    <td style="color:var(--acd-text-2);">${r.date}</td>
+                    <td style="color:var(--acd-text); font-weight:600;">${r.customer}</td>
+                    <td><span style="color:var(--acd-text-3); font-size:12px; font-weight:600;">${r.type || 'Sales Invoice'}</span></td>
+                    <td><strong style="color:var(--acd-text); font-weight:800;">${r.drawback_amt}</strong></td>
+                    <td><span class="acd-badge-pill" style="background:#eff6ff; color:#2563eb; border:1px solid #bfdbfe; font-weight:700; font-size:11px;">${r.status || 'Pending Drawback'}</span></td>
+                </tr>
+            `;
+        }).join("");
+
+        return `
+            <table class="acd-data-table">
+                <thead>
+                    <tr>
+                        <th>INVOICE NO</th>
+                        <th>DATE</th>
+                        <th>CUSTOMER</th>
+                        <th>TYPE</th>
+                        <th>DRAWBACK AMT</th>
+                        <th>STATUS</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${bodyRows}
+                </tbody>
+            </table>
+        `;
+    }
+
+    function renderCurrencyBalances(data, isReceivables = false) {
         const items = (data && data.currencies) || [];
         if (!items.length) {
             return `<div style="grid-column:1/-1;font-size:13px;color:var(--acd-text-3);text-align:center;padding:16px 0;">No currency balances found</div>`;
         }
-        return items.map(it => `
-            <div class="acd-currency-box">
-                <span class="acd-currency-label">${it.currency || ''}</span>
-                <span class="acd-currency-value">${it.balance_fmt || ''}</span>
-            </div>
-        `).join('');
+        return items.map(it => {
+            const clickHandler = isReceivables
+                ? `onclick="event.stopPropagation(); openAcdReceivablesReport('${frappe.utils.escape_html(it.account || '')}', '${frappe.utils.escape_html(it.currency || '')}')" style="cursor:pointer;" title="Click to view Accounts Receivable for ${it.currency} (${it.account || 'All Accounts'})"`
+                : '';
+            return `
+                <div class="acd-currency-box" ${clickHandler}>
+                    <span class="acd-currency-label">${it.currency || ''}</span>
+                    <span class="acd-currency-value">${it.balance_fmt || ''}</span>
+                </div>
+            `;
+        }).join('');
     }
 
 
@@ -970,15 +1120,51 @@ frappe.pages["accounts-dashboard"].on_page_load = function (wrapper) {
         frappe.set_route("query-report", "General Ledger");
     }
 
-    function openReceivablesReport() {
+    function openReceivablesReport(partyAccount, currency) {
         const rec = (state.data && state.data.receivables) || {};
-        frappe.route_options = {
-            report_date: rec.as_of_date || state.filters.to_date,
+        const reportDate = rec.as_of_date || state.filters.to_date || frappe.datetime.nowdate();
+        const routeOptions = {
+            report_date: reportDate,
         };
         if (state.filters.company) {
-            frappe.route_options.company = state.filters.company;
+            routeOptions.company = state.filters.company;
         }
-        frappe.set_route("query-report", "Accounts Receivable");
+        if (partyAccount) {
+            routeOptions.party_account = partyAccount;
+        }
+        frappe.route_options = routeOptions;
+        frappe.set_route("query-report", "Accounts Receivable").then(() => {
+            enforceReceivablesFilters(partyAccount, state.filters.company, reportDate, 10);
+        });
+    }
+
+    function enforceReceivablesFilters(partyAccount, company, reportDate, retriesLeft) {
+        const report = frappe.query_report;
+        if (report && report.report_name === "Accounts Receivable") {
+            let needsRefresh = false;
+            if (partyAccount && report.get_filter_value("party_account") !== partyAccount) {
+                report.set_filter_value("party_account", partyAccount);
+                needsRefresh = true;
+            }
+            if (company && report.get_filter_value("company") !== company) {
+                report.set_filter_value("company", company);
+                needsRefresh = true;
+            }
+            if (reportDate && report.get_filter_value("report_date") !== reportDate) {
+                report.set_filter_value("report_date", reportDate);
+                needsRefresh = true;
+            }
+            if (report.get_filter_value("in_party_currency")) {
+                report.set_filter_value("in_party_currency", 0);
+                needsRefresh = true;
+            }
+            if (needsRefresh) {
+                report.refresh();
+            }
+        }
+        if (retriesLeft > 0) {
+            setTimeout(() => enforceReceivablesFilters(partyAccount, company, reportDate, retriesLeft - 1), 250);
+        }
     }
 
     function patchAgingRangeOnload(range) {

@@ -25,12 +25,16 @@ frappe.ui.form.on("Quotation", {
 });
 
 function set_country_of_destination(frm) {
+    if (frm.doc.docstatus !== 0) {
+        return;
+    }
 
     let address = frm.doc.shipping_address_name || frm.doc.customer_address;
 
     if (address) {
         frappe.db.get_value("Address", address, "country")
             .then(r => {
+                if (frm.doc.docstatus !== 0) return;
                 if (r.message && r.message.country) {
                     frm.set_value("country_of_destination", r.message.country);
                 } else {
