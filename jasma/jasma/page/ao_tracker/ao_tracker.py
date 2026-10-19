@@ -84,7 +84,7 @@
 
 import frappe
 from frappe import _
-from frappe.utils import flt, today, date_diff, getdate
+from frappe.utils import flt, today, date_diff, getdate, cint
 
 
 DOC_ORDER = [
@@ -271,8 +271,62 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, st
 		# rather than the Project doctype's own (often stale/blank)
 		# customer field.
 		customer = None
+		so_date = None
+		so_due_date = None
+		commitment_date = None
+		so_posting_date = None
+		dn_posting_date = None
+		delay_days = 0
+		delay_status = "on_schedule"
+		delay_text = ""
+
 		if so_doc:
-			customer = frappe.db.get_value("Sales Order", so_doc["name"], "customer")
+			so_vals = frappe.db.get_value(
+				"Sales Order", so_doc["name"],
+				["customer", "transaction_date", "delivery_date", "per_delivered", "status"],
+				as_dict=True,
+			) or {}
+			customer = so_vals.get("customer")
+			so_date = str(so_vals.get("transaction_date") or "")
+			so_due_date = str(so_vals.get("delivery_date") or "")
+			so_posting_date = so_date
+			commitment_date = so_due_date or so_date
+
+			dn_doc = docs.get("dn")
+			if dn_doc:
+				dn_posting_date = str(frappe.db.get_value("Delivery Note", dn_doc["name"], "posting_date") or "")
+
+			is_delivered = bool(dn_posting_date or flt(so_vals.get("per_delivered")) >= 100 or (so_vals.get("status") == "Completed"))
+			if commitment_date:
+				comm_dt = getdate(commitment_date)
+				if is_delivered and dn_posting_date:
+					diff = date_diff(getdate(dn_posting_date), comm_dt)
+					delay_days = diff
+					if diff > 0:
+						delay_status = "delayed"
+						delay_text = _("Delayed {0}d").format(diff)
+					elif diff == 0:
+						delay_status = "on_time"
+						delay_text = _("On Time")
+					else:
+						delay_status = "early"
+						delay_text = _("Early {0}d").format(abs(diff))
+				elif is_delivered:
+					delay_status = "on_time"
+					delay_text = _("Completed")
+				else:
+					diff = date_diff(getdate(today()), comm_dt)
+					if diff > 0:
+						delay_days = diff
+						delay_status = "overdue"
+						delay_text = _("Overdue {0}d").format(diff)
+					elif diff == 0:
+						delay_status = "due_today"
+						delay_text = _("Due Today")
+					else:
+						delay_status = "on_schedule"
+						delay_text = _("{0}d left").format(abs(diff))
+
 		pending_at, _stage_key = determine_pending(docs)
 
 		if status and not is_matching_status(pending_at, status):
@@ -287,6 +341,14 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, st
 			"date": str(getdate(p.creation)) if p.creation else None,
 			"pending_at": pending_at,
 			"priority": priority,
+			"so_date": so_date,
+			"so_due_date": so_due_date,
+			"so_posting_date": so_posting_date,
+			"commitment_date": commitment_date,
+			"dn_posting_date": dn_posting_date,
+			"delay_days": delay_days,
+			"delay_status": delay_status,
+			"delay_text": delay_text,
 			# Full procurement trail shown on the list grid — each doc
 			# carries its own `doctype` so the frontend can route to the
 			# right form without guessing.
@@ -432,6 +494,8 @@ def get_ao_detail(project):
 		"status": p.status,
 		"overview": compute_overview(project),
 		"items": get_items_and_consumption(project),
+		"shipping_details": get_project_shipping_details(project),
+		"commitment_details": get_commitment_and_delay_details(project),
 		"docs": docs,
 		"doc_meta": {
 			k: {
@@ -444,6 +508,312 @@ def get_ao_detail(project):
 		},
 		"doc_order": DOC_ORDER,
 	}
+
+
+def get_commitment_and_delay_details(project):
+	"""Returns Commitment Date, Delay Days, Sales Order Date, Sales Order Due Date,
+	Sales Order Posting Date, Sales Invoice Posting Date, and Delivery Note Posting Date for the project."""
+	doc_map = get_project_document_map(project)
+	so_names = list(doc_map.get("so") or [])
+	dn_names = list(doc_map.get("dn") or [])
+	si_names = list(doc_map.get("si") or [])
+
+	so_date = None
+	so_due_date = None
+	so_posting_date = None
+	commitment_date = None
+	so_name = None
+	so_status = None
+	per_delivered = 0.0
+
+	if so_names:
+		so_fields = ["name", "transaction_date", "delivery_date", "creation", "status", "per_delivered"]
+		for extra_f in ("posting_date", "commitment_date", "confirmation_date"):
+			if field_exists("Sales Order", extra_f):
+				so_fields.append(extra_f)
+
+		so_records = frappe.get_all(
+			"Sales Order",
+			filters={"name": ["in", so_names], "docstatus": 1},
+			fields=so_fields,
+			order_by="transaction_date desc, creation desc",
+			limit_page_length=1,
+		)
+		if so_records:
+			so = so_records[0]
+			so_name = so.name
+			so_status = so.get("status")
+			per_delivered = flt(so.get("per_delivered"))
+			so_date = str(so.get("transaction_date") or "")
+			so_due_date = str(so.get("delivery_date") or "")
+
+			if not so_due_date and doctype_installed("Sales Order Item") and field_exists("Sales Order Item", "delivery_date"):
+				min_item_due = frappe.db.get_value(
+					"Sales Order Item",
+					{"parent": so.name, "docstatus": 1, "delivery_date": ["is", "set"]},
+					"min(delivery_date)",
+				)
+				if min_item_due:
+					so_due_date = str(min_item_due)
+
+			so_posting_date = str(so.get("posting_date") or so.get("transaction_date") or (getdate(so.creation) if so.get("creation") else ""))
+			commitment_date = str(
+				so_due_date
+				or so.get("commitment_date")
+				or so.get("confirmation_date")
+				or so_date
+				or ""
+			)
+
+	si_list = []
+	latest_si_posting_date = None
+	latest_si_name = None
+
+	if si_names:
+		si_fields = ["name", "posting_date", "posting_time", "status", "grand_total"]
+		si_records = frappe.get_all(
+			"Sales Invoice",
+			filters={"name": ["in", si_names], "docstatus": 1},
+			fields=si_fields,
+			order_by="posting_date desc, posting_time desc, creation desc",
+		)
+		for r in si_records:
+			p_date = str(r.get("posting_date") or "")
+			si_list.append({
+				"name": r.name,
+				"posting_date": p_date,
+				"posting_time": str(r.get("posting_time") or ""),
+				"status": r.get("status") or "",
+				"grand_total": flt(r.get("grand_total")),
+			})
+			if not latest_si_posting_date and p_date:
+				latest_si_posting_date = p_date
+				latest_si_name = r.name
+
+	dn_list = []
+	latest_dn_posting_date = None
+	latest_dn_name = None
+
+	if dn_names:
+		dn_fields = ["name", "posting_date", "posting_time", "status", "grand_total"]
+		dn_records = frappe.get_all(
+			"Delivery Note",
+			filters={"name": ["in", dn_names], "docstatus": 1},
+			fields=dn_fields,
+			order_by="posting_date desc, posting_time desc, creation desc",
+		)
+		for r in dn_records:
+			p_date = str(r.get("posting_date") or "")
+			dn_list.append({
+				"name": r.name,
+				"posting_date": p_date,
+				"posting_time": str(r.get("posting_time") or ""),
+				"status": r.get("status") or "",
+				"grand_total": flt(r.get("grand_total")),
+			})
+			if not latest_dn_posting_date and p_date:
+				latest_dn_posting_date = p_date
+				latest_dn_name = r.name
+
+	is_delivered = bool(latest_dn_posting_date or per_delivered >= 100 or (so_status and so_status.lower() == "completed"))
+	delay_days = 0
+	delay_status = "on_schedule"
+	delay_text = ""
+
+	ref_commitment = commitment_date or so_due_date
+
+	if ref_commitment:
+		ref_comm_date = getdate(ref_commitment)
+		if is_delivered and latest_dn_posting_date:
+			actual_delivery = getdate(latest_dn_posting_date)
+			diff = date_diff(actual_delivery, ref_comm_date)
+			delay_days = diff
+			if diff > 0:
+				delay_status = "delayed"
+				delay_text = _("Delayed by {0} days").format(diff)
+			elif diff == 0:
+				delay_status = "on_time"
+				delay_text = _("Delivered on time")
+			else:
+				delay_status = "early"
+				delay_text = _("Delivered {0} days early").format(abs(diff))
+		elif is_delivered and not latest_dn_posting_date:
+			delay_status = "on_time"
+			delay_text = _("Completed")
+		else:
+			today_dt = getdate(today())
+			diff = date_diff(today_dt, ref_comm_date)
+			if diff > 0:
+				delay_days = diff
+				delay_status = "overdue"
+				delay_text = _("Overdue by {0} days").format(diff)
+			elif diff == 0:
+				delay_days = 0
+				delay_status = "due_today"
+				delay_text = _("Due Today")
+			else:
+				delay_days = 0
+				delay_status = "on_schedule"
+				delay_text = _("On schedule ({0} days left)").format(abs(diff))
+	else:
+		delay_status = "unknown"
+		delay_text = _("No Commitment Date set")
+
+	return {
+		"so_name": so_name,
+		"so_date": so_date,
+		"so_due_date": so_due_date,
+		"so_posting_date": so_posting_date,
+		"commitment_date": commitment_date,
+		"si_posting_date": latest_si_posting_date,
+		"si_name": latest_si_name,
+		"si_list": si_list,
+		"dn_posting_date": latest_dn_posting_date,
+		"dn_name": latest_dn_name,
+		"dn_list": dn_list,
+		"is_delivered": is_delivered,
+		"delay_days": delay_days,
+		"delay_status": delay_status,
+		"delay_text": delay_text,
+	}
+
+
+def get_project_shipping_details(project):
+	"""Fetches Bill of Lading / AWB and compliance details from all submitted Sales Invoices linked to the project."""
+	doc_map = get_project_document_map(project)
+	si_names = list(doc_map.get("si") or [])
+	if not si_names:
+		return []
+
+	target_fields = [
+		"name", "posting_date", "customer", "customer_name", "net_total", "base_net_total", "grand_total", "currency",
+		"outstanding_amount", "paid_amount",
+		"incoterm", "bl_no", "bl_date", "bl_type",
+		"shipping_bill_number", "shipping_bill_date",
+		"cerfticate_of_origin_no", "cerfticate_of_origin_date",
+		"insurance_no", "insurance_date",
+		"conformity_certificate_no", "conformity_certificate_date",
+		"bscectn_certificate_no", "bscectn_certificate_date",
+		"port_of_loading", "port_of_discharge", "final_destination", "country_of_destination",
+	]
+	avail_fields = [f for f in target_fields if field_exists("Sales Invoice", f)]
+
+	si_records = frappe.get_all(
+		"Sales Invoice",
+		filters={"name": ["in", si_names], "docstatus": 1},
+		fields=avail_fields,
+		order_by="posting_date desc, creation desc",
+	)
+
+	# Fetch payments allocated to these sales invoices
+	si_payments = {}
+	if si_names and doctype_installed("Payment Entry Reference"):
+		pe_records = frappe.db.sql(
+			"""
+			SELECT per.reference_name, per.allocated_amount, pe.name as pe_name, pe.posting_date
+			FROM `tabPayment Entry Reference` per
+			INNER JOIN `tabPayment Entry` pe ON pe.name = per.parent
+			WHERE per.reference_doctype = 'Sales Invoice'
+				AND per.reference_name IN %s
+				AND per.docstatus = 1
+				AND pe.docstatus = 1
+				AND pe.payment_type = 'Receive'
+			ORDER BY pe.posting_date desc, pe.creation desc
+			""",
+			(tuple(si_names),),
+			as_dict=True,
+		)
+		for pr in pe_records:
+			ref = pr.reference_name
+			if ref not in si_payments:
+				si_payments[ref] = {
+					"total_paid": 0.0,
+					"latest_date": str(pr.posting_date or ""),
+				}
+			si_payments[ref]["total_paid"] += flt(pr.allocated_amount)
+			if not si_payments[ref]["latest_date"] and pr.posting_date:
+				si_payments[ref]["latest_date"] = str(pr.posting_date)
+
+	result = []
+	for r in si_records:
+		incoterm = (r.get("incoterm") or "").strip()
+		incoterm_upper = incoterm.upper()
+		is_exw_or_fob = incoterm_upper in ("EXW", "EX WORKS", "EX-WORKS", "FOB", "FREE ON BOARD")
+
+		bl_no = (r.get("bl_no") or "").strip()
+		bl_date = str(r.get("bl_date") or "")
+
+		has_bl = bool(bl_no and bl_date)
+		if has_bl:
+			bl_status = "provided"
+			bl_message = _("Bill of Lading / AWB provided")
+		elif is_exw_or_fob:
+			bl_status = "not_applicable"
+			bl_message = _("Not applicable for Incoterms Ex Works or FOB shipments")
+		else:
+			bl_status = "missing"
+			bl_message = _("Bill of Lading/AWB information is missing.. Not applicable for Incoterms Ex Works or FOB shipments")
+
+		grand_total = flt(r.get("grand_total"))
+		outstanding = flt(r.get("outstanding_amount"))
+
+		pmt_info = si_payments.get(r.name, {})
+		pe_paid = pmt_info.get("total_paid", 0.0)
+		pmt_date = pmt_info.get("latest_date", "")
+
+		if field_exists("Sales Invoice", "payment_received") and r.get("payment_received") is not None:
+			payment_received = flt(r.get("payment_received"))
+		elif pe_paid > 0:
+			payment_received = pe_paid
+		elif grand_total > outstanding:
+			payment_received = grand_total - outstanding
+		else:
+			payment_received = 0.0
+
+		if field_exists("Sales Invoice", "shortfall_amount") and r.get("shortfall_amount") is not None:
+			shortfall_amount = flt(r.get("shortfall_amount"))
+		elif field_exists("Sales Invoice", "shortfall") and r.get("shortfall") is not None:
+			shortfall_amount = flt(r.get("shortfall"))
+		else:
+			shortfall_amount = max(0.0, grand_total - payment_received)
+
+		result.append({
+			"name": r.name,
+			"posting_date": str(r.get("posting_date") or ""),
+			"customer": r.get("customer_name") or r.get("customer") or "",
+			"net_total": flt(r.get("net_total")),
+			"base_net_total": flt(r.get("base_net_total") or r.get("net_total")),
+			"grand_total": grand_total,
+			"outstanding_amount": outstanding,
+			"payment_received": payment_received,
+			"payment_date": pmt_date,
+			"shortfall_amount": shortfall_amount,
+			"currency": r.get("currency") or "INR",
+			"incoterm": incoterm,
+			"is_exw_or_fob": is_exw_or_fob,
+			"bl_no": bl_no,
+			"bl_date": bl_date,
+			"bl_type": r.get("bl_type") or "",
+			"has_bl": has_bl,
+			"bl_status": bl_status,
+			"bl_message": bl_message,
+			"shipping_bill_number": r.get("shipping_bill_number") or "",
+			"shipping_bill_date": str(r.get("shipping_bill_date") or ""),
+			"cerfticate_of_origin_no": r.get("cerfticate_of_origin_no") or "",
+			"cerfticate_of_origin_date": str(r.get("cerfticate_of_origin_date") or ""),
+			"insurance_no": r.get("insurance_no") or "",
+			"insurance_date": str(r.get("insurance_date") or ""),
+			"conformity_certificate_no": r.get("conformity_certificate_no") or "",
+			"conformity_certificate_date": str(r.get("conformity_certificate_date") or ""),
+			"bscectn_certificate_no": r.get("bscectn_certificate_no") or "",
+			"bscectn_certificate_date": str(r.get("bscectn_certificate_date") or ""),
+			"port_of_loading": r.get("port_of_loading") or "",
+			"port_of_discharge": r.get("port_of_discharge") or "",
+			"final_destination": r.get("final_destination") or "",
+			"country_of_destination": r.get("country_of_destination") or "",
+		})
+
+	return result
 
 
 def is_doc_type_queryable(cfg, key=None):
@@ -952,6 +1322,10 @@ def get_doc_list(project, key):
 		fields.append("{0} as amount".format(cfg["amount_field"]))
 	if doctype == "Journal Entry":
 		fields.append("docstatus")
+	if key == "si":
+		for si_fld in ("total_duty_drawback", "drawback_received", "total_igst_amount", "igst_received"):
+			if field_exists("Sales Invoice", si_fld):
+				fields.append(si_fld)
 
 	filters = {"name": ["in", list(names)], "docstatus": 1}
 	rows = frappe.get_all(doctype, filters=filters, fields=fields, order_by="creation desc")
@@ -1108,36 +1482,194 @@ def compute_overview(project):
 			tuple(pi_params),
 		)[0][0] or 0)
 
-	# RODTEP, Duty Drawback, and IGST Refund values from linked Sales Invoices' JVs
-	rodtep_val = 0.0
+	# Duty Drawback, IGST Refund, and RODTEP values from linked Sales Invoices
 	duty_drawback_val = 0.0
+	duty_drawback_pending = 0.0
+	duty_drawback_received = 0.0
+	duty_drawback_round_off = 0.0
+
 	igst_refund_val = 0.0
+	igst_refund_pending = 0.0
+	igst_refund_received = 0.0
+	igst_refund_round_off = 0.0
+
+	rodtep_val = 0.0
 
 	if si_names:
-		def get_jv_total(fieldname):
-			if not field_exists("Sales Invoice", fieldname):
-				return 0.0
-			jvs = frappe.db.sql(
-				"""
-				SELECT DISTINCT `{0}` FROM `tabSales Invoice`
-				WHERE name IN %s AND `{0}` IS NOT NULL AND `{0}` != '' AND docstatus = 1
-				""".format(fieldname),
-				(tuple(si_names),),
-				pluck=True,
-			)
-			if not jvs:
-				return 0.0
-			return flt(frappe.db.sql(
-				"""
-				SELECT SUM(total_debit) FROM `tabJournal Entry`
-				WHERE name IN %s AND docstatus = 1
-				""",
-				(tuple(jvs),),
-			)[0][0] or 0)
+		si_docs = frappe.get_all(
+			"Sales Invoice",
+			filters={"name": ["in", list(si_names)], "docstatus": 1},
+			fields=[
+				"name",
+				"total_duty_drawback",
+				"drawback_received",
+				"duty_drawback_jv",
+				"total_igst_amount",
+				"igst_received",
+				"igst_refund_jv",
+				"total_meis",
+				"meis_jv",
+			],
+		)
 
-		duty_drawback_val = get_jv_total("duty_drawback_jv")
-		rodtep_val = get_jv_total("meis_jv")
-		igst_refund_val = get_jv_total("igst_refund_jv")
+		for si in si_docs:
+			# --- 1. Duty Drawback ---
+			dbk_amt = 0.0
+			if si.get("duty_drawback_jv"):
+				jv_amt = flt(frappe.db.get_value("Journal Entry", {"name": si.duty_drawback_jv, "docstatus": 1}, "total_debit"))
+				dbk_amt = jv_amt if jv_amt > 0 else flt(si.get("total_duty_drawback"))
+			else:
+				dbk_amt = flt(si.get("total_duty_drawback"))
+
+			has_dbk_claim = False
+			dbk_rec_claim = 0.0
+			dbk_ro_claim = 0.0
+			if doctype_installed("Drawback Details") and doctype_installed("Duty DrawBack Claim"):
+				dbk_claim_res = frappe.db.sql(
+					"""
+					SELECT SUM(dd.received_amount), SUM(rc.round_off_amount)
+					FROM `tabDrawback Details` dd
+					INNER JOIN `tabDuty DrawBack Claim` rc ON rc.name = dd.parent
+					WHERE rc.docstatus = 1
+						AND (dd.cheque_no = %s OR (dd.je_no IS NOT NULL AND dd.je_no = %s))
+					""",
+					(si.name, si.get("duty_drawback_jv") or ""),
+				)
+				if dbk_claim_res and dbk_claim_res[0][0] is not None:
+					dbk_rec_claim = flt(dbk_claim_res[0][0])
+					dbk_ro_claim = flt(dbk_claim_res[0][1] or 0)
+					has_dbk_claim = True
+
+			if has_dbk_claim:
+				duty_drawback_received += dbk_rec_claim
+				duty_drawback_round_off += dbk_ro_claim
+				duty_drawback_pending += 0.0
+			elif cint(si.get("drawback_received")) == 1:
+				duty_drawback_received += dbk_amt
+			else:
+				duty_drawback_pending += dbk_amt
+
+			duty_drawback_val += dbk_amt
+
+			# --- 2. IGST Refund ---
+			igst_amt = 0.0
+			if si.get("igst_refund_jv"):
+				jv_amt = flt(frappe.db.get_value("Journal Entry", {"name": si.igst_refund_jv, "docstatus": 1}, "total_debit"))
+				if jv_amt > 0:
+					igst_amt = jv_amt
+
+			if not igst_amt and doctype_installed("Sales Taxes and Charges"):
+				tax_res = frappe.db.sql(
+					"""
+					SELECT SUM(base_tax_amount_after_discount_amount)
+					FROM `tabSales Taxes and Charges`
+					WHERE parent = %s AND (account_head LIKE '%%IGST%%' OR description LIKE '%%IGST%%')
+					""",
+					si.name,
+				)
+				if tax_res and tax_res[0][0] is not None:
+					igst_amt = flt(tax_res[0][0])
+
+			if not igst_amt:
+				igst_amt = flt(si.get("total_igst_amount"))
+
+			has_igst_claim = False
+			igst_rec_claim = 0.0
+			igst_ro_claim = 0.0
+			if doctype_installed("Drawback Details") and doctype_installed("IGST Refund Claim"):
+				igst_claim_res = frappe.db.sql(
+					"""
+					SELECT SUM(dd.received_amount), SUM(rc.round_off_amount)
+					FROM `tabDrawback Details` dd
+					INNER JOIN `tabIGST Refund Claim` rc ON rc.name = dd.parent
+					WHERE rc.docstatus = 1
+						AND (dd.cheque_no = %s OR (dd.je_no IS NOT NULL AND dd.je_no = %s))
+					""",
+					(si.name, si.get("igst_refund_jv") or ""),
+				)
+				if igst_claim_res and igst_claim_res[0][0] is not None:
+					igst_rec_claim = flt(igst_claim_res[0][0])
+					igst_ro_claim = flt(igst_claim_res[0][1] or 0)
+					has_igst_claim = True
+
+			if has_igst_claim:
+				igst_refund_received += igst_rec_claim
+				igst_refund_round_off += igst_ro_claim
+				igst_refund_pending += 0.0
+			elif cint(si.get("igst_received")) == 1:
+				igst_refund_received += igst_amt
+			else:
+				igst_refund_pending += igst_amt
+
+			igst_refund_val += igst_amt
+
+			# --- 3. RODTEP / MEIS ---
+			rod_amt = 0.0
+			if si.get("meis_jv"):
+				jv_amt = flt(frappe.db.get_value("Journal Entry", {"name": si.meis_jv, "docstatus": 1}, "total_debit"))
+				rod_amt = jv_amt if jv_amt > 0 else flt(si.get("total_meis"))
+			else:
+				rod_amt = flt(si.get("total_meis"))
+			rodtep_val += rod_amt
+
+	# Fallbacks if no Sales Invoice drawback/IGST found but JVs exist in project
+	if not duty_drawback_val and doc_map.get("je"):
+		dbk_je_val = flt(frappe.db.sql(
+			"""
+			SELECT SUM(total_debit) FROM `tabJournal Entry`
+			WHERE name IN %s AND voucher_type = 'Duty Drawback Entry' AND docstatus = 1
+			""",
+			(tuple(doc_map["je"]),),
+		)[0][0] or 0)
+		if dbk_je_val:
+			duty_drawback_val = dbk_je_val
+			if doctype_installed("Drawback Details") and doctype_installed("Duty DrawBack Claim"):
+				claim_dbk = flt(frappe.db.sql(
+					"""
+					SELECT SUM(dd.received_amount)
+					FROM `tabDrawback Details` dd
+					INNER JOIN `tabDuty DrawBack Claim` rc ON rc.name = dd.parent
+					WHERE rc.docstatus = 1 AND dd.je_no IN %s
+					""",
+					(tuple(doc_map["je"]),),
+				)[0][0] or 0)
+				if claim_dbk:
+					duty_drawback_received = claim_dbk
+					duty_drawback_pending = 0.0
+				else:
+					duty_drawback_pending = dbk_je_val
+			else:
+				duty_drawback_pending = dbk_je_val
+
+	if not igst_refund_val and doc_map.get("je"):
+		igst_je_val = flt(frappe.db.sql(
+			"""
+			SELECT SUM(jea.debit) FROM `tabJournal Entry Account` jea
+			INNER JOIN `tabJournal Entry` je ON je.name = jea.parent
+			WHERE je.name IN %s AND je.docstatus = 1
+				AND (jea.account LIKE '%%IGST%%Refund%%' OR jea.account LIKE '%%IGST%%Receivable%%')
+			""",
+			(tuple(doc_map["je"]),),
+		)[0][0] or 0)
+		if igst_je_val:
+			igst_refund_val = igst_je_val
+			if doctype_installed("Drawback Details") and doctype_installed("IGST Refund Claim"):
+				claim_igst = flt(frappe.db.sql(
+					"""
+					SELECT SUM(dd.received_amount)
+					FROM `tabDrawback Details` dd
+					INNER JOIN `tabIGST Refund Claim` rc ON rc.name = dd.parent
+					WHERE rc.docstatus = 1 AND dd.je_no IN %s
+					""",
+					(tuple(doc_map["je"]),),
+				)[0][0] or 0)
+				if claim_igst:
+					igst_refund_received = claim_igst
+					igst_refund_pending = 0.0
+				else:
+					igst_refund_pending = igst_je_val
+			else:
+				igst_refund_pending = igst_je_val
 
 	profit = revenue - rm_cost - indirect
 	profit_pct = (profit / revenue * 100) if revenue else 0
@@ -1150,7 +1682,13 @@ def compute_overview(project):
 		"profit_pct": profit_pct,
 		"rodtep": rodtep_val,
 		"duty_drawback": duty_drawback_val,
+		"duty_drawback_pending": duty_drawback_pending,
+		"duty_drawback_received": duty_drawback_received,
+		"duty_drawback_round_off": duty_drawback_round_off,
 		"igst_refund": igst_refund_val,
+		"igst_refund_pending": igst_refund_pending,
+		"igst_refund_received": igst_refund_received,
+		"igst_refund_round_off": igst_refund_round_off,
 		"currency": company_currency,
 		"foreign_revenue": foreign_revenue if foreign_currency != company_currency else None,
 		"foreign_currency": foreign_currency if foreign_currency != company_currency else None,
@@ -1664,7 +2202,7 @@ def get_doc_summary(doctype, name):
 				"reference": reference,
 			})
 
-	return {
+	res = {
 		"doctype": doctype,
 		"name": doc.name,
 		"status": doc.get(status_field) if status_field else None,
@@ -1672,3 +2210,85 @@ def get_doc_summary(doctype, name):
 		"items": items,
 		"total_qty": sum(i["qty"] for i in items),
 	}
+
+	if doctype == "Sales Invoice":
+		dbk_amt = 0.0
+		if doc.get("duty_drawback_jv"):
+			jv_amt = flt(frappe.db.get_value("Journal Entry", {"name": doc.duty_drawback_jv, "docstatus": 1}, "total_debit"))
+			dbk_amt = jv_amt if jv_amt > 0 else flt(doc.get("total_duty_drawback"))
+		else:
+			dbk_amt = flt(doc.get("total_duty_drawback"))
+
+		igst_amt = 0.0
+		if doc.get("igst_refund_jv"):
+			jv_amt = flt(frappe.db.get_value("Journal Entry", {"name": doc.igst_refund_jv, "docstatus": 1}, "total_debit"))
+			if jv_amt > 0:
+				igst_amt = jv_amt
+
+		if not igst_amt and doctype_installed("Sales Taxes and Charges"):
+			tax_res = frappe.db.sql(
+				"""
+				SELECT SUM(base_tax_amount_after_discount_amount)
+				FROM `tabSales Taxes and Charges`
+				WHERE parent = %s AND (account_head LIKE '%%IGST%%' OR description LIKE '%%IGST%%')
+				""",
+				doc.name,
+			)
+			if tax_res and tax_res[0][0] is not None:
+				igst_amt = flt(tax_res[0][0])
+
+		if not igst_amt:
+			igst_amt = flt(doc.get("total_igst_amount"))
+
+		incoterm = (doc.get("incoterm") or "").strip()
+		incoterm_upper = incoterm.upper()
+		is_exw_or_fob = incoterm_upper in ("EXW", "EX WORKS", "EX-WORKS", "FOB", "FREE ON BOARD")
+		bl_no = (doc.get("bl_no") or "").strip()
+		bl_date = str(doc.get("bl_date") or "")
+		has_bl = bool(bl_no and bl_date)
+		if has_bl:
+			bl_status = "provided"
+			bl_message = _("Bill of Lading / AWB provided")
+		elif is_exw_or_fob:
+			bl_status = "not_applicable"
+			bl_message = _("Not applicable for Incoterms Ex Works or FOB shipments")
+		else:
+			bl_status = "missing"
+			bl_message = _("Bill of Lading/AWB information is missing.. Not applicable for Incoterms Ex Works or FOB shipments")
+
+		res.update({
+			"is_sales_invoice": True,
+			"net_total": flt(doc.get("net_total")),
+			"base_net_total": flt(doc.get("base_net_total") or doc.get("net_total")),
+			"grand_total": flt(doc.get("grand_total")),
+			"base_grand_total": flt(doc.get("base_grand_total") or doc.get("grand_total")),
+			"currency": doc.get("currency") or "",
+			"customer": doc.get("customer_name") or doc.get("customer"),
+			"posting_date": str(doc.get("posting_date") or ""),
+			"incoterm": incoterm,
+			"is_exw_or_fob": is_exw_or_fob,
+			"bl_no": bl_no,
+			"bl_date": bl_date,
+			"bl_type": doc.get("bl_type") or "",
+			"has_bl": has_bl,
+			"bl_status": bl_status,
+			"bl_message": bl_message,
+			"shipping_bill_number": doc.get("shipping_bill_number") or "",
+			"shipping_bill_date": str(doc.get("shipping_bill_date") or ""),
+			"cerfticate_of_origin_no": doc.get("cerfticate_of_origin_no") or "",
+			"cerfticate_of_origin_date": str(doc.get("cerfticate_of_origin_date") or ""),
+			"insurance_no": doc.get("insurance_no") or "",
+			"insurance_date": str(doc.get("insurance_date") or ""),
+			"conformity_certificate_no": doc.get("conformity_certificate_no") or "",
+			"conformity_certificate_date": str(doc.get("conformity_certificate_date") or ""),
+			"bscectn_certificate_no": doc.get("bscectn_certificate_no") or "",
+			"bscectn_certificate_date": str(doc.get("bscectn_certificate_date") or ""),
+			"total_duty_drawback": dbk_amt,
+			"drawback_received": cint(doc.get("drawback_received")),
+			"duty_drawback_jv": doc.get("duty_drawback_jv"),
+			"total_igst_amount": igst_amt,
+			"igst_received": cint(doc.get("igst_received")),
+			"igst_refund_jv": doc.get("igst_refund_jv"),
+		})
+
+	return res

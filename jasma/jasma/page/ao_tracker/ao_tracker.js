@@ -517,6 +517,19 @@ class AOTracker {
 				</div>
 			</div>
 
+			<div class="aot-panel aot-commitment-panel">
+				<div class="aot-panel-head aot-collapsible">
+					<div class="aot-panel-head-left">
+						<div class="aot-panel-title">${__('Commitment & Delivery Timeline')}</div>
+						<div class="aot-panel-desc">${__('Sales Order date, commitment date, invoice & delivery dates, and delay tracking.')}</div>
+					</div>
+					<span class="aot-caret">${frappe.utils.icon('small-down', 'sm')}</span>
+				</div>
+				<div class="aot-panel-body">
+					<div class="aot-commitment-container"></div>
+				</div>
+			</div>
+
 			<div class="aot-panel">
 				<div class="aot-panel-head aot-collapsible">
 					<div class="aot-panel-head-left">
@@ -542,6 +555,19 @@ class AOTracker {
 							<tbody class="aot-items-tbody"></tbody>
 						</table>
 					</div>
+				</div>
+			</div>
+
+			<div class="aot-panel aot-shipping-panel">
+				<div class="aot-panel-head aot-collapsible">
+					<div class="aot-panel-head-left">
+						<div class="aot-panel-title">${__('Shipping & Bill of Lading Details')}</div>
+						<div class="aot-panel-desc">${__('Bill of Lading / AWB, Incoterm, and compliance information from related Sales Invoice(s).')}</div>
+					</div>
+					<span class="aot-caret">${frappe.utils.icon('small-down', 'sm')}</span>
+				</div>
+				<div class="aot-panel-body">
+					<div class="aot-shipping-container"></div>
 				</div>
 			</div>
 
@@ -859,11 +885,25 @@ class AOTracker {
 			<td><a class="aot-ao-link" data-project="${frappe.utils.escape_html(ao.project)}">${frappe.utils.escape_html(ao.project)}</a>
 				${showSubtitle ? `<div class="aot-project-name">${frappe.utils.escape_html(ao.project_name)}</div>` : ''}
 			</td>
-			<td class="aot-so-col">${ao.so ? `<span class="aot-doc-link aot-so-link" data-doctype="Sales Order" data-name="${frappe.utils.escape_html(ao.so)}">${frappe.utils.escape_html(ao.so)}</span>` : ''}</td>
+			<td class="aot-so-col">
+				${ao.so ? `<span class="aot-doc-link aot-so-link" data-doctype="Sales Order" data-name="${frappe.utils.escape_html(ao.so)}">${frappe.utils.escape_html(ao.so)}</span>` : ''}
+				${ao.commitment_date ? `<div style="font-size:10.5px; color:var(--aot-ink-soft); margin-top:2px;" title="${__('Commitment / Due Date')}">${__('Due')}: <strong style="color:var(--aot-ink);">${frappe.datetime.str_to_user(ao.commitment_date)}</strong></div>` : ''}
+			</td>
 			<td class="aot-customer-cell" title="${frappe.utils.escape_html(ao.customer || '')}">${ao.customer ? `<span class="aot-doc-link aot-customer-link" data-doctype="Customer" data-name="${frappe.utils.escape_html(ao.customer)}">${frappe.utils.escape_html(ao.customer)}</span>` : ''}</td>
 			<td class="aot-pending-cell">${ao.pending_at ? `<span class="aot-pending-chip ${this.status_chip_class(ao.pending_at)}" title="${frappe.utils.escape_html(ao.pending_at)}">${frappe.utils.escape_html(this.format_pending_at(ao.pending_at))}</span>` : ''}</td>
 			${this.doc_columns.map(col => docPair(col)).join('')}
-			<td class="aot-grp-start aot-priority-col">${ao.priority ? `<span class="aot-pri-badge ${priorityClass}">${frappe.utils.escape_html(ao.priority)}</span>` : ''}</td>
+			<td class="aot-grp-start aot-priority-col">
+				${ao.priority ? `<span class="aot-pri-badge ${priorityClass}">${frappe.utils.escape_html(ao.priority)}</span>` : ''}
+				${ao.delay_text ? `
+					<div style="margin-top:3px;">
+						<span class="aot-mini-pill" style="font-size:10px; font-weight:700; padding:2px 6px; ${
+							ao.delay_status === 'delayed' || ao.delay_status === 'overdue' ? 'background:var(--aot-red-bg); color:var(--aot-red-ink);' :
+							ao.delay_status === 'on_time' || ao.delay_status === 'early' ? 'background:var(--aot-green-bg); color:var(--aot-green-ink);' :
+							'background:var(--aot-gray-bg); color:var(--aot-ink-soft);'
+						}">${frappe.utils.escape_html(ao.delay_text)}</span>
+					</div>
+				` : ''}
+			</td>
 			<td><button class="aot-view-btn" data-project="${frappe.utils.escape_html(ao.project)}" title="${__('Detailed view')}">${frappe.utils.icon('right', 'sm')}</button></td>
 		</tr>
 		`;
@@ -956,12 +996,14 @@ class AOTracker {
 		const [bg, ink] = this.tone(ao.status);
 		this.$wrap.find('.aot-d-status-pill').css({ background: bg, color: ink }).text(ao.status || '');
 
-		this.render_overview(ao.overview);
+		this.render_overview(ao.overview, ao.shipping_details || []);
+		this.render_commitment_details(ao.commitment_details);
 		this.render_items_table(ao.items.rows || []);
+		this.render_shipping_details(ao.shipping_details || []);
 		this.render_doc_catalog(ao);
 	}
 
-	render_overview(o) {
+	render_overview(o, shippingList = []) {
 		const cur = o.currency || 'INR';
 		const inr = (n) => format_currency(n || 0, cur);
 		const revSub = (o.foreign_currency && o.foreign_currency !== cur && o.foreign_revenue)
@@ -981,10 +1023,52 @@ class AOTracker {
 			[__('Profit / Profitability'), profitValHtml, '', undefined, '#059669']
 		];
 
+		const getIncentiveBadge = (total, pending, received) => {
+			if (!total || total <= 0) {
+				return `<span class="aot-mini-pill" style="background:var(--aot-gray-bg); color:var(--aot-gray-ink); font-size:10px; font-weight:700; padding:2px 7px;">${__('N/A')}</span>`;
+			}
+			if ((pending || 0) <= 0 && (received || 0) > 0) {
+				return `<span class="aot-mini-pill" style="background:var(--aot-green-bg); color:var(--aot-green-ink); font-size:10px; font-weight:700; padding:2px 7px;">${__('Fully Received')}</span>`;
+			}
+			if ((received || 0) <= 0 && (pending || 0) > 0) {
+				return `<span class="aot-mini-pill" style="background:var(--aot-amber-bg); color:var(--aot-amber-ink); font-size:10px; font-weight:700; padding:2px 7px;">${__('Pending')}</span>`;
+			}
+			return `<span class="aot-mini-pill" style="background:var(--aot-orange-bg); color:var(--aot-orange-ink); font-size:10px; font-weight:700; padding:2px 7px;">${__('Partial')}</span>`;
+		};
+
 		const incentiveCards = [
-			[__('RODTEP Value'), inr(o.rodtep), __('From RODTEP / MEIS JV'), undefined, '#0D9488'],
-			[__('Duty Drawback Value'), inr(o.duty_drawback), __('From Duty Drawback JV'), undefined, '#EA580C'],
-			[__('IGST Refund Value'), inr(o.igst_refund), __('From IGST Refund JV'), undefined, '#2563EB']
+			{
+				label: __('RODTEP Receivable'),
+				value: inr(o.rodtep),
+				sub: __('From RODTEP / MEIS JV'),
+				color: '#0D9488',
+				badge: '',
+				hasBreakdown: false
+			},
+			{
+				label: __('Duty Drawback Receivable'),
+				value: inr(o.duty_drawback),
+				total_raw: o.duty_drawback,
+				sub: __('From Duty Drawback JV / Sales Invoice'),
+				color: '#EA580C',
+				badge: getIncentiveBadge(o.duty_drawback, o.duty_drawback_pending, o.duty_drawback_received),
+				pending: o.duty_drawback_pending,
+				received: o.duty_drawback_received,
+				round_off: o.duty_drawback_round_off,
+				hasBreakdown: true
+			},
+			{
+				label: __('IGST Refund Receivable'),
+				value: inr(o.igst_refund),
+				total_raw: o.igst_refund,
+				sub: __('From IGST Refund JV / Sales Taxes'),
+				color: '#2563EB',
+				badge: getIncentiveBadge(o.igst_refund, o.igst_refund_pending, o.igst_refund_received),
+				pending: o.igst_refund_pending,
+				received: o.igst_refund_received,
+				round_off: o.igst_refund_round_off,
+				hasBreakdown: true
+			}
 		];
 
 		const cardHtml = ([label, value, sub, positive, color]) => `
@@ -995,12 +1079,118 @@ class AOTracker {
 			</div>
 		`;
 
+		const incentiveCardHtml = (c) => {
+			const roundOffVal = flt(c.round_off || ((c.pending || 0) <= 0 && c.received && c.total_raw ? Math.max(0, flt(c.total_raw - c.received)) : 0));
+			const roundOffHtml = roundOffVal > 0.001
+				? ` <span style="font-size:10px; font-weight:600; color:var(--aot-ink-soft); white-space:nowrap;">(${__('Round off')}: ${inr(roundOffVal)})</span>`
+				: '';
+
+			return `
+			<div class="aot-stat-card" style="border-top:3px solid ${c.color};">
+				<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+					<div class="aot-stat-label" style="color:${c.color}; margin-bottom:0;">${c.label}</div>
+					${c.badge || ''}
+				</div>
+				<div class="aot-stat-value">${c.value}</div>
+				${c.hasBreakdown ? `
+					<div class="aot-incentive-breakdown" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; margin-top:9px; padding-top:8px; border-top:1px dashed var(--aot-line); font-size:11.5px; gap:6px;">
+						<span style="color:var(--aot-amber-ink); font-weight:600; display:inline-flex; align-items:center; gap:5px;">
+							<span style="width:6px; height:6px; border-radius:50%; background:var(--aot-amber-ink); display:inline-block;"></span>
+							${__('Pending')}: <strong style="color:var(--aot-ink);">${inr(c.pending || 0)}</strong>
+						</span>
+						<span style="color:var(--aot-green-ink); font-weight:600; display:inline-flex; align-items:center; gap:5px; flex-wrap:wrap;">
+							<span style="width:6px; height:6px; border-radius:50%; background:var(--aot-green-ink); display:inline-block;"></span>
+							${__('Received')}: <strong style="color:var(--aot-ink);">${inr(c.received || 0)}</strong>${roundOffHtml}
+						</span>
+					</div>
+				` : ''}
+				${c.sub ? `<div class="aot-stat-sub" style="margin-top:6px;">${c.sub}</div>` : ''}
+			</div>
+		`;
+		};
+
+		// Payment Received & Shortfall Amount Card (8 & 9)
+		let paymentShortfallCardHtml = '';
+		if (!shippingList || !shippingList.length) {
+			paymentShortfallCardHtml = `
+				<div class="aot-stat-card" style="border-top:3px solid #7C3AED;">
+					<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+						<div class="aot-stat-label" style="color:#7C3AED; margin-bottom:0;">${__('Payment Received & Shortfall')}</div>
+						<span class="aot-mini-pill" style="background:var(--aot-gray-bg); color:var(--aot-gray-ink); font-size:10px; font-weight:700; padding:2px 7px;">${__('N/A')}</span>
+					</div>
+					<div class="aot-stat-value" style="color:var(--aot-ink-faint); font-size:18px; margin-top:8px;">—</div>
+					<div class="aot-stat-sub" style="margin-top:8px;">${__('No Sales Invoice generated yet')}</div>
+				</div>
+			`;
+		} else {
+			const rows = shippingList.map((si) => {
+				const cur = si.currency || o.currency || 'INR';
+				const pmt = flt(si.payment_received);
+				const short = flt(si.shortfall_amount);
+				const pDate = si.payment_date ? frappe.datetime.str_to_user(si.payment_date) : '';
+				return {
+					invoice: si.name,
+					currency: cur,
+					payment_received: pmt,
+					payment_date: pDate,
+					shortfall_amount: short,
+				};
+			});
+
+			const totalShortfall = rows.reduce((acc, r) => acc + r.shortfall_amount, 0);
+			const totalReceived = rows.reduce((acc, r) => acc + r.payment_received, 0);
+			let badgeHtml = '';
+			if (totalShortfall <= 0 && totalReceived > 0) {
+				badgeHtml = `<span class="aot-mini-pill" style="background:var(--aot-green-bg); color:var(--aot-green-ink); font-size:10px; font-weight:700; padding:2px 7px;">${__('Nil Shortfall')}</span>`;
+			} else if (totalShortfall > 0 && totalReceived <= 0) {
+				badgeHtml = `<span class="aot-mini-pill" style="background:var(--aot-amber-bg); color:var(--aot-amber-ink); font-size:10px; font-weight:700; padding:2px 7px;">${__('Pending')}</span>`;
+			} else if (totalShortfall > 0) {
+				badgeHtml = `<span class="aot-mini-pill" style="background:var(--aot-orange-bg); color:var(--aot-orange-ink); font-size:10px; font-weight:700; padding:2px 7px;">${__('Shortfall')}</span>`;
+			} else {
+				badgeHtml = `<span class="aot-mini-pill" style="background:var(--aot-gray-bg); color:var(--aot-gray-ink); font-size:10px; font-weight:700; padding:2px 7px;">${__('Nil')}</span>`;
+			}
+
+			paymentShortfallCardHtml = `
+				<div class="aot-stat-card" style="border-top:3px solid #7C3AED;">
+					<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+						<div class="aot-stat-label" style="color:#7C3AED; margin-bottom:0;">${__('Payment Received & Shortfall')}</div>
+						${badgeHtml}
+					</div>
+					<div>
+						<div style="display:flex; justify-content:space-between; align-items:center; font-size:10px; font-weight:700; color:var(--aot-ink-faint); text-transform:uppercase; border-bottom:1px solid var(--aot-line); padding-bottom:4px; margin-bottom:4px; letter-spacing:0.3px;">
+							<span>${__('Payment Received')}</span>
+							<span>${__('Shortfall Amount')}</span>
+						</div>
+						${rows.map((r, idx) => `
+							<div style="display:flex; justify-content:space-between; align-items:flex-start; padding:${rows.length > 1 ? '4px 0' : '6px 0'}; ${idx < rows.length - 1 ? 'border-bottom:1px dashed var(--aot-line-soft);' : ''}">
+								<div>
+									<div style="font-size:14.5px; font-weight:800; color:${r.payment_received > 0 ? 'var(--aot-green-ink)' : 'var(--aot-ink)'};">
+										${format_currency(r.payment_received, r.currency)}
+									</div>
+									${r.payment_date ? `<div style="font-size:10.5px; color:var(--aot-ink-soft); font-weight:600; margin-top:1px;">${r.payment_date}</div>` : ''}
+								</div>
+								<div style="text-align:right;">
+									<div style="font-size:14.5px; font-weight:800; color:${r.shortfall_amount > 0 ? '#DC2626' : 'var(--aot-green-ink)'};">
+										${format_currency(r.shortfall_amount, r.currency)}
+									</div>
+									<div style="font-size:10.5px; font-weight:700; margin-top:1px; color:${r.shortfall_amount > 0 ? '#DC2626' : 'var(--aot-green-ink)'};">
+										${r.shortfall_amount > 0 ? __('Pending') : __('Nil')}
+									</div>
+								</div>
+							</div>
+						`).join('')}
+					</div>
+				</div>
+			`;
+		}
+
 		this.$wrap.find('.aot-overview-grid').html(`
 			<div class="aot-stat-grid aot-stat-grid-4">
 				${mainCards.map(cardHtml).join('')}
 			</div>
-			<div class="aot-stat-grid aot-stat-grid-3" style="margin-top:14px;">
-				${incentiveCards.map(cardHtml).join('')}
+			<div class="aot-stat-grid aot-stat-grid-4" style="margin-top:14px;">
+				${incentiveCards.map(incentiveCardHtml).join('')}
+				${paymentShortfallCardHtml}
 			</div>
 		`);
 	}
@@ -1051,6 +1241,348 @@ class AOTracker {
 					<td class="aot-num">${valRateHtml}</td>
 				</tr>
 			`);
+		});
+	}
+
+	render_commitment_details(comm) {
+		const $container = this.$wrap.find('.aot-commitment-container').empty();
+		if (!comm || (!comm.so_name && !comm.commitment_date && !comm.so_due_date)) {
+			$container.html(`
+				<div style="padding:22px; text-align:center; color:var(--aot-ink-faint); background:#FBFBFD; border:1px dashed var(--aot-line); border-radius:10px;">
+					<div style="font-size:13.5px; font-weight:700; color:var(--aot-ink); margin-bottom:4px;">${__('No Sales Order Linked')}</div>
+					<div style="font-size:12px;">${__('Commitment and delivery timeline will appear once a Sales Order is created for this AO.')}</div>
+				</div>
+			`);
+			return;
+		}
+
+		const soDateFmt = comm.so_date ? frappe.datetime.str_to_user(comm.so_date) : '';
+		const soDueFmt = comm.so_due_date ? frappe.datetime.str_to_user(comm.so_due_date) : '';
+		const commDateFmt = soDueFmt || (comm.commitment_date ? frappe.datetime.str_to_user(comm.commitment_date) : '—');
+		const siPostFmt = comm.si_posting_date ? frappe.datetime.str_to_user(comm.si_posting_date) : '';
+		const dnPostFmt = comm.dn_posting_date ? frappe.datetime.str_to_user(comm.dn_posting_date) : '';
+
+		let bannerBg = 'var(--aot-gray-bg)';
+		let bannerColor = 'var(--aot-ink)';
+		let bannerBorder = 'var(--aot-line)';
+		let bannerTitle = '';
+		let bannerSub = '';
+
+		if (comm.delay_status === 'delayed' || comm.delay_status === 'overdue') {
+			bannerBg = 'var(--aot-red-bg)';
+			bannerColor = 'var(--aot-red-ink)';
+			bannerBorder = '#EF4444';
+			bannerTitle = comm.is_delivered
+				? `⚠️ ${__('Delivery Delayed by')} ${comm.delay_days} ${__('Days')}`
+				: `⚠️ ${__('Order Overdue by')} ${comm.delay_days} ${__('Days')}`;
+			bannerSub = comm.is_delivered
+				? `${__('Committed Date')}: <strong>${commDateFmt}</strong> &bull; ${__('Delivered on')}: <strong>${dnPostFmt}</strong>`
+				: `${__('Committed Date was')} <strong>${commDateFmt}</strong>. ${__('Pending Delivery Note creation.')}`;
+		} else if (comm.delay_status === 'on_time') {
+			bannerBg = 'var(--aot-green-bg)';
+			bannerColor = 'var(--aot-green-ink)';
+			bannerBorder = '#10B981';
+			bannerTitle = `✓ ${__('Delivered on Time')}`;
+			bannerSub = `${__('Committed Date')}: <strong>${commDateFmt}</strong> &bull; ${__('Delivered on')}: <strong>${dnPostFmt}</strong>`;
+		} else if (comm.delay_status === 'early') {
+			bannerBg = 'var(--aot-green-bg)';
+			bannerColor = 'var(--aot-green-ink)';
+			bannerBorder = '#10B981';
+			bannerTitle = `✓ ${__('Delivered Early by')} ${Math.abs(comm.delay_days)} ${__('Days')}`;
+			bannerSub = `${__('Committed Date')}: <strong>${commDateFmt}</strong> &bull; ${__('Delivered on')}: <strong>${dnPostFmt}</strong>`;
+		} else if (comm.delay_status === 'due_today') {
+			bannerBg = 'var(--aot-amber-bg)';
+			bannerColor = 'var(--aot-amber-ink)';
+			bannerBorder = '#F59E0B';
+			bannerTitle = `🔔 ${__('Commitment Due Today')}`;
+			bannerSub = `${__('Expected delivery on or before today')} (<strong>${commDateFmt}</strong>).`;
+		} else {
+			bannerBg = 'var(--aot-accent-soft)';
+			bannerColor = 'var(--aot-accent)';
+			bannerBorder = '#3B82F6';
+			bannerTitle = `⏱️ ${__('On Schedule')} (${comm.delay_text || __('On track')})`;
+			bannerSub = `${__('Commitment Date')}: <strong>${commDateFmt}</strong>.`;
+		}
+
+		const delayColor = (comm.delay_status === 'delayed' || comm.delay_status === 'overdue')
+			? '#DC2626'
+			: (comm.delay_status === 'on_time' || comm.delay_status === 'early')
+				? '#16A34A'
+				: '#2563EB';
+
+		$container.html(`
+			<div class="aot-commitment-banner" style="background:${bannerBg}; color:${bannerColor}; border:1px solid ${bannerBorder}; border-radius:10px; padding:12px 16px; margin-bottom:14px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+				<div>
+					<div style="font-size:14px; font-weight:800;">${bannerTitle}</div>
+					<div style="font-size:12px; opacity:0.9; margin-top:2px;">${bannerSub}</div>
+				</div>
+				${comm.so_name ? `
+					<div>
+						<a href="javascript:void(0)" class="aot-doc-link aot-mini-pill" data-doctype="Sales Order" data-name="${frappe.utils.escape_html(comm.so_name)}" style="background:#FFFFFF; color:var(--aot-ink); font-size:11.5px; font-weight:700; text-decoration:none; padding:4px 10px; border:1px solid var(--aot-line);">
+							${frappe.utils.escape_html(comm.so_name)}
+						</a>
+					</div>
+				` : ''}
+			</div>
+
+			<div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px;">
+				<!-- 1. Sales Order Date Card -->
+				<div class="aot-commitment-card" style="background:#FFFFFF; border:1px solid var(--aot-line); border-top:3px solid #0284C7; border-radius:9px; padding:14px 16px;">
+					<div style="font-size:11px; font-weight:700; color:#0284C7; text-transform:uppercase; margin-bottom:4px; letter-spacing:0.3px;">${__('Sales Order Date')}</div>
+					<div style="font-size:17px; font-weight:800; color:var(--aot-ink);">${soDateFmt || `<span style="color:var(--aot-ink-faint); font-weight:500;">—</span>`}</div>
+					<div style="font-size:11.5px; color:var(--aot-ink-soft); margin-top:4px;">${__('Transaction date of SO')}</div>
+				</div>
+
+				<!-- 2. Sales Order Due Date (Labeled Commitment Date) -->
+				<div class="aot-commitment-card" style="background:#FFFFFF; border:1px solid var(--aot-line); border-top:3px solid #2563EB; border-radius:9px; padding:14px 16px;">
+					<div style="font-size:11px; font-weight:700; color:#2563EB; text-transform:uppercase; margin-bottom:4px; letter-spacing:0.3px;">${__('Commitment Date')}</div>
+					<div style="font-size:17px; font-weight:800; color:var(--aot-ink);">${commDateFmt || `<span style="color:var(--aot-ink-faint); font-weight:500;">—</span>`}</div>
+					<div style="font-size:11.5px; color:var(--aot-ink-soft); margin-top:4px;">${__('Sales Order Due Date')}</div>
+				</div>
+
+				<!-- 3. Sales Invoice Date (Posting Date) -->
+				<div class="aot-commitment-card" style="background:#FFFFFF; border:1px solid var(--aot-line); border-top:3px solid #7C3AED; border-radius:9px; padding:14px 16px;">
+					<div style="font-size:11px; font-weight:700; color:#7C3AED; text-transform:uppercase; margin-bottom:4px; letter-spacing:0.3px;">${__('Sales Invoice Date')}</div>
+					<div style="font-size:17px; font-weight:800; color:var(--aot-ink);">
+						${siPostFmt ? siPostFmt : `<span style="color:var(--aot-ink-faint); font-size:14px; font-weight:600;">${__('Pending Invoice')}</span>`}
+					</div>
+					<div style="font-size:11.5px; color:var(--aot-ink-soft); margin-top:4px;">
+						${comm.si_name ? `
+							<a href="javascript:void(0)" class="aot-doc-link" data-doctype="Sales Invoice" data-name="${frappe.utils.escape_html(comm.si_name)}" style="color:var(--aot-accent); text-decoration:none; font-weight:600;">
+								${frappe.utils.escape_html(comm.si_name)}
+							</a>
+						` : __('No Sales Invoice posted yet')}
+					</div>
+				</div>
+
+				<!-- 4. Delivery Note Date -->
+				<div class="aot-commitment-card" style="background:#FFFFFF; border:1px solid var(--aot-line); border-top:3px solid #059669; border-radius:9px; padding:14px 16px;">
+					<div style="font-size:11px; font-weight:700; color:#059669; text-transform:uppercase; margin-bottom:4px; letter-spacing:0.3px;">${__('Delivery Note Date')}</div>
+					<div style="font-size:17px; font-weight:800; color:var(--aot-ink);">
+						${dnPostFmt ? dnPostFmt : `<span style="color:var(--aot-ink-faint); font-size:14px; font-weight:600;">${__('Pending Delivery')}</span>`}
+					</div>
+					<div style="font-size:11.5px; color:var(--aot-ink-soft); margin-top:4px;">
+						${comm.dn_name ? `
+							<a href="javascript:void(0)" class="aot-doc-link" data-doctype="Delivery Note" data-name="${frappe.utils.escape_html(comm.dn_name)}" style="color:var(--aot-accent); text-decoration:none; font-weight:600;">
+								${frappe.utils.escape_html(comm.dn_name)}
+							</a>
+						` : __('No Delivery Note posted yet')}
+					</div>
+				</div>
+
+				<!-- 5. Delay Days -->
+				<div class="aot-commitment-card" style="background:#FFFFFF; border:1px solid var(--aot-line); border-top:3px solid ${delayColor}; border-radius:9px; padding:14px 16px;">
+					<div style="font-size:11px; font-weight:700; color:${delayColor}; text-transform:uppercase; margin-bottom:4px; letter-spacing:0.3px;">${__('Delay Days')}</div>
+					<div style="font-size:17px; font-weight:800; color:${delayColor};">
+						${comm.delay_days > 0 ? '+' + comm.delay_days + ' ' + __('Days') : comm.delay_days < 0 ? comm.delay_days + ' ' + __('Days') : '0 ' + __('Days')}
+					</div>
+					<div style="font-size:11.5px; color:var(--aot-ink-soft); margin-top:4px;">${comm.delay_text || __('No delay')}</div>
+				</div>
+			</div>
+
+			${comm.si_list && comm.si_list.length > 1 ? `
+				<div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--aot-line);">
+					<div style="font-size:11px; font-weight:700; color:var(--aot-ink-soft); text-transform:uppercase; margin-bottom:8px;">
+						${__('All Linked Sales Invoices')} (${comm.si_list.length})
+					</div>
+					<div style="display:flex; flex-wrap:wrap; gap:8px;">
+						${comm.si_list.map(si => `
+							<div class="aot-mini-pill" style="background:#FBFBFD; border:1px solid var(--aot-line); padding:6px 10px; font-size:12px; display:inline-flex; align-items:center; gap:6px;">
+								<a href="javascript:void(0)" class="aot-doc-link" data-doctype="Sales Invoice" data-name="${frappe.utils.escape_html(si.name)}" style="color:var(--aot-accent); font-weight:700; text-decoration:none;">${frappe.utils.escape_html(si.name)}</a>
+								<span style="color:var(--aot-ink-faint);">&bull;</span>
+								<span>${si.posting_date ? frappe.datetime.str_to_user(si.posting_date) : ''}</span>
+								<span class="aot-mini-pill" style="background:var(--aot-green-bg); color:var(--aot-green-ink); font-size:10px; font-weight:700; padding:2px 6px;">${frappe.utils.escape_html(si.status || 'Submitted')}</span>
+							</div>
+						`).join('')}
+					</div>
+				</div>
+			` : ''}
+
+			${comm.dn_list && comm.dn_list.length > 1 ? `
+				<div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--aot-line);">
+					<div style="font-size:11px; font-weight:700; color:var(--aot-ink-soft); text-transform:uppercase; margin-bottom:8px;">
+						${__('All Linked Delivery Notes')} (${comm.dn_list.length})
+					</div>
+					<div style="display:flex; flex-wrap:wrap; gap:8px;">
+						${comm.dn_list.map(dn => `
+							<div class="aot-mini-pill" style="background:#FBFBFD; border:1px solid var(--aot-line); padding:6px 10px; font-size:12px; display:inline-flex; align-items:center; gap:6px;">
+								<a href="javascript:void(0)" class="aot-doc-link" data-doctype="Delivery Note" data-name="${frappe.utils.escape_html(dn.name)}" style="color:var(--aot-accent); font-weight:700; text-decoration:none;">${frappe.utils.escape_html(dn.name)}</a>
+								<span style="color:var(--aot-ink-faint);">&bull;</span>
+								<span>${dn.posting_date ? frappe.datetime.str_to_user(dn.posting_date) : ''}</span>
+								<span class="aot-mini-pill" style="background:var(--aot-green-bg); color:var(--aot-green-ink); font-size:10px; font-weight:700; padding:2px 6px;">${frappe.utils.escape_html(dn.status || 'Submitted')}</span>
+							</div>
+						`).join('')}
+					</div>
+				</div>
+			` : ''}
+		`);
+
+		$container.find('.aot-doc-link').off('click.aotlink').on('click.aotlink', (e) => {
+			const $t = $(e.currentTarget);
+			const dt = $t.data('doctype');
+			const dn = $t.data('name');
+			if (dt && dn) {
+				this.open_doc_modal(dt, dn);
+			}
+		});
+	}
+
+	render_shipping_details(shippingList) {
+		const $container = this.$wrap.find('.aot-shipping-container').empty();
+		if (!shippingList || !shippingList.length) {
+			$container.html(`
+				<div style="padding:22px; text-align:center; color:var(--aot-ink-faint); background:#FBFBFD; border:1px dashed var(--aot-line); border-radius:10px;">
+					<div style="font-size:13.5px; font-weight:700; color:var(--aot-ink); margin-bottom:4px;">${__('No Sales Invoice Generated Yet')}</div>
+					<div style="font-size:12px;">${__('Bill of Lading / AWB and Compliance Information will appear once a Sales Invoice is created for this AO.')}</div>
+				</div>
+			`);
+			return;
+		}
+
+		const isMulti = shippingList.length > 1;
+
+		// Overall BL status calculation
+		const hasMissing = shippingList.some(si => si.bl_status === 'missing');
+		const allExw = shippingList.every(si => si.bl_status === 'not_applicable');
+
+		let blBadge = '';
+		let noticeHtml = '';
+
+		if (hasMissing) {
+			blBadge = `<span class="aot-mini-pill" style="background:var(--aot-amber-bg); color:var(--aot-amber-ink); font-weight:700; font-size:11px; padding:3px 9px;">${__('Missing BL/AWB')}</span>`;
+			noticeHtml = `
+				<div style="margin-top:10px; font-size:12px; color:var(--aot-amber-ink); background:var(--aot-amber-bg); padding:9px 13px; border-radius:7px; border-left:3px solid #D97706; display:flex; align-items:flex-start; gap:8px;">
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-top:1px; flex-shrink:0;"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+					<div>
+						<div><strong>${__('Bill of Lading/AWB information is missing.')}</strong></div>
+						<div style="font-size:11px; opacity:0.9; margin-top:2px;">${__('Not applicable for Incoterms Ex Works or FOB shipments.')}</div>
+					</div>
+				</div>
+			`;
+		} else if (allExw) {
+			blBadge = `<span class="aot-mini-pill" style="background:var(--aot-gray-bg); color:var(--aot-gray-ink); font-weight:700; font-size:11px; padding:3px 9px;">${__('BL/AWB Not Applicable')}</span>`;
+			noticeHtml = `
+				<div style="margin-top:10px; font-size:12px; color:var(--aot-ink-soft); background:var(--aot-gray-bg); padding:8px 12px; border-radius:7px; display:flex; align-items:center; gap:6px;">
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+					<span><strong>${__('Note')}:</strong> ${__('Not applicable for Incoterms Ex Works or FOB shipments.')}</span>
+				</div>
+			`;
+		} else {
+			blBadge = `<span class="aot-mini-pill" style="background:var(--aot-green-bg); color:var(--aot-green-ink); font-weight:700; font-size:11px; padding:3px 9px;">${__('BL/AWB Provided')}</span>`;
+			noticeHtml = `
+				<div style="margin-top:10px; font-size:12px; color:var(--aot-green-ink); background:var(--aot-green-bg); padding:8px 12px; border-radius:7px; display:flex; align-items:center; gap:6px;">
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+					<span>${__('Bill of Lading / AWB details are recorded.')}</span>
+				</div>
+			`;
+		}
+
+		// Helper to render No & Date rows inside each card
+		const renderCardTable = (title, color, extractFn) => {
+			const rows = shippingList.map((si) => {
+				const data = extractFn(si);
+				const noVal = (data.no || '').trim();
+				const dateVal = data.date ? frappe.datetime.str_to_user(data.date) : '';
+				return {
+					invoice: si.name,
+					no: noVal,
+					date: dateVal,
+				};
+			});
+
+			const hasAnyVal = rows.some(r => r.no || r.date);
+
+			let contentHtml = '';
+			if (!hasAnyVal) {
+				contentHtml = `
+					<div style="font-size:13.5px; color:var(--aot-ink-faint); font-weight:500; margin-top:8px; padding:4px 0;">
+						${__('Not Entered')}
+					</div>
+				`;
+			} else {
+				contentHtml = `
+					<div style="margin-top:8px;">
+						<div style="display:flex; justify-content:space-between; align-items:center; font-size:10.5px; font-weight:700; color:var(--aot-ink-faint); text-transform:uppercase; border-bottom:1px solid var(--aot-line); padding-bottom:5px; margin-bottom:4px; letter-spacing:0.3px;">
+							<span>${__('No')}</span>
+							<span>${__('Date')}</span>
+						</div>
+						${rows.map(r => `
+							<div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px dashed var(--aot-line-soft); font-size:13.5px;">
+								<span style="font-weight:700; color:var(--aot-ink); word-break:break-all;">
+									${r.no ? frappe.utils.escape_html(r.no) : `<span style="color:var(--aot-ink-faint); font-weight:400;">—</span>`}
+								</span>
+								<span style="font-weight:700; color:var(--aot-ink); white-space:nowrap; margin-left:14px;">
+									${r.date ? frappe.utils.escape_html(r.date) : `<span style="color:var(--aot-ink-faint); font-weight:400;">—</span>`}
+								</span>
+							</div>
+						`).join('')}
+					</div>
+				`;
+			}
+
+			return `
+				<div class="aot-shipping-subcard" style="background:#FBFBFD; border:1px solid var(--aot-line); ${color ? `border-top:3px solid ${color};` : ''} border-radius:9px; padding:12px 14px;">
+					<div style="font-size:10.5px; font-weight:700; ${color ? `color:${color};` : 'color:var(--aot-ink-soft);'} text-transform:uppercase; letter-spacing:0.3px;">
+						${title}
+					</div>
+					${contentHtml}
+				</div>
+			`;
+		};
+
+		$container.html(`
+			<div class="aot-shipping-card" style="background:#FFFFFF; border:1px solid var(--aot-line); border-radius:11px; padding:16px 18px; margin-bottom:14px;">
+				<div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; padding-bottom:12px; border-bottom:1px solid var(--aot-line);">
+					<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+						<span style="font-weight:800; font-size:14px; color:var(--aot-ink);">
+							${__('Related Sales Invoice(s)')}:
+						</span>
+						${shippingList.map(si => {
+							const postDateFmt = si.posting_date ? frappe.datetime.str_to_user(si.posting_date) : '';
+							return `
+								<span class="aot-mini-pill" style="background:#FBFBFD; border:1px solid var(--aot-line); padding:4px 9px; font-size:12px; display:inline-flex; align-items:center; gap:6px;">
+									<a href="javascript:void(0)" class="aot-doc-link" data-doctype="Sales Invoice" data-name="${frappe.utils.escape_html(si.name)}" style="color:var(--aot-accent); font-weight:700; text-decoration:none;">${frappe.utils.escape_html(si.name)}</a>
+									${postDateFmt ? `<span style="color:var(--aot-ink-faint);">&bull;</span><span>${postDateFmt}</span>` : ''}
+									${si.incoterm ? `<span class="aot-mini-pill" style="background:var(--aot-accent-soft); color:var(--aot-accent); font-size:10px; font-weight:800; padding:1px 6px;">${frappe.utils.escape_html(si.incoterm)}</span>` : ''}
+								</span>
+							`;
+						}).join('')}
+					</div>
+					<div>
+						${blBadge}
+					</div>
+				</div>
+
+				${noticeHtml}
+
+				<!-- BL / AWB and Shipping Bill Cards Grid -->
+				<div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(260px, 1fr)); gap:12px; margin-top:14px;">
+					${renderCardTable(__('BL / AWB No'), '#2563EB', (si) => ({ no: si.bl_no, date: si.bl_date }))}
+					${renderCardTable(__('Shipping Bill No'), '#0D9488', (si) => ({ no: si.shipping_bill_number, date: si.shipping_bill_date }))}
+				</div>
+
+				<!-- Certification & Compliance Details -->
+				<div style="margin-top:16px; padding-top:12px; border-top:1px solid var(--aot-line);">
+					<div style="font-size:11px; font-weight:700; color:var(--aot-ink-soft); text-transform:uppercase; margin-bottom:8px; letter-spacing:0.4px;">
+						${__('Certification & Compliance Details')}
+					</div>
+					<div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:10px;">
+						${renderCardTable(__('Certificate of Origin'), null, (si) => ({ no: si.cerfticate_of_origin_no, date: si.cerfticate_of_origin_date }))}
+						${renderCardTable(__('Insurance Policy'), null, (si) => ({ no: si.insurance_no, date: si.insurance_date }))}
+						${renderCardTable(__('Conformity Certificate (COC)'), null, (si) => ({ no: si.conformity_certificate_no, date: si.conformity_certificate_date }))}
+						${renderCardTable(__('BSC / ECTN Certificate'), null, (si) => ({ no: si.bscectn_certificate_no, date: si.bscectn_certificate_date }))}
+					</div>
+				</div>
+			</div>
+		`);
+
+		$container.find('.aot-doc-link').off('click.aotlink').on('click.aotlink', (e) => {
+			const $t = $(e.currentTarget);
+			const dt = $t.data('doctype');
+			const dn = $t.data('name');
+			if (dt && dn) {
+				this.open_doc_modal(dt, dn);
+			}
 		});
 	}
 
@@ -1218,12 +1750,42 @@ class AOTracker {
 
 		// Standard document view
 		this.$wrap.find('.aot-modal-items-label').text(__('Items in this document'));
-		const stats = [
+		let stats = [
 			[__('Status'), `<span class="aot-mini-pill" style="background:${bg};color:${ink};">${frappe.utils.escape_html(d.status || '')}</span>`, true],
 			[__('Reference AO'), frappe.utils.escape_html(d.project || '')],
 			[__('Items'), (d.items || []).length],
 			[__('Total Qty'), format_number(d.total_qty || 0)]
 		];
+
+		if (d.is_sales_invoice) {
+			const dbkBadge = d.drawback_received ?
+				`<span class="aot-mini-pill" style="background:var(--aot-green-bg);color:var(--aot-green-ink);font-size:10.5px;font-weight:700;padding:2px 7px;">${__('Received')}</span>` :
+				`<span class="aot-mini-pill" style="background:var(--aot-amber-bg);color:var(--aot-amber-ink);font-size:10.5px;font-weight:700;padding:2px 7px;">${__('Pending')}</span>`;
+			const igstBadge = d.igst_received ?
+				`<span class="aot-mini-pill" style="background:var(--aot-green-bg);color:var(--aot-green-ink);font-size:10.5px;font-weight:700;padding:2px 7px;">${__('Received')}</span>` :
+				`<span class="aot-mini-pill" style="background:var(--aot-amber-bg);color:var(--aot-amber-ink);font-size:10.5px;font-weight:700;padding:2px 7px;">${__('Pending')}</span>`;
+
+			let blDisplay = '—';
+			if (d.bl_no) {
+				blDisplay = `${frappe.utils.escape_html(d.bl_no)}${d.bl_date ? ' (' + frappe.datetime.str_to_user(d.bl_date) + ')' : ''}`;
+			} else if (d.is_exw_or_fob) {
+				blDisplay = `<span style="color:var(--aot-ink-faint); font-weight:500;">${__('N/A (Ex Works / FOB)')}</span>`;
+			} else {
+				blDisplay = `<span class="aot-mini-pill" style="background:var(--aot-amber-bg);color:var(--aot-amber-ink);font-size:10.5px;font-weight:700;padding:2px 7px;">${__('Missing BL/AWB')}</span>`;
+			}
+
+			stats = [
+				[__('Status'), `<span class="aot-mini-pill" style="background:${bg};color:${ink};">${frappe.utils.escape_html(d.status || '')}</span>`, true],
+				[__('Incoterm'), frappe.utils.escape_html(d.incoterm || '—')],
+				[__('BL / AWB'), blDisplay, true],
+				[__('Net Total'), format_currency((d.net_total !== undefined && d.net_total !== null) ? d.net_total : (d.base_net_total || d.grand_total || 0), d.currency)],
+				[__('Duty Drawback'), `${format_currency(d.total_duty_drawback || 0)} ${dbkBadge}`, true],
+				[__('IGST Refund'), `${format_currency(d.total_igst_amount || 0)} ${igstBadge}`, true],
+				[__('Customer'), frappe.utils.escape_html(d.customer || '')],
+				[__('Posting Date'), frappe.utils.escape_html(d.posting_date || '')]
+			];
+		}
+
 		this.$wrap.find('.aot-modal-stats').html(stats.map(([label, value, isHtml]) => `
 			<div class="aot-modal-stat">
 				<div class="aot-modal-stat-label">${label}</div>
@@ -1280,11 +1842,27 @@ class AOTracker {
 		} else {
 			rows.forEach((d) => {
 				const [bg, ink] = this.tone(d.status);
+				let extraPills = '';
+				if (d.doctype === 'Sales Invoice') {
+					if (d.drawback_received) {
+						extraPills += `<span class="aot-mini-pill" style="background:var(--aot-green-bg);color:var(--aot-green-ink);font-size:10px;padding:2px 6px;">DBK: Recv</span>`;
+					} else if (flt(d.total_duty_drawback) > 0) {
+						extraPills += `<span class="aot-mini-pill" style="background:var(--aot-amber-bg);color:var(--aot-amber-ink);font-size:10px;padding:2px 6px;">DBK: Pend</span>`;
+					}
+					if (d.igst_received) {
+						extraPills += `<span class="aot-mini-pill" style="background:var(--aot-green-bg);color:var(--aot-green-ink);font-size:10px;padding:2px 6px;">IGST: Recv</span>`;
+					} else if (flt(d.total_igst_amount) > 0) {
+						extraPills += `<span class="aot-mini-pill" style="background:var(--aot-amber-bg);color:var(--aot-amber-ink);font-size:10px;padding:2px 6px;">IGST: Pend</span>`;
+					}
+				}
 				$rows.append(`
 					<div class="aot-doclist-row" data-doctype="${frappe.utils.escape_html(d.doctype)}" data-name="${frappe.utils.escape_html(d.name)}">
 						<span class="aot-doclist-dot" style="background:${color || 'var(--aot-accent)'};"></span>
 						<span class="aot-doclist-name">${frappe.utils.escape_html(d.name)}</span>
-						<span class="aot-mini-pill" style="background:${bg};color:${ink};">${frappe.utils.escape_html(d.status || '')}</span>
+						<span style="display:inline-flex; align-items:center; gap:4px; margin-left:auto; margin-right:8px;">
+							<span class="aot-mini-pill" style="background:${bg};color:${ink};">${frappe.utils.escape_html(d.status || '')}</span>
+							${extraPills}
+						</span>
 						<span class="aot-doclist-arrow">${frappe.utils.icon('right', 'xs')}</span>
 					</div>
 				`);
@@ -1358,7 +1936,9 @@ class AOTracker {
 		}
 		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:nth-child(even){ background:#191c26; }
 		.ao-tracker-wrap[data-theme="dark"] .aot-doc-card.empty,
-		.ao-tracker-wrap[data-theme="dark"] .aot-stat-card{ background:#171922; }
+		.ao-tracker-wrap[data-theme="dark"] .aot-stat-card,
+		.ao-tracker-wrap[data-theme="dark"] .aot-shipping-card,
+		.ao-tracker-wrap[data-theme="dark"] .aot-shipping-subcard{ background:#171922; }
 		.ao-tracker-wrap[data-theme="dark"] .aot-modal-backdrop,
 		.ao-tracker-wrap[data-theme="dark"] .aot-doclist-backdrop{ background:rgba(0,0,0,.6); }
 		.ao-tracker-wrap[data-theme="dark"] .aot-doclist-row{ background:#171922; }
