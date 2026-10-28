@@ -1,16 +1,20 @@
 {
  "content": null,
- "creation": "2026-09-14 09:11:38.478029",
+ "creation": "2026-10-07 12:22:35.820390",
  "docstatus": 0,
  "doctype": "Page",
  "idx": 0,
- "modified": "2026-09-14 09:11:38.478029",
+ "modified": "2026-10-22 18:56:41.461090",
  "modified_by": "Administrator",
  "module": "Jasma",
  "name": "document-dashboard",
  "owner": "Administrator",
  "page_name": "document-dashboard",
- "roles": [],
+ "roles": [
+  {
+   "role": "System Manager"
+  }
+ ],
  "script": null,
  "standard": "Yes",
  "style": null,

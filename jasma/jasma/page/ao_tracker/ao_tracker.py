@@ -218,9 +218,163 @@ def is_matching_status(status_value, status_filter):
 	elif sf == "closed":
 		return s == "closed"
 	elif sf == "ongoing":
-		# ongoing: Show all which is not in Completed, Closed, and On Hold
-		return s not in ("completed", "closed") and ("hold" not in s)
-	return True
+		# ongoing: Sales Order status is To Deliver and Bill, To Bill, To Deliver (or To Delivered and Billed)
+		return (
+			s in (
+				"to deliver and bill",
+				"to delivered and billed",
+				"to bill",
+				"to deliver",
+				"to pay",
+			)
+			or s.startswith("to ")
+			or (s not in ("completed", "closed", "draft", "cancelled") and "hold" not in s)
+		)
+	return s == sf
+
+
+def normalize_mode_of_transport(val):
+	if not val:
+		return ""
+	v = str(val).strip().upper()
+	if "AIR" in v:
+		return "Air"
+	if "ROAD" in v:
+		return "Road"
+	if "TRAIN" in v or "RAIL" in v:
+		return "Rail"
+	if "SEA" in v or "SHIP" in v or "OCEAN" in v or "VESSEL" in v:
+		return "Ship"
+	return str(val).strip()
+
+
+def get_ao_terms_and_payment(so_name, si_name=None, dn_name=None):
+	"""Resolves Incoterm, Mode of Transport, and Mode of Payment for an AO.
+	Rule: If Sales Invoice is created, fetch from Sales Invoice.
+	If missing or no Sales Invoice, fall back to Delivery Note / Sales Order.
+	"""
+	incoterm = ""
+	mode_of_transport = ""
+	mode_of_payment = ""
+
+	# 1. Fetch from Sales Invoice if present
+	if si_name:
+		si_fields = ["name"]
+		if field_exists("Sales Invoice", "incoterm"):
+			si_fields.append("incoterm")
+		if field_exists("Sales Invoice", "shipping_terms"):
+			si_fields.append("shipping_terms")
+		if field_exists("Sales Invoice", "mode_of_transport"):
+			si_fields.append("mode_of_transport")
+		if field_exists("Sales Invoice", "pre_carriage_by"):
+			si_fields.append("pre_carriage_by")
+		if field_exists("Sales Invoice", "mode_of_payment"):
+			si_fields.append("mode_of_payment")
+		if field_exists("Sales Invoice", "payment_terms_template"):
+			si_fields.append("payment_terms_template")
+
+		si_data = frappe.db.get_value("Sales Invoice", si_name, si_fields, as_dict=True) or {}
+		incoterm = (si_data.get("incoterm") or si_data.get("shipping_terms") or "").strip()
+		mode_of_transport = normalize_mode_of_transport(si_data.get("mode_of_transport") or si_data.get("pre_carriage_by"))
+		mode_of_payment = (si_data.get("mode_of_payment") or "").strip()
+
+		# Check Sales Invoice Payment child table (standard POS/SI payments)
+		if not mode_of_payment and doctype_installed("Sales Invoice Payment"):
+			mop = frappe.db.get_value("Sales Invoice Payment", {"parent": si_name}, "mode_of_payment")
+			if mop:
+				mode_of_payment = str(mop).strip()
+
+		# Check Payment Schedule child table for Sales Invoice
+		if not mode_of_payment and doctype_installed("Payment Schedule") and field_exists("Payment Schedule", "mode_of_payment"):
+			mop = frappe.db.get_value(
+				"Payment Schedule",
+				{"parent": si_name, "parenttype": "Sales Invoice"},
+				"mode_of_payment"
+			)
+			if mop:
+				mode_of_payment = str(mop).strip()
+
+		# Fallback to payment_terms_template from SI
+		if not mode_of_payment and si_data.get("payment_terms_template"):
+			mode_of_payment = str(si_data.get("payment_terms_template")).strip()
+
+		# Fallback to Payment Entry linked to this Sales Invoice
+		if not mode_of_payment and doctype_installed("Payment Entry Reference") and doctype_installed("Payment Entry"):
+			pe_name = frappe.db.get_value(
+				"Payment Entry Reference",
+				{"reference_doctype": "Sales Invoice", "reference_name": si_name, "docstatus": 1},
+				"parent"
+			)
+			if pe_name and field_exists("Payment Entry", "mode_of_payment"):
+				pe_mop = frappe.db.get_value("Payment Entry", pe_name, "mode_of_payment")
+				if pe_mop:
+					mode_of_payment = str(pe_mop).strip()
+
+	# 2. Check Delivery Note for mode_of_transport / incoterm if still missing
+	if dn_name and (not incoterm or not mode_of_transport):
+		dn_fields = ["name"]
+		if not incoterm and field_exists("Delivery Note", "incoterm"):
+			dn_fields.append("incoterm")
+		if not incoterm and field_exists("Delivery Note", "shipping_terms"):
+			dn_fields.append("shipping_terms")
+		if not mode_of_transport and field_exists("Delivery Note", "mode_of_transport"):
+			dn_fields.append("mode_of_transport")
+		if not mode_of_transport and field_exists("Delivery Note", "pre_carriage_by"):
+			dn_fields.append("pre_carriage_by")
+		if len(dn_fields) > 1:
+			dn_data = frappe.db.get_value("Delivery Note", dn_name, dn_fields, as_dict=True) or {}
+			if not incoterm:
+				incoterm = str(dn_data.get("incoterm") or dn_data.get("shipping_terms") or "").strip()
+			if not mode_of_transport:
+				mode_of_transport = normalize_mode_of_transport(dn_data.get("mode_of_transport") or dn_data.get("pre_carriage_by"))
+
+	# 3. Fallback to Sales Order (if missing incoterm, mode_of_transport, or mode_of_payment)
+	if so_name and (not incoterm or not mode_of_transport or not mode_of_payment):
+		so_fields = ["name"]
+		if not incoterm and field_exists("Sales Order", "incoterm"):
+			so_fields.append("incoterm")
+		if not incoterm and field_exists("Sales Order", "shipping_terms"):
+			so_fields.append("shipping_terms")
+		if not mode_of_transport and field_exists("Sales Order", "mode_of_transport"):
+			so_fields.append("mode_of_transport")
+		if not mode_of_transport and field_exists("Sales Order", "pre_carriage_by"):
+			so_fields.append("pre_carriage_by")
+		if not mode_of_payment and field_exists("Sales Order", "mode_of_payment"):
+			so_fields.append("mode_of_payment")
+		if not mode_of_payment and field_exists("Sales Order", "payment_terms_template"):
+			so_fields.append("payment_terms_template")
+
+		so_data = frappe.db.get_value("Sales Order", so_name, so_fields, as_dict=True) or {}
+		if not incoterm:
+			incoterm = str(so_data.get("incoterm") or so_data.get("shipping_terms") or "").strip()
+		if not mode_of_transport:
+			mode_of_transport = normalize_mode_of_transport(so_data.get("mode_of_transport") or so_data.get("pre_carriage_by"))
+
+		if not mode_of_payment:
+			if so_data.get("mode_of_payment"):
+				mode_of_payment = str(so_data.get("mode_of_payment")).strip()
+			elif doctype_installed("Payment Schedule") and field_exists("Payment Schedule", "mode_of_payment"):
+				mop = frappe.db.get_value(
+					"Payment Schedule",
+					{"parent": so_name, "parenttype": "Sales Order"},
+					"mode_of_payment"
+				)
+				if mop:
+					mode_of_payment = str(mop).strip()
+			if not mode_of_payment and so_data.get("payment_terms_template"):
+				mode_of_payment = str(so_data.get("payment_terms_template")).strip()
+			if not mode_of_payment and doctype_installed("Payment Entry Reference") and doctype_installed("Payment Entry"):
+				pe_name = frappe.db.get_value(
+					"Payment Entry Reference",
+					{"reference_doctype": "Sales Order", "reference_name": so_name, "docstatus": 1},
+					"parent"
+				)
+				if pe_name and field_exists("Payment Entry", "mode_of_payment"):
+					pe_mop = frappe.db.get_value("Payment Entry", pe_name, "mode_of_payment")
+					if pe_mop:
+						mode_of_payment = str(pe_mop).strip()
+
+	return incoterm or "", mode_of_transport or "", mode_of_payment or ""
 
 
 @frappe.whitelist()
@@ -236,6 +390,38 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, st
 	# NEW: Customer no longer comes from Project.customer — it's read from
 	# the linked Sales Order instead (Project.customer can be blank/stale
 	# even once a Sales Order with its own customer exists).
+	# Only include projects that have a submitted Sales Order matching the status filter
+	so_filters = {"project": ["is", "set"], "docstatus": 1}
+	if status and status.strip().lower() not in ("all", ""):
+		sf = status.strip().lower()
+		if sf == "ongoing":
+			so_filters["status"] = ["in", ["To Deliver and Bill", "To Delivered and Billed", "To Bill", "To Deliver", "To Pay"]]
+		elif sf in ("on hold", "hold", "on_hold"):
+			so_filters["status"] = "On Hold"
+		elif sf == "completed":
+			so_filters["status"] = ["in", ["Completed", "Closed"]]
+		elif sf == "closed":
+			so_filters["status"] = "Closed"
+
+	if sales_order:
+		so_filters["name"] = ["like", "%{0}%".format(sales_order)]
+
+	so_projects = set(frappe.get_all(
+		"Sales Order",
+		filters=so_filters,
+		pluck="project",
+	))
+
+	if not so_projects:
+		return []
+
+	filters["name"] = ["in", list(so_projects)]
+	if project:
+		matched_projects = [p for p in so_projects if project.lower() in p.lower()]
+		if not matched_projects:
+			return []
+		filters["name"] = ["in", matched_projects]
+
 	projects = frappe.get_all(
 		"Project",
 		filters=filters,
@@ -243,22 +429,6 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, st
 		order_by="creation desc",
 		limit_page_length=frappe.utils.cint(limit) or 200,
 	)
-
-	# Only include projects that have a submitted Sales Order
-	so_projects = set(frappe.get_all(
-		"Sales Order",
-		filters={"project": ["is", "set"], "docstatus": 1},
-		pluck="project",
-	))
-	projects = [p for p in projects if p.name in so_projects]
-
-	if sales_order:
-		matching = set(frappe.get_all(
-			"Sales Order",
-			filters={"project": ["is", "set"], "name": ["like", "%{0}%".format(sales_order)], "docstatus": 1},
-			pluck="project",
-		))
-		projects = [p for p in projects if p.name in matching]
 
 	result = []
 	for p in projects:
@@ -280,6 +450,7 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, st
 		delay_status = "on_schedule"
 		delay_text = ""
 
+		so_status = ""
 		if so_doc:
 			so_vals = frappe.db.get_value(
 				"Sales Order", so_doc["name"],
@@ -287,6 +458,8 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, st
 				as_dict=True,
 			) or {}
 			customer = so_vals.get("customer")
+			so_status = (so_vals.get("status") or so_doc.get("status") or "").strip()
+			so_doc["status"] = so_status
 			so_date = str(so_vals.get("transaction_date") or "")
 			so_due_date = str(so_vals.get("delivery_date") or "")
 			so_posting_date = so_date
@@ -327,9 +500,17 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, st
 						delay_status = "on_schedule"
 						delay_text = _("{0}d left").format(abs(diff))
 
+		# Incoterm, Mode of Transport & Mode of Payment: fetch from Sales Invoice if created, else fallback to Sales Order
+		si_doc = docs.get("si")
+		dn_doc = docs.get("dn")
+		si_name = si_doc["name"] if si_doc else None
+		dn_name = dn_doc["name"] if dn_doc else None
+		so_name = so_doc["name"] if so_doc else None
+		incoterm, mode_of_transport, mode_of_payment = get_ao_terms_and_payment(so_name, si_name, dn_name)
+
 		pending_at, _stage_key = determine_pending(docs)
 
-		if status and not is_matching_status(pending_at, status):
+		if status and not is_matching_status(so_status, status):
 			continue
 
 		priority = determine_priority(docs)
@@ -337,7 +518,11 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, st
 			"project": p.name,
 			"project_name": p.project_name,
 			"so": so_doc["name"] if so_doc else None,
+			"so_status": so_status,
 			"customer": customer,
+			"incoterm": incoterm,
+			"mode_of_transport": mode_of_transport,
+			"mode_of_payment": mode_of_payment,
 			"date": str(getdate(p.creation)) if p.creation else None,
 			"pending_at": pending_at,
 			"priority": priority,
@@ -360,31 +545,24 @@ def get_ao_list(from_date=None, to_date=None, project=None, sales_order=None, st
 def determine_current_status(docs):
 	"""Returns the current status of the AO / Project based on:
 	1. If Sales Order is Completed, Closed, or On Hold -> Show that Sales Order status.
-	2. If Sales Invoice is created -> Consider as "Completed".
-	3. Only consider entries/documents shown in the table row:
+	2. Otherwise (ongoing), show the latest created document among the row entries
 	   (Sales Order, Material Request, Purchase Order, Subcontracting Order,
-	    Subcontracting Receipt, Purchase Receipt, Purchase Invoice, Delivery Note).
-	   JV (Journal Entry), Payment Entry, QC, etc. are excluded.
-	4. Otherwise, show the latest created document among the row entries.
+	    Subcontracting Receipt, Purchase Receipt, Purchase Invoice, Delivery Note, Sales Invoice).
 	"""
 	so = docs.get("so")
 	if so:
 		so_status = (so.get("status") or "").strip()
 		so_status_lower = so_status.lower()
-		if so_status_lower == "completed":
+		if so_status_lower in ("completed", "complete"):
 			return "Completed", "so"
 		elif so_status_lower == "closed":
 			return "Closed", "so"
-		elif so_status_lower in ("on hold", "hold"):
+		elif so_status_lower in ("on hold", "hold") or "hold" in so_status_lower:
 			return "On Hold", "so"
 
-	# If Sales Invoice is created, consider cycle as Completed
-	if docs.get("si"):
-		return "Completed", "si"
-
 	# Only consider document types shown in the table row
-	ROW_DOC_KEYS = ["so", "mr", "po", "sco", "scr", "pr", "pi", "dn"]
-	STAGE_ORDER = ["so", "mr", "po", "sco", "scr", "pr", "pi", "dn"]
+	ROW_DOC_KEYS = ["so", "mr", "po", "sco", "scr", "pr", "pi", "dn", "si"]
+	STAGE_ORDER = ["so", "mr", "po", "sco", "scr", "pr", "pi", "dn", "si"]
 
 	latest_key = None
 	latest_time = None
@@ -686,7 +864,7 @@ def get_project_shipping_details(project):
 		return []
 
 	target_fields = [
-		"name", "posting_date", "customer", "customer_name", "net_total", "base_net_total", "grand_total", "currency",
+		"posting_date", "customer", "customer_name", "net_total", "base_net_total", "grand_total", "currency",
 		"outstanding_amount", "paid_amount",
 		"incoterm", "bl_no", "bl_date", "bl_type",
 		"shipping_bill_number", "shipping_bill_date",
@@ -696,7 +874,7 @@ def get_project_shipping_details(project):
 		"bscectn_certificate_no", "bscectn_certificate_date",
 		"port_of_loading", "port_of_discharge", "final_destination", "country_of_destination",
 	]
-	avail_fields = [f for f in target_fields if field_exists("Sales Invoice", f)]
+	avail_fields = ["name"] + [f for f in target_fields if field_exists("Sales Invoice", f)]
 
 	si_records = frappe.get_all(
 		"Sales Invoice",
@@ -706,11 +884,20 @@ def get_project_shipping_details(project):
 	)
 
 	# Fetch payments allocated to these sales invoices
+	# Sources:
+	# 1. tabPayment Entry Reference (standard linked incoming Payment Entry)
+	# 2. tabSales Invoice Advance (advances linked directly during invoice creation)
+	# 3. tabJournal Entry Account (incoming payments / adjustments via Journal Entry)
 	si_payments = {}
+	recorded_pe_rows = set()
+	recorded_adv_rows = set()
+	recorded_vouchers = set()
+
 	if si_names and doctype_installed("Payment Entry Reference"):
 		pe_records = frappe.db.sql(
 			"""
-			SELECT per.reference_name, per.allocated_amount, pe.name as pe_name, pe.posting_date
+			SELECT per.name as per_name, per.reference_name, per.allocated_amount, pe.name as pe_name, pe.posting_date,
+				pe.paid_amount, pe.received_amount, pe.total_allocated_amount
 			FROM `tabPayment Entry Reference` per
 			INNER JOIN `tabPayment Entry` pe ON pe.name = per.parent
 			WHERE per.reference_doctype = 'Sales Invoice'
@@ -724,18 +911,83 @@ def get_project_shipping_details(project):
 			as_dict=True,
 		)
 		for pr in pe_records:
+			row_key = pr.per_name
+			if row_key in recorded_pe_rows:
+				continue
+			recorded_pe_rows.add(row_key)
+
 			ref = pr.reference_name
+			pe_name = pr.pe_name
+			recorded_vouchers.add((ref, pe_name))
+
 			if ref not in si_payments:
 				si_payments[ref] = {
 					"total_paid": 0.0,
 					"latest_date": str(pr.posting_date or ""),
 				}
-			si_payments[ref]["total_paid"] += flt(pr.allocated_amount)
+			allocated = flt(pr.allocated_amount)
+			total_allocated = flt(pr.total_allocated_amount)
+			paid = flt(pr.paid_amount) or flt(pr.received_amount)
+			if total_allocated > 0 and 0 < paid < total_allocated:
+				actual_received = allocated * (paid / total_allocated)
+			elif total_allocated > 0:
+				actual_received = allocated
+			else:
+				actual_received = paid or allocated
+
+			si_payments[ref]["total_paid"] += round(actual_received, 2)
 			if not si_payments[ref]["latest_date"] and pr.posting_date:
 				si_payments[ref]["latest_date"] = str(pr.posting_date)
 
+	if si_names and doctype_installed("Sales Invoice Advance"):
+		adv_records = frappe.db.sql(
+			"""
+			SELECT sia.name as sia_name, sia.parent as reference_name, sia.allocated_amount, sia.reference_name as pe_name,
+				pe.posting_date, pe.paid_amount, pe.received_amount, pe.total_allocated_amount
+			FROM `tabSales Invoice Advance` sia
+			LEFT JOIN `tabPayment Entry` pe ON pe.name = sia.reference_name AND pe.docstatus = 1
+			WHERE sia.parent IN %s
+				AND sia.docstatus = 1
+				AND sia.allocated_amount > 0
+			""",
+			(tuple(si_names),),
+			as_dict=True,
+		)
+		for ar in adv_records:
+			row_key = ar.sia_name
+			if row_key in recorded_adv_rows:
+				continue
+			recorded_adv_rows.add(row_key)
+
+			ref = ar.reference_name
+			pe_name = ar.pe_name
+			if (ref, pe_name) in recorded_vouchers:
+				continue
+
+			if ref not in si_payments:
+				si_payments[ref] = {
+					"total_paid": 0.0,
+					"latest_date": str(ar.posting_date or "") if ar.get("posting_date") else "",
+				}
+			allocated = flt(ar.allocated_amount)
+			total_allocated = flt(ar.get("total_allocated_amount") or 0)
+			paid = flt(ar.get("paid_amount") or 0) or flt(ar.get("received_amount") or 0)
+			if total_allocated > 0 and 0 < paid < total_allocated:
+				actual_received = allocated * (paid / total_allocated)
+			elif total_allocated > 0:
+				actual_received = allocated
+			else:
+				actual_received = paid or allocated
+
+			si_payments[ref]["total_paid"] += round(actual_received, 2)
+			if not si_payments[ref]["latest_date"] and ar.get("posting_date"):
+				si_payments[ref]["latest_date"] = str(ar.posting_date)
+
+
+
 	result = []
 	for r in si_records:
+		r_name = r.get("name")
 		incoterm = (r.get("incoterm") or "").strip()
 		incoterm_upper = incoterm.upper()
 		is_exw_or_fob = incoterm_upper in ("EXW", "EX WORKS", "EX-WORKS", "FOB", "FREE ON BOARD")
@@ -754,35 +1006,41 @@ def get_project_shipping_details(project):
 			bl_status = "missing"
 			bl_message = _("Bill of Lading/AWB information is missing.. Not applicable for Incoterms Ex Works or FOB shipments")
 
+		net_total = flt(r.get("net_total"))
 		grand_total = flt(r.get("grand_total"))
 		outstanding = flt(r.get("outstanding_amount"))
 
-		pmt_info = si_payments.get(r.name, {})
+		pmt_info = si_payments.get(r_name, {})
 		pe_paid = pmt_info.get("total_paid", 0.0)
 		pmt_date = pmt_info.get("latest_date", "")
 
+		# 1. Determine Payment Received against this Sales Invoice
 		if field_exists("Sales Invoice", "payment_received") and r.get("payment_received") is not None:
 			payment_received = flt(r.get("payment_received"))
 		elif pe_paid > 0:
 			payment_received = pe_paid
-		elif grand_total > outstanding:
-			payment_received = grand_total - outstanding
+		elif flt(r.get("paid_amount")) > 0:
+			payment_received = flt(r.get("paid_amount"))
 		else:
 			payment_received = 0.0
 
+		# 2. Determine Shortfall Amount based on Net Total:
+		# shortfall = net_total - payment_received
+		# (e.g. Net Total 50000, Received 40000 => Shortfall 10000)
 		if field_exists("Sales Invoice", "shortfall_amount") and r.get("shortfall_amount") is not None:
 			shortfall_amount = flt(r.get("shortfall_amount"))
 		elif field_exists("Sales Invoice", "shortfall") and r.get("shortfall") is not None:
 			shortfall_amount = flt(r.get("shortfall"))
 		else:
-			shortfall_amount = max(0.0, grand_total - payment_received)
+			diff = net_total - payment_received
+			shortfall_amount = max(0.0, round(diff, 2)) if diff > 0.005 else 0.0
 
 		result.append({
-			"name": r.name,
+			"name": r_name,
 			"posting_date": str(r.get("posting_date") or ""),
 			"customer": r.get("customer_name") or r.get("customer") or "",
-			"net_total": flt(r.get("net_total")),
-			"base_net_total": flt(r.get("base_net_total") or r.get("net_total")),
+			"net_total": net_total,
+			"base_net_total": flt(r.get("base_net_total") or net_total),
 			"grand_total": grand_total,
 			"outstanding_amount": outstanding,
 			"payment_received": payment_received,
@@ -2088,6 +2346,7 @@ def get_doc_summary(doctype, name):
 			"is_payment": True,
 			"party": doc.get("party_name") or doc.get("party"),
 			"paid_amount": flt(doc.get("paid_amount") or doc.get("received_amount")),
+			"currency": doc.get("paid_from_account_currency") or doc.get("paid_to_account_currency") or "INR",
 			"payment_type": doc.get("payment_type"),
 			"mode_of_payment": doc.get("mode_of_payment"),
 			"posting_date": str(doc.get("posting_date") or ""),

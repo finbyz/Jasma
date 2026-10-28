@@ -476,7 +476,7 @@ class AOTracker {
 							<th style="width:36px;"><input type="checkbox" class="aot-select-all"></th>
 							<th>${__('AO Number')}</th>
 							<th class="aot-so-col">${__('Sales Order')}</th>
-							<th>${__('Customer')}</th>
+							<th class="aot-customer-col">${__('Customer')}</th>
 							<th>${__('Status')}</th>
 							${this.doc_columns.map(c => `
 								<th class="aot-grp-start" style="border-top:3px solid ${c.color};">${__(c.label)}</th>
@@ -889,7 +889,18 @@ class AOTracker {
 				${ao.so ? `<span class="aot-doc-link aot-so-link" data-doctype="Sales Order" data-name="${frappe.utils.escape_html(ao.so)}">${frappe.utils.escape_html(ao.so)}</span>` : ''}
 				${ao.commitment_date ? `<div style="font-size:10.5px; color:var(--aot-ink-soft); margin-top:2px;" title="${__('Commitment / Due Date')}">${__('Due')}: <strong style="color:var(--aot-ink);">${frappe.datetime.str_to_user(ao.commitment_date)}</strong></div>` : ''}
 			</td>
-			<td class="aot-customer-cell" title="${frappe.utils.escape_html(ao.customer || '')}">${ao.customer ? `<span class="aot-doc-link aot-customer-link" data-doctype="Customer" data-name="${frappe.utils.escape_html(ao.customer)}">${frappe.utils.escape_html(ao.customer)}</span>` : ''}</td>
+			<td class="aot-customer-cell" title="${frappe.utils.escape_html([ao.customer, ao.incoterm ? ('Incoterm: ' + ao.incoterm) : '', ao.mode_of_transport ? ('Transport: ' + ao.mode_of_transport) : '', ao.mode_of_payment ? ('Payment: ' + ao.mode_of_payment) : ''].filter(Boolean).join(' | '))}">
+				<div class="aot-customer-name" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+					${ao.customer ? `<span class="aot-doc-link aot-customer-link" data-doctype="Customer" data-name="${frappe.utils.escape_html(ao.customer)}">${frappe.utils.escape_html(ao.customer)}</span>` : ''}
+				</div>
+				${(ao.incoterm || ao.mode_of_transport || ao.mode_of_payment) ? `
+					<div class="aot-customer-sub">
+						${ao.incoterm ? `<span class="aot-incoterm-tag" title="${__('Incoterm: {0}', [ao.incoterm])}">${frappe.utils.escape_html(ao.incoterm)}</span>` : ''}
+						${ao.mode_of_transport ? `<span class="aot-mot-tag" title="${__('Mode of Transport: {0}', [ao.mode_of_transport])}">${frappe.utils.escape_html(ao.mode_of_transport)}</span>` : ''}
+						${ao.mode_of_payment ? `<span class="aot-mop-tag" title="${__('Mode of Payment: {0}', [ao.mode_of_payment])}">${frappe.utils.escape_html(ao.mode_of_payment)}</span>` : ''}
+					</div>
+				` : ''}
+			</td>
 			<td class="aot-pending-cell">${ao.pending_at ? `<span class="aot-pending-chip ${this.status_chip_class(ao.pending_at)}" title="${frappe.utils.escape_html(ao.pending_at)}">${frappe.utils.escape_html(this.format_pending_at(ao.pending_at))}</span>` : ''}</td>
 			${this.doc_columns.map(col => docPair(col)).join('')}
 			<td class="aot-grp-start aot-priority-col">
@@ -1127,10 +1138,12 @@ class AOTracker {
 				const cur = si.currency || o.currency || 'INR';
 				const pmt = flt(si.payment_received);
 				const short = flt(si.shortfall_amount);
+				const netTot = flt(si.net_total);
 				const pDate = si.payment_date ? frappe.datetime.str_to_user(si.payment_date) : '';
 				return {
 					invoice: si.name,
 					currency: cur,
+					net_total: netTot,
 					payment_received: pmt,
 					payment_date: pDate,
 					shortfall_amount: short,
@@ -1162,20 +1175,24 @@ class AOTracker {
 							<span>${__('Shortfall Amount')}</span>
 						</div>
 						${rows.map((r, idx) => `
-							<div style="display:flex; justify-content:space-between; align-items:flex-start; padding:${rows.length > 1 ? '4px 0' : '6px 0'}; ${idx < rows.length - 1 ? 'border-bottom:1px dashed var(--aot-line-soft);' : ''}">
+							<div style="display:flex; justify-content:space-between; align-items:flex-start; padding:${rows.length > 1 ? '4px 0' : '6px 0'}; ${idx < rows.length - 1 ? 'border-bottom:1px dashed var(--aot-line-soft);' : ''}" title="${frappe.utils.escape_html([r.invoice ? `Invoice: ${r.invoice}` : '', r.net_total ? `Net Total: ${format_currency(r.net_total, r.currency)}` : '', `Received: ${format_currency(r.payment_received, r.currency)}`, `Shortfall: ${format_currency(r.shortfall_amount, r.currency)}`].filter(Boolean).join(' | '))}">
 								<div>
 									<div style="font-size:14.5px; font-weight:800; color:${r.payment_received > 0 ? 'var(--aot-green-ink)' : 'var(--aot-ink)'};">
 										${format_currency(r.payment_received, r.currency)}
 									</div>
-									${r.payment_date ? `<div style="font-size:10.5px; color:var(--aot-ink-soft); font-weight:600; margin-top:1px;">${r.payment_date}</div>` : ''}
+									<div style="font-size:10.5px; color:var(--aot-ink-soft); font-weight:600; margin-top:1px;">
+										${rows.length > 1 ? `<span class="aot-doc-link" data-doctype="Sales Invoice" data-name="${frappe.utils.escape_html(r.invoice)}">${frappe.utils.escape_html(r.invoice)}</span> ` : ''}${r.payment_date ? `${r.payment_date}` : ''}
+									</div>
 								</div>
 								<div style="text-align:right;">
 									<div style="font-size:14.5px; font-weight:800; color:${r.shortfall_amount > 0 ? '#DC2626' : 'var(--aot-green-ink)'};">
 										${format_currency(r.shortfall_amount, r.currency)}
 									</div>
-									<div style="font-size:10.5px; font-weight:700; margin-top:1px; color:${r.shortfall_amount > 0 ? '#DC2626' : 'var(--aot-green-ink)'};">
-										${r.shortfall_amount > 0 ? __('Pending') : __('Nil')}
-									</div>
+									${r.shortfall_amount > 0 ? '' : `
+										<div style="font-size:10.5px; font-weight:700; margin-top:1px; color:var(--aot-green-ink);">
+											${__('Nil')}
+										</div>
+									`}
 								</div>
 							</div>
 						`).join('')}
@@ -1680,7 +1697,7 @@ class AOTracker {
 			const stats = [
 				[__('Status'), `<span class="aot-mini-pill" style="background:${bg};color:${ink};">${frappe.utils.escape_html(d.status || '')}</span>`, true],
 				[__('Party'), frappe.utils.escape_html(d.party || '')],
-				[__('Amount'), format_currency(d.paid_amount || 0)],
+				[__('Amount'), format_currency(d.paid_amount || 0, d.currency)],
 				[__('Payment Type'), frappe.utils.escape_html(d.payment_type || d.mode_of_payment || '')]
 			];
 			this.$wrap.find('.aot-modal-stats').html(stats.map(([label, value, isHtml]) => `
@@ -1700,9 +1717,9 @@ class AOTracker {
 						<div class="aot-modal-item-row">
 							<div>
 								<div class="aot-fg-name">${frappe.utils.escape_html(ref.reference_doctype)}: <span class="aot-doc-link" data-doctype="${frappe.utils.escape_html(ref.reference_doctype)}" data-name="${frappe.utils.escape_html(ref.reference_name)}">${frappe.utils.escape_html(ref.reference_name)}</span></div>
-								<div class="aot-fg-code">${__('Total')}: ${format_currency(ref.total_amount || 0)}</div>
+								<div class="aot-fg-code">${__('Total')}: ${format_currency(ref.total_amount || 0, d.currency)}</div>
 							</div>
-							<div class="aot-modal-item-qty">${__('Allocated')}: ${format_currency(ref.allocated_amount || 0)}</div>
+							<div class="aot-modal-item-qty">${__('Allocated')}: ${format_currency(ref.allocated_amount || 0, d.currency)}</div>
 						</div>
 					`);
 				});
@@ -1916,22 +1933,26 @@ class AOTracker {
 		}
 		.ao-tracker-wrap[data-theme="dark"] .aot-status-table thead th:nth-child(1),
 		.ao-tracker-wrap[data-theme="dark"] .aot-status-table thead th:nth-child(2),
-		.ao-tracker-wrap[data-theme="dark"] .aot-status-table thead th:nth-child(3){
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table thead th:nth-child(3),
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table thead th:nth-child(4){
 			background:#1c1f2b; border-right-color:var(--aot-line);
 		}
 		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody td:nth-child(1),
 		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody td:nth-child(2),
-		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody td:nth-child(3){
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody td:nth-child(3),
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody td:nth-child(4){
 			background:#1c1f2b; border-right-color:var(--aot-line);
 		}
 		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:nth-child(even) td:nth-child(1),
 		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:nth-child(even) td:nth-child(2),
-		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:nth-child(even) td:nth-child(3){
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:nth-child(even) td:nth-child(3),
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:nth-child(even) td:nth-child(4){
 			background:#191c26;
 		}
 		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:hover td:nth-child(1),
 		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:hover td:nth-child(2),
-		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:hover td:nth-child(3){
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:hover td:nth-child(3),
+		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:hover td:nth-child(4){
 			background:#262a45;
 		}
 		.ao-tracker-wrap[data-theme="dark"] .aot-status-table tbody tr:nth-child(even){ background:#191c26; }
@@ -2091,7 +2112,7 @@ class AOTracker {
 			letter-spacing:.03em; padding:12px; border-bottom:1px solid var(--aot-line); white-space:nowrap;
 			background:#F3F5FC; position:sticky; top:0; z-index:10;
 		}
-		/* Frozen / Sticky columns: Checkbox, AO Number, Sales Order */
+		/* Frozen / Sticky columns: Checkbox, AO Number, Sales Order, Customer */
 		.ao-tracker-wrap .aot-status-table thead th:nth-child(1){
 			position:sticky; top:0; left:0; z-index:30; width:36px; min-width:36px; max-width:36px; background:#F3F5FC;
 		}
@@ -2106,28 +2127,36 @@ class AOTracker {
 		}
 		.ao-tracker-wrap .aot-status-table thead th:nth-child(3){
 			position:sticky; top:0; left:176px; z-index:30; width:160px; min-width:160px; max-width:160px; background:#F3F5FC;
-			box-shadow:3px 0 6px -2px rgba(0,0,0,0.08); border-right:1px solid var(--aot-line);
 		}
 		.ao-tracker-wrap .aot-status-table tbody td:nth-child(3){
 			position:sticky; left:176px; z-index:5; width:160px; min-width:160px; max-width:160px; background:#FFFFFF;
+		}
+		.ao-tracker-wrap .aot-status-table thead th:nth-child(4){
+			position:sticky; top:0; left:336px; z-index:30; width:180px; min-width:180px; max-width:180px; background:#F3F5FC;
+			box-shadow:3px 0 6px -2px rgba(0,0,0,0.08); border-right:1px solid var(--aot-line);
+		}
+		.ao-tracker-wrap .aot-status-table tbody td:nth-child(4){
+			position:sticky; left:336px; z-index:5; width:180px; min-width:180px; max-width:180px; background:#FFFFFF;
 			box-shadow:3px 0 6px -2px rgba(0,0,0,0.08); border-right:1px solid var(--aot-line);
 		}
 
 		/* Backgrounds for sticky columns across even & hover states */
 		.ao-tracker-wrap .aot-status-table tbody tr:nth-child(even) td:nth-child(1),
 		.ao-tracker-wrap .aot-status-table tbody tr:nth-child(even) td:nth-child(2),
-		.ao-tracker-wrap .aot-status-table tbody tr:nth-child(even) td:nth-child(3){
+		.ao-tracker-wrap .aot-status-table tbody tr:nth-child(even) td:nth-child(3),
+		.ao-tracker-wrap .aot-status-table tbody tr:nth-child(even) td:nth-child(4){
 			background:#FBFCFE;
 		}
 		.ao-tracker-wrap .aot-status-table tbody tr:hover td:nth-child(1),
 		.ao-tracker-wrap .aot-status-table tbody tr:hover td:nth-child(2),
-		.ao-tracker-wrap .aot-status-table tbody tr:hover td:nth-child(3){
+		.ao-tracker-wrap .aot-status-table tbody tr:hover td:nth-child(3),
+		.ao-tracker-wrap .aot-status-table tbody tr:hover td:nth-child(4){
 			background:var(--aot-accent-soft);
 		}
 
-		/* NEW: "Sales Order" column widened so SO numbers no longer clip
-		   or wrap awkwardly. */
+		/* NEW: "Sales Order" & "Customer" column sizing */
 		.ao-tracker-wrap .aot-so-col{ min-width:160px; }
+		.ao-tracker-wrap .aot-customer-col{ min-width:180px; }
 		/* NEW: the grey vertical divider that used to run down every body
 		   row between column groups (MR|PO|SCO|...) is gone — the colored
 		   3px bar under each group's header (set inline, see markup()) is
@@ -2139,7 +2168,12 @@ class AOTracker {
 		.ao-tracker-wrap .aot-ao-link{color:var(--aot-accent); font-weight:700; cursor:pointer; text-decoration:none; font-size:13px;}
 		.ao-tracker-wrap .aot-ao-link:hover{text-decoration:underline;}
 		.ao-tracker-wrap .aot-project-name{font-size:11px; color:var(--aot-ink-faint);}
-		.ao-tracker-wrap .aot-customer-cell{font-weight:500; color:var(--aot-ink-soft); max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+		.ao-tracker-wrap .aot-customer-cell{font-weight:500; color:var(--aot-ink-soft); max-width:180px; vertical-align:middle;}
+		.ao-tracker-wrap .aot-customer-sub{font-size:10.5px; color:var(--aot-ink-soft); margin-top:2px; display:flex; align-items:center; gap:4px; overflow:hidden; white-space:nowrap;}
+		.ao-tracker-wrap .aot-incoterm-tag{background:var(--aot-accent-soft); color:var(--aot-accent); font-weight:700; font-size:10px; padding:1px 5px; border-radius:4px; flex-shrink:0;}
+		.ao-tracker-wrap .aot-mot-tag{background:rgba(14, 165, 233, 0.12); color:#0284c7; font-weight:700; font-size:10px; padding:1px 5px; border-radius:4px; flex-shrink:0;}
+		.ao-tracker-wrap.dark-theme .aot-mot-tag, [data-theme="dark"] .ao-tracker-wrap .aot-mot-tag{background:rgba(14, 165, 233, 0.22); color:#38bdf8;}
+		.ao-tracker-wrap .aot-mop-tag{overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:500;}
 		.ao-tracker-wrap .aot-pending-cell{color:var(--aot-ink-soft); font-size:12.5px; max-width:200px;}
 		.ao-tracker-wrap .aot-pending-chip{display:inline-block; max-width:190px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:middle; background:var(--aot-amber-bg); color:var(--aot-amber-ink); padding:4px 10px; border-radius:999px; font-size:11.5px; font-weight:700;}
 		.ao-tracker-wrap .aot-pending-chip.aot-chip-completed{background:var(--aot-green-bg); color:var(--aot-green-ink);}

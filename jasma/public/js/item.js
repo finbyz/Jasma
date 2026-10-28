@@ -9,32 +9,71 @@ frappe.ui.form.on("Item", {
         });
     },
     refresh(frm) {
-        check_forecast_permission(function () {
-            render_export_forecast(frm);
-            render_quotation_forecast(frm);
-        });
-	},
-	item_code(frm) {
-        check_forecast_permission(function () {
-            render_export_forecast(frm);
-            render_quotation_forecast(frm);
-        });
-	}
+        handle_forecast_sections(frm);
+    },
+    item_code(frm) {
+        handle_forecast_sections(frm);
+    }
 });
 
-function check_forecast_permission(callback) {
-	if (frappe.boot.export_forecast_permission !== undefined) {
-		callback();
-		return;
-	}
+function handle_forecast_sections(frm) {
+    if (frm.is_new() || !frm.doc.item_code) {
+        frm.toggle_display("export_forcast", false);
+        frm.toggle_display("export_commited", false);
+        return;
+    }
 
-	frappe.call({
-		method: "jasma.jasma.doc_events.item.has_forecast_permission",
-		callback: function (r) {
-			frappe.boot.export_forecast_permission = !!r.message;
-			callback();
-		}
-	});
+    get_forecast_settings(function (settings) {
+        const show_committed = settings.export_commited !== false && settings.export_commited !== 0;
+        const show_forecast = settings.export_forcast !== false && settings.export_forcast !== 0;
+
+        frm.toggle_display("export_forcast", show_committed);
+        frm.toggle_display("export_commited", show_forecast);
+
+        if (show_committed) {
+            render_export_forecast(frm);
+        } else {
+            const field = frm.get_field("export_forcast");
+            if (field && field.$wrapper) {
+                field.$wrapper.empty();
+            }
+        }
+
+        if (show_forecast) {
+            render_quotation_forecast(frm);
+        } else {
+            const field = frm.get_field("export_commited");
+            if (field && field.$wrapper) {
+                field.$wrapper.empty();
+            }
+        }
+    });
+}
+
+function get_forecast_settings(callback) {
+    frappe.call({
+        method: "jasma.jasma.doc_events.item.get_forecast_settings",
+        callback: function (r) {
+            const settings = r.message || {
+                export_commited: 1,
+                export_forcast: 1,
+                can_view_details: false
+            };
+            frappe.boot.export_forecast_permission = !!settings.can_view_details;
+            callback(settings);
+        }
+    });
+}
+
+function check_forecast_permission(callback) {
+    if (frappe.boot.export_forecast_permission !== undefined) {
+        callback();
+        return;
+    }
+
+    get_forecast_settings(function () {
+        callback();
+    });
 }
 
 // Shared styles injected once
@@ -161,7 +200,9 @@ function render_export_forecast(frm) {
 		args: { item_code: frm.doc.item_code },
 		callback: function (r) {
 			const data = r.message || { rows: [], total_pending_qty: 0, total_committed_qty: 0 };
-			const wrapper = frm.get_field("export_forcast").$wrapper;
+			const field = frm.get_field("export_forcast");
+			if (!field || !field.$wrapper) return;
+			const wrapper = field.$wrapper;
 
 			if (!data.rows.length) {
 				wrapper.html(`
@@ -232,7 +273,9 @@ function render_quotation_forecast(frm) {
 		args: { item_code: frm.doc.item_code },
 		callback: function (r) {
 			const data = r.message || { rows: [], total_pending_qty: 0, total_committed_qty: 0 };
-			const wrapper = frm.get_field("export_commited").$wrapper;
+			const field = frm.get_field("export_commited");
+			if (!field || !field.$wrapper) return;
+			const wrapper = field.$wrapper;
 
 			if (!data.rows.length) {
 				wrapper.html(`

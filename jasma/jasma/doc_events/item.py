@@ -1,6 +1,6 @@
 
 import frappe
-from frappe.utils import flt
+from frappe.utils import cint, flt
 
 
 def validate(self,method):
@@ -230,6 +230,10 @@ def get_export_forecast_data(item_code):
 	if not frappe.db.get_value("Item", item_code, "is_stock_item"):
 		return {"rows": [], "total_pending_qty": 0, "total_committed_qty": 0}
 
+	export_commited = frappe.db.get_single_value("Selling Settings", "export_commited")
+	if export_commited is not None and not cint(export_commited):
+		return {"rows": [], "total_pending_qty": 0, "total_committed_qty": 0}
+
 	ratio_map = _get_component_ratio_map(item_code)
 
 	# ratio 1 for the item itself (direct), plus indirect parents
@@ -292,6 +296,10 @@ def get_quotation_forecast_data(item_code):
 	if not frappe.db.get_value("Item", item_code, "is_stock_item"):
 		return {"rows": [], "total_pending_qty": 0, "total_committed_qty": 0}
 
+	export_forcast = frappe.db.get_single_value("Selling Settings", "export_forcast")
+	if export_forcast is not None and not cint(export_forcast):
+		return {"rows": [], "total_pending_qty": 0, "total_committed_qty": 0}
+
 	ratio_map = _get_component_ratio_map(item_code)
 
 	fg_ratio_map = {item_code: 1.0}
@@ -350,6 +358,29 @@ def get_quotation_forecast_data(item_code):
 
 
 # jasma/jasma/doc_events/item.py
+
+@frappe.whitelist()
+def get_forecast_settings():
+	"""
+	Returns settings for export forecast and committed widgets:
+	- export_commited: whether Export Committed widget is enabled (default True)
+	- export_forcast: whether Export Forecast widget is enabled (default True)
+	- can_view_details: whether current user has permission to view detail breakdown
+	"""
+	role = frappe.db.get_single_value(
+		"Selling Settings", "export_and_commited_qty_permission_role"
+	)
+	can_view = bool(role and role in frappe.get_roles(frappe.session.user))
+
+	export_commited = frappe.db.get_single_value("Selling Settings", "export_commited")
+	export_forcast = frappe.db.get_single_value("Selling Settings", "export_forcast")
+
+	return {
+		"export_commited": bool(cint(export_commited) if export_commited is not None else 1),
+		"export_forcast": bool(cint(export_forcast) if export_forcast is not None else 1),
+		"can_view_details": can_view,
+	}
+
 
 @frappe.whitelist()
 def has_forecast_permission():
